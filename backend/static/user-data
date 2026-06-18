@@ -1,0 +1,13 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: fr_FR.UTF-8
+  keyboard:
+    layout: fr
+  storage:
+    layout:
+      name: direct
+  identity:
+    hostname: pc-cobaye-01
+    username: osiris
+    password: "$6$rounds=4096$vS2XbK9.E93$T023N4dZ6R9EwQGf9eRzY1oV2B2S1D4X7k8gM3vP9zL9xQ2wE4r1tZyUoI6pA7sD8fG9hJ0kKlLmMnNoOpPqQrR"

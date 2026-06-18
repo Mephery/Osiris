@@ -1,0 +1,203 @@
+/* ─── Fond : navy profond + grille de points ─────────────────────────────── */
+body {
+  background-color: #070b14;
+  background-image:
+    radial-gradient(ellipse 65% 45% at 8% 0%, rgba(37, 99, 235, 0.09) 0%, transparent 70%),
+    radial-gradient(rgba(30, 50, 80, 0.55) 1px, transparent 1px);
+  background-size: 100% 100%, 24px 24px;
+  background-attachment: fixed;
+}
+
+/* ─── Logo ───────────────────────────────────────────────────────────────── */
+.osiris-icon {
+  font-size: 1.2rem;
+  line-height: 1;
+  animation: osiris-breathe 5s ease-in-out infinite;
+}
+@keyframes osiris-breathe {
+  0%, 100% { opacity: 0.55; }
+  50%       { opacity: 1;    }
+}
+
+/* ─── Tableau ────────────────────────────────────────────────────────────── */
+.osiris-table-wrap {
+  background: rgba(7, 11, 20, 0.96);
+  border: 1px solid rgb(22, 34, 56);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.osiris-row {
+  border-bottom: 1px solid rgba(22, 34, 56, 0.7);
+  border-left: 3px solid transparent;
+  transition: border-left-color 0.12s ease, background-color 0.12s ease;
+}
+.osiris-row:last-child { border-bottom: none; }
+.osiris-row:hover {
+  border-left-color: rgb(37, 99, 235);
+  background-color: rgba(37, 99, 235, 0.04);
+}
+
+/* ─── Badges statut déploiement ─────────────────────────────────────────── */
+.osiris-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.65rem;
+  font-family: monospace;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.osiris-status-badge::before {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.osiris-status--pending    { color: rgb(100, 116, 139); }
+.osiris-status--pending::before    { background: rgb(71, 85, 105); }
+.osiris-status--deploying  { color: rgb(147, 197, 253); animation: osiris-breathe 1.5s ease-in-out infinite; }
+.osiris-status--deploying::before  { background: rgb(59, 130, 246); animation: osiris-breathe 1.5s ease-in-out infinite; }
+.osiris-status--deployed   { color: rgb(134, 239, 172); }
+.osiris-status--deployed::before   { background: rgb(34, 197, 94); }
+.osiris-status--failed     { color: rgb(252, 165, 165); }
+.osiris-status--failed::before     { background: rgb(239, 68, 68); }
+
+/* ─── Boutons d'action dans le tableau ───────────────────────────────────── */
+.osiris-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  font-size: 0.75rem;
+  color: rgb(71, 85, 105);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: color 0.12s, background-color 0.12s;
+  border: none;
+  background: transparent;
+}
+.osiris-action-btn:hover { color: rgb(226, 232, 240); background: rgba(255,255,255,0.05); }
+.osiris-action-btn--danger:hover { color: rgb(252, 165, 165); background: rgba(239, 68, 68, 0.1); }
+
+/* ─── Variante danger pour la modale ────────────────────────────────────── */
+.osiris-modal--danger { border-color: rgba(185, 28, 28, 0.3); }
+.osiris-btn--danger   { background: rgb(185, 28, 28); }
+.osiris-btn--danger:hover { background: rgb(220, 38, 38); }
+
+/* ─── Badges OS ──────────────────────────────────────────────────────────── */
+.osiris-os-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.7rem;
+  font-family: monospace;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.osiris-os-badge::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.osiris-os-badge--windows { color: rgb(147, 197, 253); }
+.osiris-os-badge--windows::before { background: rgb(59, 130, 246); }
+.osiris-os-badge--ubuntu  { color: rgb(253, 186, 116); }
+.osiris-os-badge--ubuntu::before  { background: rgb(249, 115, 22); }
+.osiris-os-badge--unknown { color: rgb(148, 163, 184); }
+.osiris-os-badge--unknown::before { background: rgb(71, 85, 105); }
+
+/* ─── Boutons ────────────────────────────────────────────────────────────── */
+.osiris-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  background: rgb(37, 99, 235);
+  color: #fff;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.13s;
+  letter-spacing: 0.025em;
+}
+.osiris-btn:hover { background: rgb(59, 130, 246); }
+
+.osiris-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 14px;
+  background: transparent;
+  color: rgb(100, 116, 139);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  transition: color 0.13s;
+}
+.osiris-btn-ghost:hover { color: rgb(226, 232, 240); }
+
+/* ─── Champs de formulaire ───────────────────────────────────────────────── */
+.osiris-input {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgb(30, 41, 59);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 0.875rem;
+  color: rgb(241, 245, 249);
+  transition: border-color 0.13s;
+  outline: none;
+}
+.osiris-input:focus { border-color: rgb(37, 99, 235); }
+.osiris-input::placeholder { color: rgb(45, 58, 78); }
+
+/* ─── Overlay ────────────────────────────────────────────────────────────── */
+.osiris-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  z-index: 50;
+  background: rgba(3, 6, 14, 0.88);
+}
+
+/* ─── Modales ────────────────────────────────────────────────────────────── */
+.osiris-modal {
+  background: #090e1c;
+  border: 1px solid rgb(22, 34, 56);
+  border-radius: 6px;
+  width: 100%;
+  max-width: 460px;
+  overflow: hidden;
+}
+.osiris-modal--amber { border-color: rgba(217, 119, 6, 0.35); }
+
+.osiris-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  border-bottom: 1px solid rgb(22, 34, 56);
+}
+
+/* ─── Affichage mot de passe ─────────────────────────────────────────────── */
+.osiris-password-box {
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(180, 100, 0, 0.2);
+  border-radius: 4px;
+  padding: 16px;
+}

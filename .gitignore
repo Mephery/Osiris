@@ -1,0 +1,47 @@
+# ==========================================
+#          OSIRIS - ROOT GITIGNORE          
+# ==========================================
+
+# SECURE & SECRETS
+.env
+*.env
+backend/.env
+frontend/.env
+*_backup.sql
+*.dump
+backend/backups/
+
+# PYTHON
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/venv/
+.pytest_cache/
+
+# NODE / FRONTEND
+**/node_modules/
+**/dist/
+**/dist-ssr/
+
+# BINAIRES LOURDS & APPLIANCE
+**/*.iso
+**/*.img
+**/static/vmlinuz
+**/static/initrd
+**/static/wimboot
+srv/tftp/ipxe.efi
+
+# CERTIFICATS TLS (pour le jour où on ajoute HTTPS)
+*.pem
+*.key
+*.crt
+*.p12
+
+# LOGS
+*.log
+
+# SYSTÈME & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
