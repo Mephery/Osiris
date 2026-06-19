@@ -11,19 +11,32 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from sqlmodel import SQLModel, Session, select
-from models import Machine, engine, init_db
+
+from models import Machine, Organization, User, engine, init_db
+from auth import (
+    hash_password, verify_password, create_token,
+    get_current_user, require_admin
+)
+
+
+# ── Démarrage ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    _seed_admin()
     yield
 
 app = FastAPI(lifespan=lifespan)
 
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+
 OSIRIS_BASE_URL = os.environ.get("OSIRIS_BASE_URL", "http://10.0.0.1:8000")
 OSIRIS_IP       = os.environ.get("OSIRIS_IP", "192.168.1.18")
-API_KEY         = os.environ.get("API_KEY", "")
 SSH_PUBKEY      = os.environ.get("OSIRIS_SSH_PUBKEY", "").strip()
+ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL", "admin@osiris.local")
+ADMIN_PASSWORD  = os.environ.get("ADMIN_PASSWORD", "changeme")
 
 allowed_origins = os.environ.get("ALLOWED_ORIGINS", "").split(",")
 
@@ -37,14 +50,9 @@ app.add_middleware(
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ── Auth ───────────────────────────────────────────────────────────────────────
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-def require_api_key(key: str = Depends(api_key_header)):
-    if not API_KEY or key != API_KEY:
-        raise HTTPException(status_code=401, detail="Clé API manquante ou invalide")
 
 # ── Validation MAC ─────────────────────────────────────────────────────────────
+
 MAC_REGEX = re.compile(r'^[0-9a-f]{12}$')
 
 def validate_mac(raw: str) -> str:
@@ -53,20 +61,154 @@ def validate_mac(raw: str) -> str:
         raise HTTPException(status_code=400, detail=f"Format MAC invalide : {raw!r}")
     return clean
 
-# ── Schéma de mise à jour partielle ───────────────────────────────────────────
+
+# ── Schémas de requête ─────────────────────────────────────────────────────────
+
 class MachinePatch(SQLModel):
     hostname: Optional[str] = None
     client: Optional[str] = None
     os: Optional[str] = None
     ou: Optional[str] = None
+    organization_id: Optional[int] = None
+
+class LoginRequest(SQLModel):
+    email: str
+    password: str
+
+class PasswordChange(SQLModel):
+    current_password: str
+    new_password: str
+
+class OrgCreate(SQLModel):
+    name: str
+    slug: str
+
+class UserCreate(SQLModel):
+    email: str
+    password: str
+    role: str = "technician"
+
+
+# ── Admin par défaut au démarrage ──────────────────────────────────────────────
+
+def _seed_admin():
+    """Crée un admin par défaut si aucun utilisateur n'existe en base."""
+    with Session(engine) as session:
+        if session.exec(select(User)).first():
+            return
+        admin = User(
+            email=ADMIN_EMAIL,
+            hashed_password=hash_password(ADMIN_PASSWORD),
+            role="admin",
+        )
+        session.add(admin)
+        session.commit()
+        print(f"[OSIRIS] Admin créé : {ADMIN_EMAIL} — changez le mot de passe !")
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def read_root():
-    return {"status": "Osiris API is running v2026 with PostgreSQL"}
+    return {"status": "Osiris API v2026"}
 
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+
+@app.post("/auth/login")
+def login(body: LoginRequest):
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.email == body.email)).first()
+    if not user or not verify_password(body.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
+    token = create_token(user.id, user.role)
+    return {"access_token": token, "token_type": "bearer", "role": user.role, "email": user.email}
+
+
+@app.get("/auth/me")
+def me(current_user: User = Depends(get_current_user)):
+    return {"id": current_user.id, "email": current_user.email, "role": current_user.role}
+
+
+@app.patch("/auth/me/password")
+def change_password(body: PasswordChange, current_user: User = Depends(get_current_user)):
+    if not verify_password(body.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=401, detail="Mot de passe actuel incorrect")
+    with Session(engine) as session:
+        user = session.get(User, current_user.id)
+        user.hashed_password = hash_password(body.new_password)
+        session.add(user)
+        session.commit()
+    return {"detail": "Mot de passe mis à jour"}
+
+
+# ── Organisations ──────────────────────────────────────────────────────────────
+
+@app.get("/organizations", dependencies=[Depends(get_current_user)])
+def get_organizations():
+    with Session(engine) as session:
+        orgs = session.exec(select(Organization)).all()
+        return [{"id": o.id, "name": o.name, "slug": o.slug} for o in orgs]
+
+
+@app.post("/organizations", status_code=201, dependencies=[Depends(require_admin)])
+def create_organization(body: OrgCreate):
+    with Session(engine) as session:
+        if session.exec(select(Organization).where(Organization.slug == body.slug)).first():
+            raise HTTPException(status_code=400, detail="Ce slug est déjà utilisé")
+        org = Organization(name=body.name, slug=body.slug)
+        session.add(org)
+        session.commit()
+        session.refresh(org)
+        return {"id": org.id, "name": org.name, "slug": org.slug}
+
+
+@app.delete("/organizations/{org_id}", status_code=204, dependencies=[Depends(require_admin)])
+def delete_organization(org_id: int):
+    with Session(engine) as session:
+        org = session.get(Organization, org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organisation introuvable")
+        session.delete(org)
+        session.commit()
+
+
+# ── Utilisateurs ───────────────────────────────────────────────────────────────
+
+@app.get("/users", dependencies=[Depends(require_admin)])
+def get_users():
+    with Session(engine) as session:
+        users = session.exec(select(User)).all()
+        return [{"id": u.id, "email": u.email, "role": u.role} for u in users]
+
+
+@app.post("/users", status_code=201, dependencies=[Depends(require_admin)])
+def create_user(body: UserCreate):
+    if body.role not in ("admin", "technician"):
+        raise HTTPException(status_code=400, detail="Rôle invalide : admin ou technician")
+    with Session(engine) as session:
+        if session.exec(select(User).where(User.email == body.email)).first():
+            raise HTTPException(status_code=400, detail="Cet email est déjà utilisé")
+        user = User(email=body.email, hashed_password=hash_password(body.password), role=body.role)
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return {"id": user.id, "email": user.email, "role": user.role}
+
+
+@app.delete("/users/{user_id}", status_code=204, dependencies=[Depends(require_admin)])
+def delete_user(user_id: int, current_user: User = Depends(require_admin)):
+    if current_user.id == user_id:
+        raise HTTPException(status_code=400, detail="Vous ne pouvez pas supprimer votre propre compte")
+    with Session(engine) as session:
+        user = session.get(User, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+        session.delete(user)
+        session.commit()
+
+
+# ── Boot iPXE ──────────────────────────────────────────────────────────────────
 
 @app.get("/boot")
 def get_boot_script(mac: str | None = None):
@@ -85,10 +227,9 @@ def get_boot_script(mac: str | None = None):
             script += "echo ==================================================\n"
             script += "echo   BIENVENUE SUR OSIRIS RESEAU (LAB LABORATOIRE)   \n"
             script += "echo ==================================================\n"
-            script += f"echo [OSIRIS] Machine inconnue en BDD (MAC: {clean_mac}).\n"
-            script += "echo [OSIRIS] Boot standard sur le disque local dans 5 secondes...\n"
-            script += "sleep 5\n"
-            script += "exit\n"
+            script += f"echo [OSIRIS] Machine inconnue (MAC: {clean_mac}).\n"
+            script += "echo [OSIRIS] Boot local dans 5 secondes...\n"
+            script += "sleep 5\nexit\n"
             return Response(content=script, media_type="text/plain")
 
         machine.status = "deploying"
@@ -103,11 +244,11 @@ def get_boot_script(mac: str | None = None):
     script += f"echo [OSIRIS] Configuration trouvee pour {hostname} ({client})\n"
 
     if os_type == "windows":
-        script += "echo [OSIRIS] Chargement de l'environnement d'installation Windows 11...\n"
+        script += "echo [OSIRIS] Chargement Windows 11...\n"
         script += f"kernel {OSIRIS_BASE_URL}/static/wimboot\n"
         script += f"imgfetch {OSIRIS_BASE_URL}/unattend.xml?mac={clean_mac}\n"
     elif os_type == "ubuntu":
-        script += "echo [OSIRIS] Chargement de l'installateur automatique Ubuntu 22.04...\n"
+        script += "echo [OSIRIS] Chargement Ubuntu 22.04...\n"
         script += f"kernel {OSIRIS_BASE_URL}/static/vmlinuz initrd=initrd ip=dhcp autoinstall boot=casper netboot=nfs nfsroot={OSIRIS_IP}:/srv/nfs/ubuntu ds=nocloud-net;s={OSIRIS_BASE_URL}/cloud-init/{clean_mac}/\n"
         script += f"initrd {OSIRIS_BASE_URL}/static/initrd\n"
 
@@ -115,21 +256,21 @@ def get_boot_script(mac: str | None = None):
     return Response(content=script, media_type="text/plain")
 
 
+# ── Unattend Windows ───────────────────────────────────────────────────────────
+
 @app.get("/unattend.xml")
 def get_unattend_xml(mac: str):
     clean_mac = validate_mac(mac)
-
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
 
     if not machine:
         return Response(
             content="<?xml version='1.0' encoding='utf-8'?><error>Machine inconnue</error>",
-            media_type="application/xml",
-            status_code=404,
+            media_type="application/xml", status_code=404,
         )
 
-    xml_template = f"""<?xml version="1.0" encoding="utf-8"?>
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
     <settings pass="specialize">
         <component name="Microsoft-Windows-Shell-Setup">
@@ -145,30 +286,29 @@ def get_unattend_xml(mac: str):
     </settings>
 </unattend>
 """
-    return Response(content=xml_template, media_type="application/xml")
+    return Response(content=xml, media_type="application/xml")
 
+
+# ── Cloud-init Ubuntu ──────────────────────────────────────────────────────────
 
 @app.get("/cloud-init/{mac}/meta-data")
 def get_meta_data(mac: str):
     clean_mac = validate_mac(mac)
-
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
-
     if not machine:
         raise HTTPException(status_code=404, detail="Machine inconnue")
-
-    content = f"instance-id: osiris-{clean_mac}\nlocal-hostname: {machine.hostname}\n"
-    return Response(content=content, media_type="text/plain")
+    return Response(
+        content=f"instance-id: osiris-{clean_mac}\nlocal-hostname: {machine.hostname}\n",
+        media_type="text/plain",
+    )
 
 
 @app.get("/cloud-init/{mac}/user-data")
 def get_user_data(mac: str):
     clean_mac = validate_mac(mac)
-
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
-
     if not machine or not machine.password_hash:
         raise HTTPException(status_code=404, detail="Machine inconnue ou non configurée")
 
@@ -178,7 +318,6 @@ def get_user_data(mac: str):
         "    allow-pw: true\n"
         + (f"    authorized-keys:\n      - {SSH_PUBKEY}\n" if SSH_PUBKEY else "")
     )
-
     status_url = f"{OSIRIS_BASE_URL}/machines/{clean_mac}/status"
 
     user_data = (
@@ -201,13 +340,12 @@ def get_user_data(mac: str):
         "  late-commands:\n"
         f"    - curl -sf -X POST '{status_url}?status=deployed' || true\n"
     )
-
     return Response(content=user_data, media_type="text/plain")
 
 
 # ── CRUD machines ──────────────────────────────────────────────────────────────
 
-@app.post("/machines", status_code=201, dependencies=[Depends(require_api_key)])
+@app.post("/machines", status_code=201, dependencies=[Depends(get_current_user)])
 def create_machine(machine: Machine):
     clean_mac = validate_mac(machine.mac)
     machine.mac = clean_mac
@@ -223,37 +361,32 @@ def create_machine(machine: Machine):
         session.refresh(machine)
 
     return {
-        "id": machine.id,
-        "mac": machine.mac,
-        "client": machine.client,
-        "os": machine.os,
-        "hostname": machine.hostname,
-        "ou": machine.ou,
-        "status": machine.status,
+        "id": machine.id, "mac": machine.mac, "client": machine.client,
+        "os": machine.os, "hostname": machine.hostname, "ou": machine.ou,
+        "status": machine.status, "organization_id": machine.organization_id,
         "password": plaintext_password,
     }
 
 
-@app.get("/machines", dependencies=[Depends(require_api_key)])
-def get_all_machines():
+@app.get("/machines", dependencies=[Depends(get_current_user)])
+def get_all_machines(org_id: Optional[int] = None):
     with Session(engine) as session:
-        machines = session.exec(select(Machine)).all()
+        query = select(Machine)
+        if org_id is not None:
+            query = query.where(Machine.organization_id == org_id)
+        machines = session.exec(query).all()
         return [
             {
-                "id": m.id,
-                "mac": m.mac,
-                "client": m.client,
-                "os": m.os,
-                "hostname": m.hostname,
-                "ou": m.ou,
-                "status": m.status,
+                "id": m.id, "mac": m.mac, "client": m.client,
+                "os": m.os, "hostname": m.hostname, "ou": m.ou,
+                "status": m.status, "organization_id": m.organization_id,
                 "deployed_at": m.deployed_at.isoformat() if m.deployed_at else None,
             }
             for m in machines
         ]
 
 
-@app.patch("/machines/{mac}", dependencies=[Depends(require_api_key)])
+@app.patch("/machines/{mac}", dependencies=[Depends(get_current_user)])
 def update_machine(mac: str, patch: MachinePatch):
     clean_mac = validate_mac(mac)
     with Session(engine) as session:
@@ -268,11 +401,11 @@ def update_machine(mac: str, patch: MachinePatch):
         return {
             "id": machine.id, "mac": machine.mac, "client": machine.client,
             "os": machine.os, "hostname": machine.hostname, "ou": machine.ou,
-            "status": machine.status,
+            "status": machine.status, "organization_id": machine.organization_id,
         }
 
 
-@app.delete("/machines/{mac}", status_code=204, dependencies=[Depends(require_api_key)])
+@app.delete("/machines/{mac}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_machine(mac: str):
     clean_mac = validate_mac(mac)
     with Session(engine) as session:
@@ -285,7 +418,7 @@ def delete_machine(mac: str):
 
 @app.post("/machines/{mac}/status")
 def report_machine_status(mac: str, status: str):
-    """Appelé par la machine elle-même pendant l'installation (via curl dans user-data)."""
+    """Appelé par la machine elle-même via curl pendant l'installation."""
     clean_mac = validate_mac(mac)
     valid = {"pending", "deploying", "deployed", "failed"}
     if status not in valid:
