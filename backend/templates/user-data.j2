@@ -1,0 +1,31 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: {{ profile.locale }}
+  keyboard:
+    layout: {{ profile.keyboard }}
+  timezone: {{ profile.timezone }}
+  storage:
+    layout:
+      name: direct
+  identity:
+    hostname: {{ machine.hostname }}
+    username: {{ profile.default_user }}
+    hashed_passwd: '{{ machine.password_hash }}'
+  ssh:
+    install-server: true
+    allow-pw: true
+{% if ssh_pubkey %}
+    authorized-keys:
+      - {{ ssh_pubkey }}
+{% endif %}
+{% if packages %}
+  packages:
+{% for pkg in packages %}
+    - {{ pkg }}
+{% endfor %}
+{% endif %}
+  early-commands:
+    - curl -sf -X POST '{{ status_url }}?status=deploying' || true
+  late-commands:
+    - curl -sf -X POST '{{ status_url }}?status=deployed' || true

@@ -1,0 +1,46 @@
+# OSIRIS — Reverse proxy
+# Pour HTTPS local : remplace ":80" par "10.0.0.1" et ajoute "tls internal" dans le bloc
+
+:80 {
+    # ── Routes API → FastAPI ───────────────────────────────────────────────────
+    handle /auth/* {
+        reverse_proxy localhost:8000
+    }
+    handle /machines* {
+        reverse_proxy localhost:8000
+    }
+    handle /organizations* {
+        reverse_proxy localhost:8000
+    }
+    handle /users* {
+        reverse_proxy localhost:8000
+    }
+    handle /profiles* {
+        reverse_proxy localhost:8000
+    }
+    handle /images* {
+        reverse_proxy localhost:8000
+    }
+    handle /audit-logs* {
+        reverse_proxy localhost:8000
+    }
+    handle /boot* {
+        reverse_proxy localhost:8000
+    }
+    handle /cloud-init/* {
+        reverse_proxy localhost:8000
+    }
+    handle /static/* {
+        reverse_proxy localhost:8000
+    }
+    handle /ws/* {
+        reverse_proxy localhost:8000
+    }
+
+    # ── Frontend React SPA (attrape tout le reste) ─────────────────────────────
+    handle {
+        root * /opt/osiris/frontend/dist
+        try_files {path} /index.html
+        file_server
+    }
+}

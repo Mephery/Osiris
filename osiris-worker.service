@@ -1,0 +1,15 @@
+[Unit]
+Description=OSIRIS Worker ARQ (téléchargements ISO)
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+User=osiris-admin
+WorkingDirectory=/opt/osiris/backend
+Environment=PATH=/opt/osiris/backend/venv/bin
+ExecStart=/opt/osiris/backend/venv/bin/arq worker.WorkerSettings
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

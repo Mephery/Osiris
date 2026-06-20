@@ -1,0 +1,15 @@
+[Unit]
+Description=OSIRIS API (FastAPI + uvicorn)
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+User=osiris-admin
+WorkingDirectory=/opt/osiris/backend
+Environment=PATH=/opt/osiris/backend/venv/bin
+ExecStart=/opt/osiris/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -245,7 +245,7 @@ CREATE POLICY tenant_isolation ON machine
 
 **Endpoint `/machines/{mac}/status` sans auth** — appelé par la machine elle-même pendant l'install via `curl`. Une machine n'a pas de token JWT, donc cet endpoint est volontairement ouvert. La MAC est le seul identifiant. Acceptable sur réseau interne.
 
-**Rate limiting absent** — `POST /machines` peut être spammé. À ajouter avec `slowapi` si exposition publique.
+**Rate limiting** — limites en place sur les endpoints publics (`/auth/login` : 5/min, `/boot` : 30/min, `/machines/{mac}/status` : 10/min). Un attaquant patient avec plusieurs IPs peut contourner une limite par IP ; ce n'est qu'une couche parmi d'autres.
 
 
 ---

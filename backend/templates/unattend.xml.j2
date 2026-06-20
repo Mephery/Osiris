@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-Shell-Setup">
+            <ComputerName>{{ hostname }}</ComputerName>
+            <RegisteredOwner>{{ client }}</RegisteredOwner>
+            <TimeZone>{{ profile.timezone }}</TimeZone>
+        </component>
+        <component name="Microsoft-Windows-International-Core">
+            <InputLocale>{{ profile.locale }}</InputLocale>
+            <SystemLocale>{{ profile.locale }}</SystemLocale>
+            <UserLocale>{{ profile.locale }}</UserLocale>
+        </component>
+{% if profile.join_domain %}
+        <component name="Microsoft-Windows-UnattendedJoin">
+            <Identification>
+                <JoinDomain>{{ profile.domain }}</JoinDomain>
+                <MachineObjectOU>{{ ou }}</MachineObjectOU>
+            </Identification>
+        </component>
+{% endif %}
+    </settings>
+</unattend>
