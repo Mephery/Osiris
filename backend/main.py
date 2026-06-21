@@ -462,6 +462,13 @@ def get_boot_script(request: Request, mac: str | None = None):
             script += "sleep 5\nexit\n"
             return Response(content=script, media_type="text/plain")
 
+        # Machine déjà déployée → boot sur le disque local, pas de réinstall
+        if machine.status == "deployed":
+            script = "#!ipxe\n"
+            script += f"echo [OSIRIS] {machine.hostname} est deploye - boot local\n"
+            script += "exit\n"
+            return Response(content=script, media_type="text/plain")
+
         machine.status = "deploying"
         session.add(machine)
         session.commit()

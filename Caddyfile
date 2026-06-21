@@ -1,8 +1,17 @@
 # OSIRIS — Reverse proxy
-# Pour HTTPS local : remplace ":80" par "10.0.0.1" et ajoute "tls internal" dans le bloc
+#
+# Port 443 : interface web en HTTPS
+# Port 80  : routes iPXE (10.0.0.1) en HTTP pur, redirection HTTPS pour le reste
 
-:80 {
-    # ── Routes API → FastAPI ───────────────────────────────────────────────────
+# Désactive les redirections HTTP→HTTPS automatiques de Caddy (on les gère manuellement)
+{
+    auto_https disable_redirects
+}
+
+# ── HTTPS — interface admin (10.0.0.1 et IP de gestion) ───────────────────────
+https://10.0.0.1, https://192.168.1.18 {
+    tls /etc/caddy/certs/osiris.crt /etc/caddy/certs/osiris.key
+
     handle /auth/* {
         reverse_proxy localhost:8000
     }
@@ -24,6 +33,20 @@
     handle /audit-logs* {
         reverse_proxy localhost:8000
     }
+    handle /ws/* {
+        reverse_proxy localhost:8000
+    }
+
+    handle {
+        root * /opt/osiris/frontend/dist
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# ── HTTP 10.0.0.1 — routes iPXE (boot, cloud-init, fichiers statiques) ────────
+# Pas de redirection HTTPS : les machines en cours de déploiement n'ont pas le cert
+http://10.0.0.1 {
     handle /boot* {
         reverse_proxy localhost:8000
     }
@@ -33,14 +56,12 @@
     handle /static/* {
         reverse_proxy localhost:8000
     }
-    handle /ws/* {
+    handle /machines/* {
         reverse_proxy localhost:8000
     }
+}
 
-    # ── Frontend React SPA (attrape tout le reste) ─────────────────────────────
-    handle {
-        root * /opt/osiris/frontend/dist
-        try_files {path} /index.html
-        file_server
-    }
+# ── HTTP 192.168.1.18 — redirection vers HTTPS pour les navigateurs ────────────
+http://192.168.1.18 {
+    redir https://192.168.1.18{uri} 308
 }

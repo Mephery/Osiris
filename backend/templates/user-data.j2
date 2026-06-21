@@ -11,7 +11,7 @@ autoinstall:
   identity:
     hostname: {{ machine.hostname }}
     username: {{ profile.default_user }}
-    hashed_passwd: '{{ machine.password_hash }}'
+    password: '{{ machine.password_hash }}'
   ssh:
     install-server: true
     allow-pw: true

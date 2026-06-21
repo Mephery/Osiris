@@ -5,11 +5,15 @@
 # SECURE & SECRETS
 .env
 *.env
-backend/.env
-frontend/.env
+.env.*
+frontend/.env.*
 *_backup.sql
 *.dump
 backend/backups/
+
+# BASE DE DONNÉES
+**/*.db
+**/*.sqlite
 
 # PYTHON
 **/__pycache__/
