@@ -481,9 +481,22 @@ def get_boot_script(request: Request, mac: str | None = None):
     script += f"echo [OSIRIS] Configuration trouvee pour {hostname} ({client})\n"
 
     if os_type == "windows":
-        script += "echo [OSIRIS] Chargement Windows 11...\n"
-        script += f"kernel {OSIRIS_BASE_URL}/static/wimboot\n"
-        script += f"imgfetch {OSIRIS_BASE_URL}/unattend.xml?mac={clean_mac}\n"
+        with Session(engine) as img_session:
+            win_img = img_session.exec(
+                select(OsImage)
+                .where(OsImage.os == "windows", OsImage.status == "ready")
+                .order_by(OsImage.created_at.desc())
+            ).first()
+        if win_img:
+            script += f"echo [OSIRIS] Chargement WinPE ({win_img.name})...\n"
+            script += f"kernel {OSIRIS_BASE_URL}/static/wimboot\n"
+            script += f"initrd --name bootmgr {OSIRIS_BASE_URL}/static/winpe/bootmgr bootmgr\n"
+            script += f"initrd --name BCD {OSIRIS_BASE_URL}/static/winpe/boot/bcd BCD\n"
+            script += f"initrd --name boot.sdi {OSIRIS_BASE_URL}/static/winpe/boot/boot.sdi boot.sdi\n"
+            script += f"initrd --name boot.wim {OSIRIS_BASE_URL}/static/winpe/sources/boot.wim boot.wim\n"
+        else:
+            script += "echo [OSIRIS] Aucune image Windows disponible - boot local\n"
+            script += "exit\n"
     elif os_type == "ubuntu":
         # Cherche la dernière image Ubuntu prête — fallback sur les fichiers manuels
         with Session(engine) as img_session:
@@ -690,6 +703,76 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
         {"mac": clean_mac, "status": status, "deployed_at": deployed_at},
     )
     return {"detail": "Statut mis à jour"}
+
+
+def _ip_to_mac(ip: str) -> Optional[str]:
+    """Résout une IP en MAC via les leases dnsmasq."""
+    leases_file = "/var/lib/misc/dnsmasq.leases"
+    try:
+        with open(leases_file) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 3 and parts[2] == ip:
+                    return parts[1].replace(":", "").replace("-", "").lower()
+    except FileNotFoundError:
+        pass
+    return None
+
+
+@app.get("/winpe-auto")
+def get_winpe_script_auto(request: Request):
+    """Identifie la machine par son IP source (lookup dnsmasq), retourne le script de déploiement."""
+    client_ip = request.client.host
+    mac = _ip_to_mac(client_ip)
+    if not mac:
+        return Response(
+            content=f"echo [OSIRIS] IP {client_ip} inconnue dans les leases DHCP\r\npause\r\nexit /b 1",
+            media_type="text/plain", status_code=404,
+        )
+    return _build_winpe_script(mac)
+
+
+def _build_winpe_script(mac: str) -> Response:
+    """Construit le script CMD de déploiement pour une MAC donnée (normalisée)."""
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+        if not machine:
+            return Response(
+                content=f"echo [OSIRIS] Machine {mac} inconnue\r\npause\r\nexit /b 1",
+                media_type="text/plain", status_code=404,
+            )
+        profile = _resolve_profile(session, machine)
+
+    with Session(engine) as img_session:
+        win_img = img_session.exec(
+            select(OsImage)
+            .where(OsImage.os == "windows", OsImage.status == "ready")
+            .order_by(OsImage.created_at.desc())
+        ).first()
+
+    if not win_img:
+        return Response(
+            content="echo [OSIRIS] Aucune image Windows disponible\r\npause\r\nexit /b 1",
+            media_type="text/plain", status_code=503,
+        )
+
+    locale = getattr(profile, "locale", "fr_FR").replace("_", "-")[:5]
+    content = jinja_env.get_template("winpe-deploy.cmd.j2").render(
+        machine=machine,
+        profile=profile,
+        mac=mac,
+        osiris_url=OSIRIS_BASE_URL,
+        osiris_ip=OSIRIS_IP,
+        win_index=1,
+        locale=locale,
+    )
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/winpe-script/{mac}")
+def get_winpe_script(mac: str):
+    """Script CMD retourné à WinPE pour déployer Windows sur la machine."""
+    return _build_winpe_script(validate_mac(mac))
 
 
 @app.websocket("/ws/machines")

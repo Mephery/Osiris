@@ -59,6 +59,15 @@ http://10.0.0.1 {
     handle /machines/* {
         reverse_proxy localhost:8000
     }
+    handle /winpe-script/* {
+        reverse_proxy localhost:8000
+    }
+    handle /winpe-auto {
+        reverse_proxy localhost:8000
+    }
+    handle /unattend.xml* {
+        reverse_proxy localhost:8000
+    }
 }
 
 # ── HTTP 192.168.1.18 — redirection vers HTTPS pour les navigateurs ────────────

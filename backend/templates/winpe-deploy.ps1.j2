@@ -1,0 +1,73 @@
+$ErrorActionPreference = "Continue"
+$mac    = "{{ mac }}"
+$osiris = "{{ osiris_url }}"
+$osiris_ip = "{{ osiris_ip }}"
+
+Write-Host "[OSIRIS] ===== Deploiement Windows ====="
+Write-Host "[OSIRIS] Machine : {{ machine.hostname }} ({{ machine.client }})"
+
+# ── Detection du materiel ─────────────────────────────────────────────────────
+Write-Host "[OSIRIS] Detection du materiel..."
+$model        = (Get-WmiObject -Class Win32_ComputerSystemProduct).Name.Trim()
+$manufacturer = (Get-WmiObject -Class Win32_ComputerSystem).Manufacturer.Trim()
+Write-Host "[OSIRIS] Modele : $manufacturer - $model"
+
+# ── Partitionnement GPT (UEFI) ────────────────────────────────────────────────
+Write-Host "[OSIRIS] Partitionnement du disque (GPT/UEFI)..."
+$diskpart_script = @"
+select disk 0
+clean
+convert gpt
+create partition efi size=512
+format quick fs=fat32 label=System
+assign letter=S
+create partition msr size=16
+create partition primary
+format quick fs=ntfs label=Windows
+assign letter=C
+"@
+$diskpart_script | diskpart
+if ($LASTEXITCODE -ne 0) { Write-Host "[OSIRIS] ERREUR diskpart !"; pause; exit 1 }
+
+# ── Connexion au partage Windows ──────────────────────────────────────────────
+Write-Host "[OSIRIS] Connexion au partage reseau..."
+net use Z: \\$osiris_ip\windows /user:guest ""
+if ($LASTEXITCODE -ne 0) { Write-Host "[OSIRIS] ERREUR partage SMB !"; pause; exit 1 }
+
+# Détecte install.wim ou install.esd
+if (Test-Path Z:\install.wim) {
+    $wim = "Z:\install.wim"
+} elseif (Test-Path Z:\install.esd) {
+    $wim = "Z:\install.esd"
+} else {
+    Write-Host "[OSIRIS] ERREUR : install.wim introuvable sur le partage !"; pause; exit 1
+}
+
+# ── Application de l'image Windows ───────────────────────────────────────────
+Write-Host "[OSIRIS] Application de l'image Windows (patience...)..."
+dism /Apply-Image /ImageFile:$wim /Index:{{ win_index }} /ApplyDir:C:\
+if ($LASTEXITCODE -ne 0) { Write-Host "[OSIRIS] ERREUR DISM !"; pause; exit 1 }
+
+# ── Configuration du demarrage UEFI ──────────────────────────────────────────
+Write-Host "[OSIRIS] Configuration du boot UEFI..."
+bcdboot C:\Windows /l {{ profile.locale | replace("_", "-") | truncate(5, True, "") }} /s S: /f UEFI
+
+# ── Unattend.xml ──────────────────────────────────────────────────────────────
+Write-Host "[OSIRIS] Telechargement de unattend.xml..."
+New-Item -ItemType Directory -Force -Path C:\Windows\Panther | Out-Null
+Invoke-WebRequest -Uri "$osiris/unattend.xml?mac=$mac" `
+    -OutFile C:\Windows\Panther\unattend.xml -UseBasicParsing
+
+# ── Notification OSIRIS ───────────────────────────────────────────────────────
+Write-Host "[OSIRIS] Notification du serveur..."
+try {
+    Invoke-WebRequest -Uri "$osiris/machines/$mac/status?status=deployed" `
+        -Method POST -UseBasicParsing | Out-Null
+} catch {
+    Write-Host "[OSIRIS] (avertissement: callback echoue, ignoré)"
+}
+
+Write-Host "[OSIRIS] ===== Installation terminee ! ====="
+Write-Host "[OSIRIS] Redemarrage dans 10 secondes..."
+Start-Sleep 10
+wpeutil reboot

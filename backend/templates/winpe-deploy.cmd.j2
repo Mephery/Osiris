@@ -1,0 +1,83 @@
+@echo off
+setlocal
+
+set MAC={{ mac }}
+set OSIRIS={{ osiris_url }}
+set OSIRIS_IP={{ osiris_ip }}
+
+echo [OSIRIS] ===== Deploiement Windows =====
+echo [OSIRIS] Machine : {{ machine.hostname }} ({{ machine.client }})
+
+REM ── Partitionnement GPT (UEFI) ────────────────────────────────────────────
+echo [OSIRIS] Partitionnement du disque (GPT/UEFI)...
+(
+echo select disk 0
+echo clean
+echo convert gpt
+echo create partition efi size=512
+echo format quick fs=fat32 label=System
+echo assign letter=S
+echo create partition msr size=16
+echo create partition primary
+echo format quick fs=ntfs label=Windows
+echo assign letter=C
+) > X:\diskpart.txt
+diskpart /s X:\diskpart.txt
+if errorlevel 1 (
+    echo [OSIRIS] ERREUR diskpart !
+    pause
+    exit /b 1
+)
+
+REM ── Connexion au partage Windows ──────────────────────────────────────────
+echo [OSIRIS] Connexion au partage reseau SMB...
+net use Z: \\%OSIRIS_IP%\windows /user:guest "" 2>nul
+if errorlevel 1 (
+    echo [OSIRIS] ERREUR : impossible de se connecter au partage SMB !
+    pause
+    exit /b 1
+)
+
+REM ── Detection de l'image ──────────────────────────────────────────────────
+if exist Z:\install.wim (
+    set WIM=Z:\install.wim
+) else if exist Z:\install.esd (
+    set WIM=Z:\install.esd
+) else (
+    echo [OSIRIS] ERREUR : install.wim introuvable sur le partage !
+    pause
+    exit /b 1
+)
+
+REM ── Application de l'image Windows ───────────────────────────────────────
+echo [OSIRIS] Application de l'image Windows (patience - 15 a 30 min)...
+dism /Apply-Image /ImageFile:%WIM% /Index:{{ win_index }} /ApplyDir:C:\
+if errorlevel 1 (
+    echo [OSIRIS] ERREUR DISM !
+    pause
+    exit /b 1
+)
+
+REM ── Configuration du demarrage UEFI ──────────────────────────────────────
+echo [OSIRIS] Configuration du boot UEFI...
+bcdboot C:\Windows /l {{ locale }} /s S: /f UEFI
+if errorlevel 1 (
+    echo [OSIRIS] AVERTISSEMENT bcdboot (ignoré)
+)
+
+REM ── Unattend.xml ──────────────────────────────────────────────────────────
+echo [OSIRIS] Telechargement de unattend.xml...
+mkdir C:\Windows\Panther 2>nul
+curl -sf -o C:\Windows\Panther\unattend.xml "%OSIRIS%/unattend.xml?mac=%MAC%"
+if errorlevel 1 (
+    certutil -urlcache -split -f "%OSIRIS%/unattend.xml?mac=%MAC%" C:\Windows\Panther\unattend.xml >nul 2>&1
+)
+
+REM ── Notification OSIRIS ───────────────────────────────────────────────────
+echo [OSIRIS] Notification du serveur...
+curl -sf -X POST "%OSIRIS%/machines/%MAC%/status?status=deployed" >nul 2>&1
+
+echo [OSIRIS] ===== Installation terminee ! =====
+echo [OSIRIS] Redemarrage dans 10 secondes...
+timeout /t 10 /nobreak >nul
+wpeutil reboot

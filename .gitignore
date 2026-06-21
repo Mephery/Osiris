@@ -33,7 +33,12 @@ backend/backups/
 **/static/vmlinuz
 **/static/initrd
 **/static/wimboot
+**/static/winpe/
+**/static/ubuntu-*/
 srv/tftp/ipxe.efi
+
+# Environnement Python
+**/venv/
 
 # CERTIFICATS TLS (pour le jour où on ajoute HTTPS)
 *.pem
