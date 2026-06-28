@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
@@ -28,6 +28,19 @@ interface Machine {
   deployed_at?: string | null;
   organization_id?: number | null;
   profile_id?: number | null;
+  dism_progress?: number;
+}
+
+interface DriverPack {
+  id: number;
+  vendor: string;
+  model: string;
+  os_code: string;
+  size_mb: number;
+  status: string;
+  local_path: string;
+  download_url: string;
+  catalog_updated: string;
 }
 
 interface Profile {
@@ -41,6 +54,7 @@ interface Profile {
   extra_packages: string;
   join_domain: boolean;
   domain: string;
+  tv_suffix: string;
 }
 
 interface OsImage {
@@ -102,6 +116,39 @@ function authHeader(token: string) {
   return { 'Authorization': `Bearer ${token}` }
 }
 
+// ── SVG Icons ──────────────────────────────────────────────────────────────────
+type IProps = { cls?: string }
+const S = ({ p, cls = 'w-3.5 h-3.5' }: { p: string; cls?: string }) => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
+    strokeLinecap="round" strokeLinejoin="round"
+    className={`inline-block shrink-0 ${cls}`} aria-hidden="true">
+    <path d={p} />
+  </svg>
+)
+const IcoOsiris    = ({ cls = 'w-5 h-5' }: IProps) => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
+    className={`inline-block shrink-0 ${cls}`} aria-hidden="true">
+    <circle cx="8" cy="8" r="6" />
+    <circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none" />
+  </svg>
+)
+const IcoGear      = ({ cls = 'w-3.5 h-3.5' }: IProps) => (
+  <svg viewBox="0 0 16 16" fill="currentColor" className={`inline-block shrink-0 ${cls}`} aria-hidden="true">
+    <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
+  </svg>
+)
+const IcoDownload  = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M8 2v8m0 0L5 7m3 3 3-3M2 13h12" />
+const IcoMenu      = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M2 4h12M2 8h12M2 12h12" />
+const IcoRefresh   = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M14 8A6 6 0 1 1 8 2.5M14 2v4h-4" />
+const IcoSearch    = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10zm7 2-3-3" />
+const IcoPower     = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M8 2v5M5 4A5 5 0 1 0 11 4" />
+const IcoPencil    = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M11 2l3 3-9 9H2v-3z" />
+const IcoX         = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M3 3l10 10M13 3 3 13" />
+const IcoCheck     = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M2 8l4 4 8-8" />
+const IcoChevDown  = ({ cls = 'w-3 h-3' }: IProps) => <S cls={cls} p="M3 5l5 5 5-5" />
+const IcoChevUp    = ({ cls = 'w-3 h-3' }: IProps) => <S cls={cls} p="M3 11l5-5 5 5" />
+const IcoChevRight = ({ cls = 'w-3 h-3' }: IProps) => <S cls={cls} p="M5 3l5 5-5 5" />
+
 // ── Composant Login ────────────────────────────────────────────────────────────
 
 function LoginPage({ onLogin }: { onLogin: (auth: AuthState) => void }) {
@@ -134,7 +181,7 @@ function LoginPage({ onLogin }: { onLogin: (auth: AuthState) => void }) {
     <div className="min-h-screen flex items-center justify-center p-4">
       <div className="w-full max-w-sm">
         <div className="flex items-center justify-center gap-3 mb-8">
-          <span className="osiris-icon text-blue-500 text-2xl">⊙</span>
+          <IcoOsiris cls="w-7 h-7 text-blue-500" />
           <span className="text-2xl font-black tracking-[0.22em] text-white uppercase">Osiris</span>
         </div>
 
@@ -190,6 +237,9 @@ export default function App() {
   // Confirmation suppression
   const [deletingMac, setDeletingMac]   = useState<string | null>(null)
 
+  // Redéploiement
+  const [redeployingMac, setRedeployingMac] = useState<string | null>(null)
+
   // Mot de passe one-time
   const [oneTimePassword, setOneTimePassword] = useState<{ hostname: string; password: string } | null>(null)
 
@@ -208,7 +258,20 @@ export default function App() {
   // ── Images OS ──────────────────────────────────────────────────────────────
   const [images, setImages] = useState<OsImage[]>([])
   const [newImage, setNewImage] = useState({ name: '', version: '', os: 'ubuntu', iso_url: '' })
-  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local' })
+  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', tv_suffix: '' })
+
+  // ── Drivers ────────────────────────────────────────────────────────────────
+  const [showDrivers, setShowDrivers]   = useState(false)
+  const [drivers, setDrivers]           = useState<DriverPack[]>([])
+  const [driversLoading, setDriversLoading] = useState(false)
+  const [syncing, setSyncing]           = useState<string | null>(null)
+  const [downloadingPack, setDownloadingPack] = useState<number | null>(null)
+  const [driverSearch, setDriverSearch]       = useState('')
+  const [expandedVendors, setExpandedVendors] = useState<Set<string>>(new Set())
+
+  // ── Logs déploiement ───────────────────────────────────────────────────────
+  const [deployLogs, setDeployLogs]     = useState<Record<string, string[]>>({})
+  const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set())
 
   // ── Changement de mot de passe ─────────────────────────────────────────────
   const [showPasswordModal, setShowPasswordModal] = useState(false)
@@ -300,10 +363,24 @@ export default function App() {
       ws = new WebSocket(wsUrl)
 
       ws.onmessage = (event) => {
-        const { mac, status, deployed_at } = JSON.parse(event.data)
-        setMachines((prev) =>
-          prev.map((m: Machine) => m.mac === mac ? { ...m, status, deployed_at: deployed_at ?? m.deployed_at } : m)
-        )
+        const msg = JSON.parse(event.data)
+        const { mac } = msg
+        if (msg.log_line !== undefined) {
+          setDeployLogs((prev) => ({
+            ...prev,
+            [mac]: [...(prev[mac] ?? []), msg.log_line],
+          }))
+        } else if (msg.dism_progress !== undefined) {
+          setMachines((prev) =>
+            prev.map((m: Machine) => m.mac === mac ? { ...m, dism_progress: msg.dism_progress } : m)
+          )
+        } else {
+          const { status, deployed_at } = msg
+          if (status === 'pending') setDeployLogs((prev) => { const n = { ...prev }; delete n[mac]; return n })
+          setMachines((prev) =>
+            prev.map((m: Machine) => m.mac === mac ? { ...m, status, deployed_at: deployed_at ?? m.deployed_at, dism_progress: status === 'deployed' ? 100 : m.dism_progress } : m)
+          )
+        }
       }
 
       ws.onclose = () => {
@@ -371,6 +448,24 @@ export default function App() {
       .catch((err) => alert(err.message))
   }
 
+  // ── Redéploiement machine ───────────────────────────────────────────────────
+
+  const handleRedeploy = (mac: string, hostname: string) => {
+    if (!window.confirm(`Redéployer "${hostname}" ? L'OS sera réinstallé au prochain démarrage réseau.`)) return
+    setRedeployingMac(mac)
+    fetch(`${API_URL}/machines/${mac}/status?status=pending`, { method: 'POST' })
+      .then((res) => { if (!res.ok) throw new Error('Erreur') })
+      .catch((err) => alert(err.message))
+      .finally(() => setRedeployingMac(null))
+  }
+
+  const handleWol = (mac: string, hostname: string) => {
+    fetch(`${API_URL}/machines/${mac}/wol`, { method: 'POST', headers: authHeader(auth.token) })
+      .then((res) => { if (!res.ok) throw new Error('Erreur WOL') })
+      .then(() => alert(`Magic packet envoyé à "${hostname}" !`))
+      .catch((err) => alert(err.message))
+  }
+
   // ── Admin : créer org ───────────────────────────────────────────────────────
 
   const handleCreateOrg = (e: React.FormEvent) => {
@@ -420,7 +515,7 @@ export default function App() {
     })
       .then((res) => res.json())
       .then(() => {
-        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local' })
+        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', tv_suffix: '' })
         fetchProfiles(auth.token)
       })
       .catch(() => {})
@@ -448,6 +543,44 @@ export default function App() {
     fetch(`${API_URL}/profiles/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
       .then(() => fetchProfiles(auth.token))
       .catch(() => {})
+  }
+
+  // ── Drivers ────────────────────────────────────────────────────────────────
+
+  const fetchDrivers = (token: string, vendor = 'all') => {
+    setDriversLoading(true)
+    const qs = vendor !== 'all' ? `?vendor=${vendor}` : ''
+    fetch(`${API_URL}/drivers${qs}`, { headers: authHeader(token) })
+      .then((r) => r.json())
+      .then((d) => setDrivers(Array.isArray(d) ? d : []))
+      .catch(() => {})
+      .finally(() => setDriversLoading(false))
+  }
+
+  const handleSync = (vendor: string, delay: number) => {
+    setSyncing(vendor)
+    fetch(`${API_URL}/drivers/sync/${vendor}`, { method: 'POST', headers: authHeader(auth.token) })
+      .then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.status }))
+          alert(`Erreur sync ${vendor} : ${err.detail}`)
+          setSyncing(null)
+          return
+        }
+        setTimeout(() => { fetchDrivers(auth.token); setSyncing(null) }, delay)
+      })
+      .catch((err) => { alert(`Erreur réseau : ${err.message}`); setSyncing(null) })
+  }
+
+  const toggleVendor = (vendor: string) =>
+    setExpandedVendors(prev => { const s = new Set(prev); s.has(vendor) ? s.delete(vendor) : s.add(vendor); return s })
+
+  const handleDownloadPack = (id: number) => {
+    setDownloadingPack(id)
+    fetch(`${API_URL}/drivers/${id}/download`, { method: 'POST', headers: authHeader(auth.token) })
+      .then(() => {})
+      .catch(() => {})
+      .finally(() => setDownloadingPack(null))
   }
 
   const openPasswordModal = () => {
@@ -487,7 +620,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2.5">
-              <span className="osiris-icon text-blue-500">⊙</span>
+              <IcoOsiris cls="w-5 h-5 text-blue-500" />
               <span className="text-lg font-black tracking-[0.22em] text-white uppercase select-none">Osiris</span>
             </div>
             <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono text-slate-600 border-l border-slate-800 pl-5">
@@ -499,11 +632,15 @@ export default function App() {
             {auth.role === 'admin' && (
               <>
                 <button onClick={() => setShowAdmin(!showAdmin)} className={`osiris-btn-ghost text-xs ${showAdmin ? 'text-blue-400' : ''}`}>
-                  ⚙ Administration
+                  <IcoGear /> Administration
+                </button>
+                <button onClick={() => { setShowDrivers(!showDrivers); if (!showDrivers) fetchDrivers(auth.token) }}
+                  className={`osiris-btn-ghost text-xs ${showDrivers ? 'text-blue-400' : ''}`}>
+                  <IcoDownload /> Drivers
                 </button>
                 <button onClick={() => { setShowAuditLog(!showAuditLog); if (!showAuditLog) fetchAuditLogs(auth.token) }}
                   className={`osiris-btn-ghost text-xs ${showAuditLog ? 'text-blue-400' : ''}`}>
-                  ≡ Journal
+                  <IcoMenu /> Journal
                 </button>
               </>
             )}
@@ -530,7 +667,7 @@ export default function App() {
                     <span className="text-white font-medium">{org.name}</span>
                     <div className="flex items-center gap-3">
                       <span className="font-mono text-xs text-slate-600">{org.slug}</span>
-                      <button onClick={() => handleDeleteOrg(org.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer">✕</button>
+                      <button onClick={() => handleDeleteOrg(org.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                     </div>
                   </li>
                 ))}
@@ -555,7 +692,7 @@ export default function App() {
                     <div className="flex items-center gap-3">
                       <span className={`osiris-os-badge ${u.role === 'admin' ? 'osiris-os-badge--windows' : 'osiris-os-badge--ubuntu'}`}>{u.role}</span>
                       {u.email !== auth.email && (
-                        <button onClick={() => handleDeleteUser(u.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer">✕</button>
+                        <button onClick={() => handleDeleteUser(u.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                       )}
                     </div>
                   </li>
@@ -585,7 +722,7 @@ export default function App() {
                       <span className={`ml-2 osiris-os-badge osiris-os-badge--${p.os}`}>{p.os}</span>
                       <p className="text-[10px] font-mono text-slate-600 mt-0.5">{p.locale} · {p.keyboard} · {p.timezone}</p>
                     </div>
-                    <button onClick={() => handleDeleteProfile(p.id)} className="osiris-action-btn osiris-action-btn--danger ml-3 flex-shrink-0" title="Supprimer">✕</button>
+                    <button onClick={() => handleDeleteProfile(p.id)} className="osiris-action-btn osiris-action-btn--danger ml-3 flex-shrink-0" title="Supprimer"><IcoX /></button>
                   </div>
                 ))}
               </div>
@@ -612,6 +749,7 @@ export default function App() {
                     <input placeholder="Domaine AD" value={newProfile.domain ?? ''} onChange={e => setNewProfile({ ...newProfile, domain: e.target.value })} className="osiris-input text-xs font-mono" />
                   </>
                 )}
+                <input placeholder="Suffixe TeamViewer (optionnel)" title="Mot de passe TV = NOMPC_MAJUSCULES + ce suffixe" value={newProfile.tv_suffix ?? ''} onChange={e => setNewProfile({ ...newProfile, tv_suffix: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
                 <button type="submit" className="osiris-btn text-xs px-3 sm:col-start-3">+ Créer</button>
               </form>
             </div>
@@ -634,7 +772,7 @@ export default function App() {
                             {s.label}{inProgress ? ` ${img.progress}%` : ''}
                           </span>
                         </div>
-                        <button onClick={() => handleDeleteImage(img.id)} className="osiris-action-btn osiris-action-btn--danger flex-shrink-0" title="Supprimer">✕</button>
+                        <button onClick={() => handleDeleteImage(img.id)} className="osiris-action-btn osiris-action-btn--danger flex-shrink-0" title="Supprimer"><IcoX /></button>
                       </div>
                       {inProgress && (
                         <div className="h-1 bg-slate-800 rounded-full overflow-hidden">
@@ -676,7 +814,7 @@ export default function App() {
               <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Journal d'activité</h2>
               <button onClick={() => fetchAuditLogs(auth.token)}
                 className="osiris-btn-ghost text-[10px]">
-                {auditLoading ? 'Chargement…' : '↺ Rafraîchir'}
+                {auditLoading ? 'Chargement…' : <><IcoRefresh cls="w-3 h-3 inline" /> Rafraîchir</>}
               </button>
             </div>
             {auditLoading ? (
@@ -727,6 +865,148 @@ export default function App() {
           </div>
         )}
 
+        {/* ── Catalogue Drivers ────────────────────────────────────────────── */}
+        {showDrivers && auth.role === 'admin' && (
+          <div className="osiris-table-wrap overflow-x-auto">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800/80">
+              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Catalogue Drivers</h2>
+              <div className="flex gap-2 flex-wrap">
+                <button onClick={() => fetchDrivers(auth.token)} className="osiris-btn-ghost text-[10px]">
+                  {driversLoading ? 'Chargement…' : <><IcoRefresh cls="w-3 h-3 inline" /> Rafraîchir</>}
+                </button>
+                <button onClick={() => handleSync('dell', 15000)} disabled={syncing !== null} className="osiris-btn text-xs">
+                  {syncing === 'dell' ? 'Dell en cours…' : <><IcoRefresh cls="w-3 h-3 inline" /> Dell</>}
+                </button>
+                <button onClick={() => handleSync('hp', 30000)} disabled={syncing !== null} className="osiris-btn text-xs">
+                  {syncing === 'hp' ? 'HP en cours…' : <><IcoRefresh cls="w-3 h-3 inline" /> HP</>}
+                </button>
+                <button onClick={() => handleSync('lenovo', 20000)} disabled={syncing !== null} className="osiris-btn text-xs">
+                  {syncing === 'lenovo' ? 'Lenovo en cours…' : <><IcoRefresh cls="w-3 h-3 inline" /> Lenovo</>}
+                </button>
+              </div>
+            </div>
+            {driversLoading ? (
+              <div className="flex items-center gap-2.5 text-slate-600 font-mono text-xs p-5">
+                <span className="inline-block w-1.5 h-1.5 bg-blue-600 rounded-full animate-ping" />
+                Chargement…
+              </div>
+            ) : drivers.length === 0 ? (
+              <p className="text-slate-700 font-mono text-xs p-5">Aucun driver : lancez une synchronisation pour remplir le catalogue.</p>
+            ) : (() => {
+              const q = driverSearch.toLowerCase()
+              const isSearching = q.length > 0
+
+              // Groupement par vendor
+              const groups: Record<string, DriverPack[]> = {}
+              for (const d of drivers) {
+                if (!groups[d.vendor]) groups[d.vendor] = []
+                if (!isSearching || d.model.toLowerCase().includes(q)) groups[d.vendor].push(d)
+              }
+              const vendorOrder = ['dell', 'hp', 'lenovo']
+              const vendorLabel: Record<string, string> = { dell: 'Dell', hp: 'HP', lenovo: 'Lenovo' }
+
+              const DriverRow = ({ d }: { d: DriverPack }) => (
+                <tr className="osiris-row">
+                  <td className="px-4 py-2 font-mono text-xs text-white">{d.model}</td>
+                  <td className="px-4 py-2 font-mono text-xs text-slate-500">{d.os_code}</td>
+                  <td className="px-4 py-2 font-mono text-xs text-slate-600 whitespace-nowrap">{d.size_mb ? `${d.size_mb} MB` : '—'}</td>
+                  <td className="px-4 py-2">
+                    <span className={`osiris-status-badge ${
+                      d.status === 'ready'       ? 'osiris-status--deployed' :
+                      d.status === 'downloading' ? 'osiris-status--deploying' :
+                      d.status === 'failed'      ? 'osiris-status--failed' :
+                                                   'osiris-status--pending'
+                    }`}>{d.status}</span>
+                  </td>
+                  <td className="px-4 py-2">
+                    {d.status !== 'ready' && d.status !== 'downloading' && (
+                      <button onClick={() => handleDownloadPack(d.id)} disabled={downloadingPack === d.id} className="osiris-action-btn text-[10px]">
+                        {downloadingPack === d.id ? '…' : <IcoDownload />}
+                      </button>
+                    )}
+                    {d.status === 'ready' && <span className="text-emerald-600 font-mono text-[10px] flex items-center gap-1"><IcoCheck cls="w-3 h-3" /> Prêt</span>}
+                    {d.status === 'downloading' && <span className="text-blue-500 font-mono text-[10px] animate-pulse">En cours…</span>}
+                  </td>
+                </tr>
+              )
+
+              return (
+                <>
+                  {/* Barre de recherche */}
+                  <div className="px-5 py-3 border-b border-slate-800/80 flex items-center gap-3">
+                    <span className="text-slate-600 flex-shrink-0"><IcoSearch /></span>
+                    <input type="text" placeholder="Rechercher un modèle…"
+                      value={driverSearch} onChange={e => setDriverSearch(e.target.value)}
+                      className="osiris-input text-xs flex-1 max-w-sm" />
+                    {isSearching && (
+                      <span className="text-[10px] font-mono text-slate-600">
+                        {Object.values(groups).flat().length} résultat{Object.values(groups).flat().length !== 1 ? 's' : ''}
+                      </span>
+                    )}
+                  </div>
+
+                  {isSearching ? (
+                    /* ── Mode recherche : tableau plat ── */
+                    <table className="w-full text-sm">
+                      <thead><tr className="border-b border-slate-800/80">
+                        {['Modèle', 'OS', 'Taille', 'Statut', 'Action'].map(h => (
+                          <th key={h} className="text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-widest text-slate-600 whitespace-nowrap">{h}</th>
+                        ))}
+                      </tr></thead>
+                      <tbody>
+                        {Object.values(groups).flat().slice(0, 100).map(d => <DriverRow key={d.id} d={d} />)}
+                      </tbody>
+                    </table>
+                  ) : (
+                    /* ── Mode accordéon : dossiers par vendor ── */
+                    <div className="divide-y divide-slate-800/60">
+                      {vendorOrder.filter(v => (groups[v]?.length ?? 0) > 0 || drivers.some(d => d.vendor === v)).map(vendor => {
+                        const items = groups[vendor] ?? []
+                        const total = drivers.filter(d => d.vendor === vendor).length
+                        const open  = expandedVendors.has(vendor)
+                        const ready = items.filter(d => d.status === 'ready').length
+                        return (
+                          <div key={vendor}>
+                            {/* En-tête du dossier */}
+                            <button onClick={() => toggleVendor(vendor)}
+                              className="w-full flex items-center gap-3 px-5 py-3.5 hover:bg-slate-800/30 transition-colors text-left">
+                              <span className="text-slate-500 w-3 flex-shrink-0">{open ? <IcoChevDown /> : <IcoChevRight />}</span>
+                              <span className="font-bold text-sm text-white tracking-wide">{vendorLabel[vendor]}</span>
+                              <span className="text-[10px] font-mono text-slate-600">{total} modèle{total !== 1 ? 's' : ''}</span>
+                              {ready > 0 && <span className="text-[10px] font-mono text-emerald-600">{ready} prêt{ready !== 1 ? 's' : ''}</span>}
+                              <span className="ml-auto text-[10px] text-slate-700">{open ? 'Fermer' : 'Ouvrir'}</span>
+                            </button>
+                            {/* Contenu du dossier */}
+                            {open && (
+                              <div className="border-t border-slate-800/60 bg-slate-950/40">
+                                <table className="w-full text-sm">
+                                  <thead><tr className="border-b border-slate-800/60">
+                                    {['Modèle', 'OS', 'Taille', 'Statut', 'Action'].map(h => (
+                                      <th key={h} className="text-left px-4 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-slate-700 whitespace-nowrap">{h}</th>
+                                    ))}
+                                  </tr></thead>
+                                  <tbody>
+                                    {items.slice(0, 200).map(d => <DriverRow key={d.id} d={d} />)}
+                                    {items.length > 200 && (
+                                      <tr><td colSpan={5} className="px-4 py-3 text-center text-[10px] font-mono text-slate-700">
+                                        … {items.length - 200} modèles masqués — utilisez la recherche pour les trouver
+                                      </td></tr>
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </>
+              )
+            })()}
+          </div>
+        )}
+
         {/* ── Filtre par organisation + compteur ───────────────────────────── */}
         <div className="flex items-center justify-between">
           <div className="flex items-baseline gap-3">
@@ -773,7 +1053,8 @@ export default function App() {
                 {machines.length === 0 ? (
                   <tr><td colSpan={6} className="px-4 py-16 text-center text-slate-700 font-mono text-xs">Aucune machine enregistrée</td></tr>
                 ) : machines.map((machine) => (
-                  <tr key={machine.id} className="osiris-row">
+                  <React.Fragment key={machine.id}>
+                  <tr className="osiris-row">
                     <td className="px-4 py-3 font-mono font-semibold text-white">{machine.hostname}</td>
                     <td className="px-4 py-3 font-mono text-xs tracking-wider text-slate-500">
                       {machine.mac.match(/.{1,2}/g)?.join(':').toUpperCase()}
@@ -793,7 +1074,22 @@ export default function App() {
                       <span className={`osiris-status-badge osiris-status--${machine.status ?? 'pending'}`}>
                         {machine.status ?? 'pending'}
                       </span>
-                      {machine.deployed_at && (
+                      {machine.status === 'deploying' && (
+                        <div className="mt-1.5 w-28 h-1 bg-slate-800 rounded-full overflow-hidden">
+                          {(machine.dism_progress ?? 0) > 0 ? (
+                            <div
+                              className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                              style={{ width: `${machine.dism_progress}%` }}
+                            />
+                          ) : (
+                            <div className="h-full bg-blue-500 rounded-full animate-pulse w-full opacity-40" />
+                          )}
+                        </div>
+                      )}
+                      {machine.status === 'deploying' && (machine.dism_progress ?? 0) > 0 && (
+                        <span className="block text-[10px] font-mono text-blue-600 mt-0.5">{machine.dism_progress}%</span>
+                      )}
+                      {machine.deployed_at && machine.status === 'deployed' && (
                         <span className="block text-[10px] font-mono text-slate-700 mt-0.5">
                           {new Date(machine.deployed_at).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
                         </span>
@@ -803,14 +1099,50 @@ export default function App() {
                       <div className="flex items-center gap-3">
                         <span className="font-mono text-xs text-slate-600 truncate max-w-[140px]" title={machine.ou}>{machine.ou || '—'}</span>
                         <div className="flex items-center gap-1 ml-auto flex-shrink-0">
-                          <button onClick={() => openEdit(machine)} className="osiris-action-btn" title="Modifier">✎</button>
+                          {(deployLogs[machine.mac]?.length ?? 0) > 0 && (
+                            <button
+                              onClick={() => setExpandedLogs((prev) => {
+                                const s = new Set(prev)
+                                s.has(machine.mac) ? s.delete(machine.mac) : s.add(machine.mac)
+                                return s
+                              })}
+                              className="osiris-action-btn"
+                              title="Logs de déploiement"
+                            >{expandedLogs.has(machine.mac) ? <IcoChevUp /> : <IcoChevDown />}</button>
+                          )}
+                          <button
+                            onClick={() => handleWol(machine.mac, machine.hostname)}
+                            className="osiris-action-btn"
+                            title="Wake-on-LAN"
+                          ><IcoPower /></button>
+                          {(machine.status === 'deployed' || machine.status === 'failed') && (
+                            <button
+                              onClick={() => handleRedeploy(machine.mac, machine.hostname)}
+                              disabled={redeployingMac === machine.mac}
+                              className="osiris-action-btn"
+                              title="Redéployer"
+                            >
+                              {redeployingMac === machine.mac ? '…' : <IcoRefresh />}
+                            </button>
+                          )}
+                          <button onClick={() => openEdit(machine)} className="osiris-action-btn" title="Modifier"><IcoPencil /></button>
                           {auth.role === 'admin' && (
-                            <button onClick={() => setDeletingMac(machine.mac)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer">✕</button>
+                            <button onClick={() => setDeletingMac(machine.mac)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                           )}
                         </div>
                       </div>
                     </td>
                   </tr>
+                  {expandedLogs.has(machine.mac) && (deployLogs[machine.mac]?.length ?? 0) > 0 && (
+                    <tr className="bg-slate-950">
+                      <td colSpan={6} className="px-4 py-3">
+                        <pre className="text-[10px] font-mono text-slate-400 max-h-48 overflow-y-auto leading-relaxed whitespace-pre-wrap">
+                          {deployLogs[machine.mac].join('\n')}
+                        </pre>
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>
@@ -824,7 +1156,7 @@ export default function App() {
           <div className="osiris-modal">
             <div className="osiris-modal-header">
               <h2 className="text-xs font-bold uppercase tracking-widest text-white">Changer mon mot de passe</h2>
-              <button onClick={() => setShowPasswordModal(false)} className="text-slate-700 hover:text-slate-300 text-2xl leading-none cursor-pointer transition-colors">×</button>
+              <button onClick={() => setShowPasswordModal(false)} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1"><IcoX cls="w-4 h-4" /></button>
             </div>
             {pwSuccess ? (
               <div className="p-6 space-y-5">
@@ -878,7 +1210,7 @@ export default function App() {
               <h2 className="text-xs font-bold uppercase tracking-widest text-white">
                 {editingMac ? 'Modifier la machine' : 'Nouvel enregistrement iPXE'}
               </h2>
-              <button onClick={closeModal} className="text-slate-700 hover:text-slate-300 text-2xl leading-none cursor-pointer transition-colors">×</button>
+              <button onClick={closeModal} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1"><IcoX cls="w-4 h-4" /></button>
             </div>
             {submitError && <div className="mx-6 mt-4 border-l-2 border-red-700 pl-3 py-1"><p className="text-red-400 text-xs font-mono">{submitError}</p></div>}
             <form onSubmit={handleSubmit} className="p-6 space-y-4">
