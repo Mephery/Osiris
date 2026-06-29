@@ -18,6 +18,7 @@ class Organization(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str                          # "Acme Corp"
     slug: str = Field(unique=True)     # "acme-corp"  — utilisé dans les URLs plus tard
+    webhook_url: str = Field(default="")   # URL webhook (Teams, Slack, Discord…)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -45,6 +46,16 @@ class Profile(SQLModel, table=True):
     win_image: str = Field(default="")              # Golden image : nom du .wim sur le partage (vide = install.wim auto)
     win_index: int = Field(default=1)               # Index de l'édition Windows dans le WIM (1=Home, 6=Pro typiquement)
     tv_suffix: str = Field(default="")              # Suffixe TeamViewer chiffré Fernet
+    app_ids: str   = Field(default="")              # IDs d'apps séparés par virgule : "1,3,7"
+
+
+class Application(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str                              # "Google Chrome"
+    winget_id: str   = Field(default="")  # "Google.Chrome" — vide si pas de package Windows
+    apt_package: str = Field(default="")  # "google-chrome-stable" — vide si pas de package Linux
+    category: str    = Field(default="tools")  # browser | tools | security | office | media | dev | comm | remote
+    icon: str        = Field(default="📦")
 
 
 class Machine(SQLModel, table=True):
@@ -91,6 +102,18 @@ class DriverPack(SQLModel, table=True):
     catalog_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class DeploymentEvent(SQLModel, table=True):
+    __tablename__ = "deployment_event"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    mac: str = Field(index=True)
+    hostname: str = Field(default="")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    status: str   # "pending" | "deploying" | "deployed" | "failed"
+    os: str       = Field(default="")
+    profile_name: str = Field(default="")
+
+
 class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"
 
@@ -114,4 +137,10 @@ engine       = create_engine(DATABASE_URL, echo=False)
 
 
 def init_db():
+    from sqlalchemy import text
     SQLModel.metadata.create_all(engine)
+    # Migrations légères : ajout de colonnes sans recréer les tables
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS app_ids VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE organization ADD COLUMN IF NOT EXISTS webhook_url VARCHAR NOT NULL DEFAULT ''"))
+        conn.commit()

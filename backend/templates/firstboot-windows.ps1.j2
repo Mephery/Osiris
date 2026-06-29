@@ -1,0 +1,96 @@
+#Requires -RunAsAdministrator
+<#
+    OSIRIS — Premier démarrage Windows — {{ machine.hostname }}
+    Généré à la volée par OSIRIS, téléchargé pendant le déploiement WinPE.
+#>
+
+$ErrorActionPreference = "Continue"
+$logFile = "C:\osiris-firstboot.log"
+
+function Write-Log($msg) {
+    $line = "$(Get-Date -Format 'HH:mm:ss') $msg"
+    Write-Host $line
+    Add-Content -Path $logFile -Value $line
+}
+
+Write-Log "=========================================="
+Write-Log "OSIRIS First Boot — {{ machine.hostname }}"
+Write-Log "=========================================="
+
+# ── Attendre que le réseau soit disponible ───────────────────────────────────
+Write-Log "Attente de la connectivite reseau..."
+$retries = 0
+while ($retries -lt 30) {
+    try {
+        $null = Invoke-WebRequest -Uri "{{ osiris_url }}/" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+        break
+    } catch {
+        Start-Sleep -Seconds 5
+        $retries++
+    }
+}
+
+# ── Récupérer la vraie adresse MAC ───────────────────────────────────────────
+$adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.HardwareInterface } | Select-Object -First 1
+if ($adapter) {
+    $mac = $adapter.MacAddress -replace '-', '' | ForEach-Object { $_.ToLower() }
+    Write-Log "MAC detectee : $mac"
+} else {
+    Write-Log "ERREUR : aucun adaptateur reseau actif"
+    $mac = $null
+}
+
+# ── Callback "deployed" ──────────────────────────────────────────────────────
+if ($mac) {
+    try {
+        $resp = Invoke-WebRequest -Uri "{{ osiris_url }}/machines/$mac/status?status=deployed" `
+            -Method POST -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        Write-Log "Statut 'deployed' confirme (HTTP $($resp.StatusCode))"
+    } catch {
+        Write-Log "AVERTISSEMENT : callback echoue — $_"
+    }
+}
+
+{% if tv_password %}
+# ── TeamViewer ───────────────────────────────────────────────────────────────
+$tvPassword = "{{ tv_password }}"
+$tvExe = if (Test-Path "C:\Program Files\TeamViewer\TeamViewer.exe") {
+    "C:\Program Files\TeamViewer\TeamViewer.exe"
+} elseif (Test-Path "C:\Program Files (x86)\TeamViewer\TeamViewer.exe") {
+    "C:\Program Files (x86)\TeamViewer\TeamViewer.exe"
+} else { $null }
+
+if ($tvExe) {
+    foreach ($p in @("HKLM:\SOFTWARE\TeamViewer", "HKLM:\SOFTWARE\WOW6432Node\TeamViewer")) {
+        if (Test-Path $p) { Set-ItemProperty -Path $p -Name "LicenseAccepted" -Value 1 -Type DWord -EA SilentlyContinue }
+    }
+    & $tvExe --passwd $tvPassword | Out-Null
+    Write-Log "TeamViewer : mot de passe defini"
+} else {
+    Write-Log "AVERTISSEMENT : TeamViewer introuvable (a installer dans la golden image)"
+}
+{% endif %}
+
+{% if win_apps %}
+# ── Applications winget ───────────────────────────────────────────────────────
+Write-Log "Installation des applications via winget..."
+$apps = @(
+{% for app in win_apps %}
+    "{{ app.winget_id }}"{{ "," if not loop.last else "" }}
+{% endfor %}
+)
+foreach ($appId in $apps) {
+    Write-Log "winget : $appId"
+    winget install --id $appId -e `
+        --accept-source-agreements `
+        --accept-package-agreements `
+        --silent 2>&1 | ForEach-Object { Write-Log "  $_" }
+}
+Write-Log "Applications installees."
+{% endif %}
+
+Write-Log "Premier demarrage OSIRIS termine."
+
+# ── Nettoyage ─────────────────────────────────────────────────────────────────
+Start-Sleep -Seconds 2
+Remove-Item -Path $MyInvocation.MyCommand.Path -Force -EA SilentlyContinue

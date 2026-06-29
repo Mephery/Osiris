@@ -24,7 +24,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from jinja2 import Environment, FileSystemLoader
 
-from models import AuditLog, DriverPack, Machine, Organization, OsImage, Profile, User, engine, init_db, normalize_model
+from models import Application, AuditLog, DeploymentEvent, DriverPack, Machine, Organization, OsImage, Profile, User, engine, init_db, normalize_model
 from auth import (
     hash_password, verify_password, create_token,
     get_current_user, require_admin
@@ -42,6 +42,7 @@ async def lifespan(app: FastAPI):
     init_db()
     _seed_admin()
     _seed_default_profiles()
+    _seed_apps()
     arq_pool = await create_pool(RedisSettings())
     yield
     await arq_pool.aclose()
@@ -59,6 +60,7 @@ OSIRIS_IP       = os.environ.get("OSIRIS_IP", "192.168.1.18")
 SSH_PUBKEY      = os.environ.get("OSIRIS_SSH_PUBKEY", "").strip()
 ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL", "admin@osiris.local")
 ADMIN_PASSWORD  = os.environ.get("ADMIN_PASSWORD", "changeme")
+WIN_SHARE_PATH  = os.environ.get("WIN_SHARE_PATH", "/srv/data/windows")
 
 # Mapping IANA → noms Windows (subset courant MSP France)
 _LINUX_TO_WIN_TZ: dict[str, str] = {
@@ -167,6 +169,7 @@ class ProfileCreate(SQLModel):
     win_image: str = ""
     win_index: int = 1
     tv_suffix: str = ""
+    app_ids: str = ""
 
 class ProfilePatch(SQLModel):
     name: Optional[str] = None
@@ -182,6 +185,7 @@ class ProfilePatch(SQLModel):
     win_image: Optional[str] = None
     win_index: Optional[int] = None
     tv_suffix: Optional[str] = None
+    app_ids: Optional[str] = None
 
 class LoginRequest(SQLModel):
     email: str
@@ -223,10 +227,48 @@ def _seed_default_profiles():
     with Session(engine) as session:
         if session.exec(select(Profile)).first():
             return
-        session.add(Profile(name="Ubuntu — par défaut", os="ubuntu"))
+        session.add(Profile(name="Ubuntu — par défaut",  os="ubuntu"))
+        session.add(Profile(name="Debian — par défaut",  os="debian"))
         session.add(Profile(name="Windows — par défaut", os="windows", locale="fr-FR"))
         session.commit()
         print("[OSIRIS] Profils par défaut créés")
+
+
+_SEED_APPS = [
+    {"name": "Google Chrome",        "winget_id": "Google.Chrome",                        "apt_package": "google-chrome-stable", "category": "browser",  "icon": "🌐"},
+    {"name": "Mozilla Firefox",      "winget_id": "Mozilla.Firefox",                      "apt_package": "firefox",              "category": "browser",  "icon": "🦊"},
+    {"name": "7-Zip",                "winget_id": "7zip.7zip",                            "apt_package": "p7zip-full",           "category": "tools",    "icon": "🗜️"},
+    {"name": "VLC",                  "winget_id": "VideoLAN.VLC",                         "apt_package": "vlc",                  "category": "media",    "icon": "🎬"},
+    {"name": "LibreOffice",          "winget_id": "TheDocumentFoundation.LibreOffice",    "apt_package": "libreoffice",          "category": "office",   "icon": "📄"},
+    {"name": "Notepad++",            "winget_id": "Notepad++.Notepad++",                  "apt_package": "",                     "category": "dev",      "icon": "📝"},
+    {"name": "PDF24",                "winget_id": "geeksoftwareGmbH.PDF24Creator",        "apt_package": "",                     "category": "tools",    "icon": "📑"},
+    {"name": "Zoom",                 "winget_id": "Zoom.Zoom",                            "apt_package": "",                     "category": "comm",     "icon": "📹"},
+    {"name": "Bitwarden",            "winget_id": "Bitwarden.Bitwarden",                  "apt_package": "bitwarden",            "category": "security", "icon": "🔐"},
+    {"name": "Paint.NET",            "winget_id": "dotPDN.PaintDotNet",                   "apt_package": "",                     "category": "tools",    "icon": "🎨"},
+    {"name": "Teams",                "winget_id": "Microsoft.Teams",                      "apt_package": "",                     "category": "comm",     "icon": "💬"},
+    {"name": "Signal",               "winget_id": "OpenWhisperSystems.Signal",            "apt_package": "signal-desktop",       "category": "comm",     "icon": "🔒"},
+    {"name": "TeamViewer",           "winget_id": "TeamViewer.TeamViewer",                "apt_package": "",                     "category": "remote",   "icon": "👥"},
+    {"name": "Microsoft Office 365", "winget_id": "Microsoft.Office",                     "apt_package": "",                     "category": "office",   "icon": "🏢"},
+    {"name": "Adobe Acrobat Reader", "winget_id": "Adobe.Acrobat.Reader.64-bit",          "apt_package": "",                     "category": "tools",    "icon": "📋"},
+    {"name": "Audacity",             "winget_id": "Audacity.Audacity",                    "apt_package": "audacity",             "category": "media",    "icon": "🎙️"},
+    {"name": "VS Code",              "winget_id": "Microsoft.VisualStudioCode",           "apt_package": "",                     "category": "dev",      "icon": "💻"},
+    {"name": "Java OpenJDK 21",      "winget_id": "Eclipse.Temurin.21",                   "apt_package": "openjdk-21-jre",       "category": "tools",    "icon": "☕"},
+    {"name": ".NET Runtime 8",       "winget_id": "Microsoft.DotNet.DesktopRuntime.8",    "apt_package": "",                     "category": "tools",    "icon": "⚡"},
+    {"name": "Nextcloud Client",     "winget_id": "Nextcloud.Nextcloud",                  "apt_package": "nextcloud-desktop",    "category": "office",   "icon": "☁️"},
+]
+
+def _seed_apps():
+    """Insère les apps manquantes (idempotent — vérifie par nom)."""
+    with Session(engine) as session:
+        existing_names = {a.name for a in session.exec(select(Application)).all()}
+        added = 0
+        for a in _SEED_APPS:
+            if a["name"] not in existing_names:
+                session.add(Application(**a))
+                added += 1
+        if added:
+            session.commit()
+            print(f"[OSIRIS] {added} application(s) ajoutée(s) au catalogue")
 
 
 # ── Audit log ─────────────────────────────────────────────────────────────────
@@ -240,6 +282,41 @@ def _log(session: Session, user: User, action: str,
         action=action,
         target_mac=target_mac,
         details=json.dumps(details, ensure_ascii=False) if details else None,
+    ))
+
+
+async def _send_webhook(url: str, machine: Machine, status: str):
+    """Envoie une notification webhook compatible Teams / Slack / Discord."""
+    if not url:
+        return
+    icons = {"deployed": "✅", "failed": "❌", "deploying": "🔄", "pending": "⏳"}
+    icon  = icons.get(status, "ℹ️")
+    labels = {"deployed": "déployée", "failed": "échec", "deploying": "en cours", "pending": "en attente"}
+    label  = labels.get(status, status)
+    text = f"{icon} **{machine.hostname}** — {label} ({machine.os.upper()} · {machine.client})"
+    payload = {"text": text}   # compatible Teams et Slack
+    try:
+        import urllib.request as _req
+        data = json.dumps(payload).encode()
+        req  = _req.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        _req.urlopen(req, timeout=5)
+    except Exception:
+        pass  # les webhooks sont best-effort
+
+
+def _record_deploy_event(session: Session, machine: Machine, status: str):
+    """Enregistre un événement de déploiement (sans commit)."""
+    profile_name = ""
+    if machine.profile_id:
+        p = session.get(Profile, machine.profile_id)
+        if p:
+            profile_name = p.name
+    session.add(DeploymentEvent(
+        mac=machine.mac,
+        hostname=machine.hostname,
+        status=status,
+        os=machine.os,
+        profile_name=profile_name,
     ))
 
 
@@ -289,7 +366,7 @@ def change_password(body: PasswordChange, current_user: User = Depends(get_curre
 def get_organizations():
     with Session(engine) as session:
         orgs = session.exec(select(Organization)).all()
-        return [{"id": o.id, "name": o.name, "slug": o.slug} for o in orgs]
+        return [{"id": o.id, "name": o.name, "slug": o.slug, "webhook_url": o.webhook_url} for o in orgs]
 
 
 @app.post("/organizations", status_code=201)
@@ -302,7 +379,25 @@ def create_organization(body: OrgCreate, current_user: User = Depends(require_ad
         _log(session, current_user, "create_org", details={"name": body.name, "slug": body.slug})
         session.commit()
         session.refresh(org)
-        return {"id": org.id, "name": org.name, "slug": org.slug}
+        return {"id": org.id, "name": org.name, "slug": org.slug, "webhook_url": org.webhook_url}
+
+
+@app.patch("/organizations/{org_id}")
+async def patch_organization(org_id: int, request: Request, current_user: User = Depends(require_admin)):
+    """Met à jour les champs d'une organisation (ex: webhook_url)."""
+    data = await request.json()
+    with Session(engine) as session:
+        org = session.get(Organization, org_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organisation introuvable")
+        if "webhook_url" in data:
+            org.webhook_url = data["webhook_url"]
+        if "name" in data:
+            org.name = data["name"]
+        session.add(org)
+        session.commit()
+        session.refresh(org)
+        return {"id": org.id, "name": org.name, "slug": org.slug, "webhook_url": org.webhook_url}
 
 
 @app.delete("/organizations/{org_id}", status_code=204)
@@ -366,6 +461,7 @@ def _profile_dict(p: Profile) -> dict:
         "win_image": p.win_image,
         "win_index": p.win_index,
         "tv_suffix": "***" if p.tv_suffix else "",
+        "app_ids": p.app_ids or "",
     }
 
 
@@ -380,6 +476,7 @@ def _profile_for_template(p: Profile) -> dict:
         "win_image": p.win_image or "",
         "win_index": p.win_index,
         "tv_suffix": decrypt(p.tv_suffix or ""),
+        "app_ids": p.app_ids or "",
     }
 
 
@@ -403,8 +500,8 @@ def get_profiles():
 
 @app.post("/profiles", status_code=201)
 def create_profile(body: ProfileCreate, current_user: User = Depends(require_admin)):
-    if body.os not in ("ubuntu", "windows"):
-        raise HTTPException(status_code=400, detail="OS invalide : ubuntu ou windows")
+    if body.os not in ("ubuntu", "windows", "debian"):
+        raise HTTPException(status_code=400, detail="OS invalide : ubuntu, debian ou windows")
     with Session(engine) as session:
         data = body.model_dump()
         data["tv_suffix"] = encrypt(data.get("tv_suffix", ""))
@@ -457,6 +554,47 @@ class ImageCreate(SQLModel):
     iso_url: str
 
 
+# ── Applications (winget / apt) ───────────────────────────────────────────────
+
+class ApplicationCreate(SQLModel):
+    name: str
+    winget_id: str = ""
+    apt_package: str = ""
+    category: str = "tools"
+    icon: str = "📦"
+
+
+def _app_dict(a: Application) -> dict:
+    return {"id": a.id, "name": a.name, "winget_id": a.winget_id,
+            "apt_package": a.apt_package, "category": a.category, "icon": a.icon}
+
+
+@app.get("/apps", dependencies=[Depends(get_current_user)])
+def get_apps():
+    with Session(engine) as session:
+        return [_app_dict(a) for a in session.exec(select(Application).order_by(Application.category, Application.name)).all()]
+
+
+@app.post("/apps", status_code=201)
+def create_app(body: ApplicationCreate, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        app_obj = Application(**body.model_dump())
+        session.add(app_obj)
+        session.commit()
+        session.refresh(app_obj)
+        return _app_dict(app_obj)
+
+
+@app.delete("/apps/{app_id}", status_code=204)
+def delete_app(app_id: int, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        app_obj = session.get(Application, app_id)
+        if not app_obj:
+            raise HTTPException(status_code=404, detail="Application introuvable")
+        session.delete(app_obj)
+        session.commit()
+
+
 def _image_dict(img: OsImage) -> dict:
     return {
         "id": img.id, "name": img.name, "version": img.version,
@@ -474,8 +612,8 @@ def get_images():
 
 @app.post("/images", status_code=201)
 async def create_image(body: ImageCreate, current_user: User = Depends(require_admin)):
-    if body.os not in ("ubuntu", "windows"):
-        raise HTTPException(status_code=400, detail="OS invalide : ubuntu ou windows")
+    if body.os not in ("ubuntu", "windows", "debian"):
+        raise HTTPException(status_code=400, detail="OS invalide : ubuntu, debian ou windows")
     with Session(engine) as session:
         image = OsImage(
             name=body.name, version=body.version,
@@ -528,14 +666,19 @@ def get_boot_script(request: Request, mac: str | None = None):
             script += "sleep 5\nexit\n"
             return Response(content=script, media_type="text/plain")
 
+        # Mode capture prioritaire — même si déjà déployée, on boot WinPE pour capturer
+        if clean_mac in _capture_jobs and _capture_jobs[clean_mac]["status"] == "waiting":
+            pass  # on laisse tomber dans le bloc WinPE ci-dessous
+
         # Machine déjà déployée → boot sur le disque local, pas de réinstall
-        if machine.status == "deployed":
+        elif machine.status == "deployed":
             script = "#!ipxe\n"
             script += f"echo [OSIRIS] {machine.hostname} est deploye - boot local\n"
             script += "exit 1\n"
             return Response(content=script, media_type="text/plain")
 
         machine.status = "deploying"
+        _record_deploy_event(session, machine, "deploying")
         session.add(machine)
         session.commit()
 
@@ -583,6 +726,13 @@ def get_boot_script(request: Request, mac: str | None = None):
             script += "echo [OSIRIS] Chargement Ubuntu (image manuelle)...\n"
         script += f"kernel {vmlinuz} initrd=initrd ip=dhcp autoinstall boot=casper netboot=nfs nfsroot={nfsroot} ds=nocloud-net;s={OSIRIS_BASE_URL}/cloud-init/{clean_mac}/\n"
         script += f"initrd {initrd}\n"
+    elif os_type == "debian":
+        script += "echo [OSIRIS] Chargement Debian Installer...\n"
+        script += f"kernel {OSIRIS_BASE_URL}/static/debian-12/linux auto=true priority=critical "
+        script += f"hostname={hostname} "
+        script += f"url={OSIRIS_BASE_URL}/preseed/{clean_mac} "
+        script += f"locale=fr_FR.UTF-8 keymap=fr\n"
+        script += f"initrd {OSIRIS_BASE_URL}/static/debian-12/initrd.gz\n"
 
     script += "boot\n"
     return Response(content=script, media_type="text/plain")
@@ -643,7 +793,103 @@ def get_user_data(mac: str):
         profile=profile,
         ssh_pubkey=SSH_PUBKEY,
         packages=packages,
+        mac=clean_mac,
+        osiris_url=OSIRIS_BASE_URL,
         status_url=f"{OSIRIS_BASE_URL}/machines/{clean_mac}/status",
+    )
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/firstboot-ubuntu/{mac}")
+def get_ubuntu_firstboot(mac: str):
+    """Script bash généré à la volée, exécuté au premier démarrage Ubuntu via systemd oneshot."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine inconnue")
+        profile = _resolve_profile(session, machine)
+        app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
+        linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
+    profile_ctx = _profile_for_template(profile)
+    tv_suffix = profile_ctx.get("tv_suffix", "")
+    tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
+    content = jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
+        machine=machine,
+        profile=profile_ctx,
+        tv_password=tv_password,
+        linux_apps=list(linux_apps),
+        osiris_url=OSIRIS_BASE_URL,
+    )
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/preseed/{mac}")
+def get_preseed(mac: str):
+    """Fichier preseed Debian généré à la volée pour l'installation automatique."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine or not machine.password_hash:
+            raise HTTPException(status_code=404, detail="Machine inconnue ou non configurée")
+        profile = _resolve_profile(session, machine)
+    packages = [p.strip() for p in (profile.extra_packages or "").split(",") if p.strip()]
+    content = jinja_env.get_template("preseed.cfg.j2").render(
+        machine=machine,
+        profile=_profile_for_template(profile),
+        packages=packages,
+        mac=clean_mac,
+        osiris_url=OSIRIS_BASE_URL,
+        status_url=f"{OSIRIS_BASE_URL}/machines/{clean_mac}/status",
+    )
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/firstboot-debian/{mac}")
+def get_debian_firstboot(mac: str):
+    """Réutilise le template Ubuntu — apt-get est identique sur Debian."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine inconnue")
+        profile = _resolve_profile(session, machine)
+        app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
+        linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
+    profile_ctx = _profile_for_template(profile)
+    tv_suffix = profile_ctx.get("tv_suffix", "")
+    tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
+    content = jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
+        machine=machine,
+        profile=profile_ctx,
+        tv_password=tv_password,
+        linux_apps=list(linux_apps),
+        osiris_url=OSIRIS_BASE_URL,
+    )
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/firstboot-windows/{mac}")
+def get_windows_firstboot(mac: str):
+    """Script PowerShell généré à la volée, exécuté au 1er démarrage Windows via unattend FirstLogonCommands."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine inconnue")
+        profile = _resolve_profile(session, machine)
+        app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
+        win_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.winget_id != "")).all() if app_id_list else []
+    profile_ctx = _profile_for_template(profile)
+    tv_suffix = profile_ctx.get("tv_suffix", "")
+    tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
+    content = jinja_env.get_template("firstboot-windows.ps1.j2").render(
+        machine=machine,
+        profile=profile_ctx,
+        tv_password=tv_password,
+        win_apps=list(win_apps),
+        osiris_url=OSIRIS_BASE_URL,
+        osiris_ip=OSIRIS_IP,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -767,13 +1013,47 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
         if status == "pending":
             _deploy_logs.pop(clean_mac, None)
             _deploy_progress.pop(clean_mac, None)
+        _record_deploy_event(session, machine, status)
         session.add(machine)
+        # Récupère le webhook de l'org avant le commit pour éviter session expirée
+        webhook_url = ""
+        if status in ("deployed", "failed") and machine.organization_id:
+            org = session.get(Organization, machine.organization_id)
+            if org:
+                webhook_url = org.webhook_url
+        machine_snapshot = machine  # référence avant commit
         session.commit()
     background_tasks.add_task(
         manager.broadcast,
         {"mac": clean_mac, "status": status, "deployed_at": deployed_at},
     )
+    if webhook_url:
+        background_tasks.add_task(_send_webhook, webhook_url, machine_snapshot, status)
     return {"detail": "Statut mis à jour"}
+
+
+@app.get("/machines/{mac}/history", dependencies=[Depends(get_current_user)])
+def get_machine_history(mac: str):
+    """Retourne les 20 derniers événements de déploiement pour une machine."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        events = session.exec(
+            select(DeploymentEvent)
+            .where(DeploymentEvent.mac == clean_mac)
+            .order_by(DeploymentEvent.timestamp.desc())
+            .limit(20)
+        ).all()
+        return [
+            {
+                "id": e.id,
+                "timestamp": e.timestamp.isoformat(),
+                "status": e.status,
+                "os": e.os,
+                "profile_name": e.profile_name,
+                "hostname": e.hostname,
+            }
+            for e in events
+        ]
 
 
 @app.post("/machines/{mac}/deploy-progress")
@@ -896,6 +1176,73 @@ def _build_capture_script(mac: str) -> Response:
     return Response(content=content, media_type="text/plain")
 
 
+# ── Navigateur WIM ────────────────────────────────────────────────────────────
+
+@app.get("/wims", dependencies=[Depends(get_current_user)])
+def list_wims():
+    """Liste les fichiers .wim disponibles sur le partage Windows."""
+    import glob
+    wim_dir = WIN_SHARE_PATH
+    results = []
+    for path in sorted(glob.glob(f"{wim_dir}/*.wim")):
+        name = os.path.basename(path)
+        if name == "boot.wim":
+            continue  # fichier système WinPE, pas une image déployable
+        try:
+            stat = os.stat(path)
+            results.append({
+                "name": name,
+                "size_mb": round(stat.st_size / 1_048_576),
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                "is_golden": name != "install.wim",
+            })
+        except OSError:
+            pass
+    return results
+
+
+# ── Import CSV machines ────────────────────────────────────────────────────────
+
+@app.post("/machines/import", dependencies=[Depends(require_admin)])
+async def import_machines(request: Request, current_user: User = Depends(require_admin)):
+    """Importe des machines depuis un CSV (mac,hostname,client,os,profile_name).
+    Ligne d'en-tête obligatoire. Les machines existantes sont ignorées."""
+    import csv, io
+    body = await request.body()
+    text = body.decode("utf-8-sig").strip()  # utf-8-sig gère le BOM Excel
+    reader = csv.DictReader(io.StringIO(text))
+    created, skipped, errors = 0, 0, []
+    with Session(engine) as session:
+        profiles = {p.name.lower(): p for p in session.exec(select(Profile)).all()}
+        for i, row in enumerate(reader, start=2):
+            try:
+                raw_mac  = (row.get("mac") or "").strip()
+                hostname = (row.get("hostname") or "").strip()
+                client   = (row.get("client") or "").strip()
+                os_name  = (row.get("os") or "ubuntu").strip().lower()
+                profile_name = (row.get("profile_name") or "").strip()
+                if not raw_mac or not hostname or not client:
+                    errors.append(f"Ligne {i} : champs obligatoires manquants")
+                    continue
+                clean_mac = validate_mac(raw_mac)
+                if session.exec(select(Machine).where(Machine.mac == clean_mac)).first():
+                    skipped += 1
+                    continue
+                if os_name not in ("ubuntu", "windows", "debian"):
+                    os_name = "ubuntu"
+                profile = profiles.get(profile_name.lower()) if profile_name else None
+                machine = Machine(
+                    mac=clean_mac, hostname=hostname, client=client, os=os_name,
+                    profile_id=profile.id if profile else None,
+                )
+                session.add(machine)
+                created += 1
+            except HTTPException as e:
+                errors.append(f"Ligne {i} : {e.detail}")
+        session.commit()
+    return {"created": created, "skipped": skipped, "errors": errors}
+
+
 # ── Capture d'image golden ─────────────────────────────────────────────────────
 
 @app.post("/capture/register", dependencies=[Depends(require_admin)])
@@ -910,6 +1257,13 @@ def register_capture(mac: str, wim_name: str):
         "status": "waiting",
         "registered_at": datetime.now(timezone.utc).isoformat(),
     }
+    # Passe la machine en pending pour que le boot route la laisse accéder à WinPE
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if machine and machine.status == "deployed":
+            machine.status = "pending"
+            session.add(machine)
+            session.commit()
     return {"mac": clean_mac, "wim_name": wim_name, "status": "waiting"}
 
 
@@ -920,13 +1274,13 @@ def list_captures():
 
 
 @app.post("/capture/{mac}/done")
-def capture_done(mac: str, success: bool = True):
+async def capture_done(mac: str, success: bool = True):
     """Appelé par le script WinPE à la fin de la capture."""
     clean_mac = validate_mac(mac)
     if clean_mac in _capture_jobs:
         _capture_jobs[clean_mac]["status"] = "done" if success else "failed"
         _capture_jobs[clean_mac]["finished_at"] = datetime.now(timezone.utc).isoformat()
-    asyncio.run(manager.broadcast({"type": "capture_done", "mac": clean_mac, "success": success}))
+    await manager.broadcast({"type": "capture_done", "mac": clean_mac, "success": success})
     return {"ok": True}
 
 
@@ -1047,6 +1401,37 @@ import wakeonlan
 
 _honeypot_log = logging.getLogger("osiris.honeypot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+
+class BatchStatusBody(SQLModel):
+    macs: list[str]
+    status: str = "pending"
+
+
+@app.post("/machines/batch-status")
+async def batch_status(body: BatchStatusBody, current_user: User = Depends(get_current_user)):
+    """Passe une liste de machines au statut donné (ex: pending pour un redéploiement en lot)."""
+    if body.status not in ("pending", "deploying", "deployed", "failed"):
+        raise HTTPException(status_code=400, detail="Statut invalide")
+    updated = []
+    with Session(engine) as session:
+        for raw_mac in body.macs:
+            try:
+                clean_mac = validate_mac(raw_mac)
+            except HTTPException:
+                continue
+            machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+            if machine:
+                machine.status = body.status
+                _record_deploy_event(session, machine, body.status)
+                session.add(machine)
+                updated.append(clean_mac)
+        if updated:
+            _log(session, current_user, "batch_status", details={"macs": updated, "status": body.status})
+        session.commit()
+    for mac in updated:
+        await manager.broadcast({"type": "status", "mac": mac, "status": body.status})
+    return {"updated": updated}
 
 
 @app.post("/machines/{mac}/wol", dependencies=[Depends(get_current_user)])

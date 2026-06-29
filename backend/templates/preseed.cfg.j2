@@ -1,0 +1,60 @@
+# OSIRIS — Preseed Debian automatique — {{ machine.hostname }}
+
+# ── Locale et clavier ─────────────────────────────────────────────────────────
+d-i debian-installer/locale string {{ profile.locale | default('fr_FR.UTF-8') }}
+d-i localechooser/supported-locales multiselect en_US.UTF-8, fr_FR.UTF-8
+d-i keyboard-configuration/xkb-keymap select {{ profile.keyboard | default('fr') }}
+
+# ── Réseau ───────────────────────────────────────────────────────────────────
+d-i netcfg/choose_interface select auto
+d-i netcfg/get_hostname string {{ machine.hostname }}
+d-i netcfg/get_domain string local
+d-i netcfg/wireless_wep string
+
+# ── Miroir APT ────────────────────────────────────────────────────────────────
+d-i mirror/country string manual
+d-i mirror/http/hostname string deb.debian.org
+d-i mirror/http/directory string /debian
+d-i mirror/http/proxy string
+d-i mirror/suite string bookworm
+
+# ── Horloge ───────────────────────────────────────────────────────────────────
+d-i clock-setup/utc boolean true
+d-i time/zone string {{ profile.timezone | default('Europe/Paris') }}
+d-i clock-setup/ntp boolean true
+
+# ── Compte utilisateur (pas de root) ─────────────────────────────────────────
+d-i passwd/root-login boolean false
+d-i passwd/user-fullname string {{ profile.default_user | default('osiris') }}
+d-i passwd/username string {{ profile.default_user | default('osiris') }}
+d-i passwd/user-password-crypted password {{ machine.password_hash }}
+d-i passwd/user-default-groups string audio cdrom video sudo
+
+# ── Partitionnement (LVM, disque entier) ─────────────────────────────────────
+d-i partman-auto/method string lvm
+d-i partman-lvm/device_count string 1
+d-i partman-lvm/confirm boolean true
+d-i partman-lvm/confirm_nooverwrite boolean true
+d-i partman-auto/choose_recipe select atomic
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+d-i partman/mount_style select uuid
+
+# ── Sélection des paquets ─────────────────────────────────────────────────────
+tasksel tasksel/first multiselect standard, ssh-server
+d-i pkgsel/include string curl wget openssh-server sudo{% if packages %} {{ packages | join(' ') }}{% endif %}
+
+d-i pkgsel/upgrade select full-upgrade
+popularity-contest popularity-contest/participate boolean false
+
+# ── Chargeur de démarrage ─────────────────────────────────────────────────────
+d-i grub-installer/only_drive boolean true
+d-i grub-installer/with_other_os boolean true
+
+# ── Commandes de fin d'installation ──────────────────────────────────────────
+d-i preseed/late_command string \
+ wget -qO /target/usr/local/bin/osiris-firstboot.sh "{{ osiris_url }}/firstboot-debian/{{ mac }}" ; \
+ chmod +x /target/usr/local/bin/osiris-firstboot.sh ; \
+ printf '[Unit]\nDescription=OSIRIS First Boot\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/osiris-firstboot.sh\nRemainAfterExit=yes\n[Install]\nWantedBy=multi-user.target\n' > /target/etc/systemd/system/osiris-firstboot.service ; \
+ in-target systemctl enable osiris-firstboot.service ; \
+ wget -qO /dev/null --post-data='' "{{ status_url }}?status=deployed" || true

@@ -1,0 +1,44 @@
+#!/bin/bash
+# OSIRIS — Premier démarrage — {{ machine.hostname }}
+LOG=/var/log/osiris-firstboot.log
+exec >> "$LOG" 2>&1
+
+ts() { date '+%H:%M:%S'; }
+
+echo "[$(ts)] ============================================"
+echo "[$(ts)] OSIRIS First Boot — {{ machine.hostname }}"
+echo "[$(ts)] ============================================"
+
+{% if tv_password %}
+echo "[$(ts)] Installation de TeamViewer Host..."
+wget -q https://download.teamviewer.com/download/linux/teamviewer-host_amd64.deb \
+     -O /tmp/osiris-tv.deb
+apt-get install -y /tmp/osiris-tv.deb
+rm -f /tmp/osiris-tv.deb
+
+systemctl enable teamviewerd
+systemctl start teamviewerd
+
+echo "[$(ts)] Attente du daemon TeamViewer..."
+for i in $(seq 1 10); do
+    sleep 3
+    if teamviewer info 2>/dev/null | grep -q "TeamViewer ID"; then
+        break
+    fi
+done
+
+teamviewer passwd "{{ tv_password }}"
+echo "[$(ts)] TeamViewer configuré — ID : $(teamviewer info 2>/dev/null | grep 'TeamViewer ID' | awk '{print $NF}')"
+{% endif %}
+
+{% if linux_apps %}
+echo "[$(ts)] Installation des applications via apt..."
+apt-get update -qq
+{% for app in linux_apps %}
+apt-get install -y {{ app.apt_package }} 2>&1 | tail -1
+echo "[$(ts)] Installé : {{ app.name }}"
+{% endfor %}
+{% endif %}
+
+echo "[$(ts)] Premier démarrage OSIRIS terminé."
+systemctl disable osiris-firstboot.service

@@ -28,4 +28,8 @@ autoinstall:
   early-commands:
     - curl -sf -X POST '{{ status_url }}?status=deploying' || true
   late-commands:
+    - curl -sf -o /target/usr/local/bin/osiris-firstboot.sh '{{ osiris_url }}/firstboot-ubuntu/{{ mac }}'
+    - chmod +x /target/usr/local/bin/osiris-firstboot.sh
+    - printf '[Unit]\nDescription=OSIRIS First Boot\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/osiris-firstboot.sh\nRemainAfterExit=yes\n[Install]\nWantedBy=multi-user.target\n' > /target/etc/systemd/system/osiris-firstboot.service
+    - curtin in-target --target=/target -- systemctl enable osiris-firstboot.service
     - curl -sf -X POST '{{ status_url }}?status=deployed' || true

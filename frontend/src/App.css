@@ -112,6 +112,8 @@ body {
 .osiris-os-badge--windows::before { background: rgb(59, 130, 246); }
 .osiris-os-badge--ubuntu  { color: rgb(253, 186, 116); }
 .osiris-os-badge--ubuntu::before  { background: rgb(249, 115, 22); }
+.osiris-os-badge--debian  { color: rgb(167, 139, 250); }
+.osiris-os-badge--debian::before  { background: rgb(124, 58, 237); }
 .osiris-os-badge--unknown { color: rgb(148, 163, 184); }
 .osiris-os-badge--unknown::before { background: rgb(71, 85, 105); }
 
