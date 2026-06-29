@@ -1,23 +1,126 @@
 <?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend">
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+
+    <!-- ── Pass windowsPE : langue de l'installeur ──────────────────────── -->
+    <settings pass="windowsPE">
+        <component name="Microsoft-Windows-International-Core-WinPE"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
+            <SetupUILanguage>
+                <UILanguage>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</UILanguage>
+            </SetupUILanguage>
+            <InputLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</InputLocale>
+            <SystemLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</SystemLocale>
+            <UILanguage>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</UILanguage>
+            <UserLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</UserLocale>
+        </component>
+    </settings>
+
+    <!-- ── Pass specialize : identité machine, locale OS, jonction domaine ─ -->
     <settings pass="specialize">
-        <component name="Microsoft-Windows-Shell-Setup">
+        <component name="Microsoft-Windows-Shell-Setup"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
             <ComputerName>{{ hostname }}</ComputerName>
             <RegisteredOwner>{{ client }}</RegisteredOwner>
-            <TimeZone>{{ profile.timezone }}</TimeZone>
+            <TimeZone>{{ win_timezone }}</TimeZone>
         </component>
-        <component name="Microsoft-Windows-International-Core">
-            <InputLocale>{{ profile.locale }}</InputLocale>
-            <SystemLocale>{{ profile.locale }}</SystemLocale>
-            <UserLocale>{{ profile.locale }}</UserLocale>
+        <component name="Microsoft-Windows-International-Core"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
+            <InputLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</InputLocale>
+            <SystemLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</SystemLocale>
+            <UserLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</UserLocale>
         </component>
-{% if profile.join_domain %}
-        <component name="Microsoft-Windows-UnattendedJoin">
+{% if profile.join_domain and profile.domain_join_user and profile.domain_join_password %}
+        <component name="Microsoft-Windows-UnattendedJoin"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
             <Identification>
                 <JoinDomain>{{ profile.domain }}</JoinDomain>
+{% if ou %}
                 <MachineObjectOU>{{ ou }}</MachineObjectOU>
+{% endif %}
+                <Credentials>
+                    <Domain>{{ profile.domain }}</Domain>
+                    <Username>{{ profile.domain_join_user }}</Username>
+                    <Password>{{ profile.domain_join_password }}</Password>
+                </Credentials>
+            </Identification>
+        </component>
+{% elif profile.join_domain %}
+        <component name="Microsoft-Windows-UnattendedJoin"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
+            <Identification>
+                <JoinDomain>{{ profile.domain }}</JoinDomain>
+{% if ou %}
+                <MachineObjectOU>{{ ou }}</MachineObjectOU>
+{% endif %}
             </Identification>
         </component>
 {% endif %}
     </settings>
+
+    <!-- ── Pass oobeSystem : skip OOBE, compte admin local ───────────────── -->
+    <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-International-Core"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
+            <InputLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</InputLocale>
+            <SystemLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</SystemLocale>
+            <UILanguage>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</UILanguage>
+            <UserLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</UserLocale>
+        </component>
+        <component name="Microsoft-Windows-Shell-Setup"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
+            <OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                <ProtectYourPC>3</ProtectYourPC>
+            </OOBE>
+            <UserAccounts>
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Password>
+                            <Value>OsirisAdmin2026!</Value>
+                            <PlainText>true</PlainText>
+                        </Password>
+                        <DisplayName>Administrateur OSIRIS</DisplayName>
+                        <Group>Administrators</Group>
+                        <Name>osiris-admin</Name>
+                    </LocalAccount>
+                </LocalAccounts>
+            </UserAccounts>
+            <AutoLogon>
+                <Password>
+                    <Value>OsirisAdmin2026!</Value>
+                    <PlainText>true</PlainText>
+                </Password>
+                <Enabled>true</Enabled>
+                <LogonCount>1</LogonCount>
+                <Username>osiris-admin</Username>
+            </AutoLogon>
+            <FirstLogonCommands>
+                <SynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Description>OSIRIS Post-Deploy</Description>
+                    <CommandLine>cmd /c "if exist C:\osiris-firstboot.ps1 powershell -ExecutionPolicy Bypass -File C:\osiris-firstboot.ps1"</CommandLine>
+                    <RequiresUserInput>false</RequiresUserInput>
+                </SynchronousCommand>
+            </FirstLogonCommands>
+        </component>
+    </settings>
+
 </unattend>

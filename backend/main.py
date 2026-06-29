@@ -1,8 +1,10 @@
+import asyncio
 import json
+import logging
 import os
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -22,11 +24,12 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from jinja2 import Environment, FileSystemLoader
 
-from models import AuditLog, Machine, Organization, OsImage, Profile, User, engine, init_db
+from models import AuditLog, DriverPack, Machine, Organization, OsImage, Profile, User, engine, init_db, normalize_model
 from auth import (
     hash_password, verify_password, create_token,
     get_current_user, require_admin
 )
+from crypto import encrypt, decrypt
 
 
 # ── Démarrage ──────────────────────────────────────────────────────────────────
@@ -56,6 +59,27 @@ OSIRIS_IP       = os.environ.get("OSIRIS_IP", "192.168.1.18")
 SSH_PUBKEY      = os.environ.get("OSIRIS_SSH_PUBKEY", "").strip()
 ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL", "admin@osiris.local")
 ADMIN_PASSWORD  = os.environ.get("ADMIN_PASSWORD", "changeme")
+
+# Mapping IANA → noms Windows (subset courant MSP France)
+_LINUX_TO_WIN_TZ: dict[str, str] = {
+    "Europe/Paris":      "Romance Standard Time",
+    "Europe/Brussels":   "Romance Standard Time",
+    "Europe/Luxembourg": "Romance Standard Time",
+    "Europe/London":     "GMT Standard Time",
+    "Europe/Berlin":     "W. Europe Standard Time",
+    "Europe/Madrid":     "Romance Standard Time",
+    "Europe/Rome":       "W. Europe Standard Time",
+    "Europe/Amsterdam":  "W. Europe Standard Time",
+    "Europe/Zurich":     "W. Europe Standard Time",
+    "America/New_York":  "Eastern Standard Time",
+    "America/Chicago":   "Central Standard Time",
+    "America/Denver":    "Mountain Standard Time",
+    "America/Los_Angeles": "Pacific Standard Time",
+    "UTC": "UTC",
+}
+
+def _win_timezone(tz: str) -> str:
+    return _LINUX_TO_WIN_TZ.get(tz, tz)  # retourne la valeur telle quelle si déjà au format Windows
 
 allowed_origins = os.environ.get("ALLOWED_ORIGINS", "").split(",")
 
@@ -91,6 +115,12 @@ class ConnectionManager:
                 self.disconnect(ws)
 
 manager = ConnectionManager()
+
+_deploy_progress: dict[str, int] = {}
+_deploy_logs: dict[str, list[str]] = {}
+
+# ── Mode capture : mac → {wim_name, registered_at, status} ───────────────────
+_capture_jobs: dict[str, dict] = {}
 
 
 jinja_env = Environment(
@@ -132,6 +162,11 @@ class ProfileCreate(SQLModel):
     extra_packages: str = ""
     join_domain: bool = True
     domain: str = "entreprise.local"
+    domain_join_user: str = ""
+    domain_join_password: str = ""
+    win_image: str = ""
+    win_index: int = 1
+    tv_suffix: str = ""
 
 class ProfilePatch(SQLModel):
     name: Optional[str] = None
@@ -142,6 +177,11 @@ class ProfilePatch(SQLModel):
     extra_packages: Optional[str] = None
     join_domain: Optional[bool] = None
     domain: Optional[str] = None
+    domain_join_user: Optional[str] = None
+    domain_join_password: Optional[str] = None
+    win_image: Optional[str] = None
+    win_index: Optional[int] = None
+    tv_suffix: Optional[str] = None
 
 class LoginRequest(SQLModel):
     email: str
@@ -321,6 +361,25 @@ def _profile_dict(p: Profile) -> dict:
         "locale": p.locale, "keyboard": p.keyboard, "timezone": p.timezone,
         "default_user": p.default_user, "extra_packages": p.extra_packages,
         "join_domain": p.join_domain, "domain": p.domain,
+        "domain_join_user": p.domain_join_user,
+        "domain_join_password": "***" if p.domain_join_password else "",
+        "win_image": p.win_image,
+        "win_index": p.win_index,
+        "tv_suffix": "***" if p.tv_suffix else "",
+    }
+
+
+def _profile_for_template(p: Profile) -> dict:
+    """Profil avec secrets déchiffrés — uniquement pour les templates Jinja2, jamais renvoyé au client."""
+    return {
+        "locale": p.locale, "keyboard": p.keyboard, "timezone": p.timezone,
+        "default_user": p.default_user, "extra_packages": p.extra_packages,
+        "join_domain": p.join_domain, "domain": p.domain,
+        "domain_join_user": p.domain_join_user,
+        "domain_join_password": decrypt(p.domain_join_password or ""),
+        "win_image": p.win_image or "",
+        "win_index": p.win_index,
+        "tv_suffix": decrypt(p.tv_suffix or ""),
     }
 
 
@@ -347,7 +406,10 @@ def create_profile(body: ProfileCreate, current_user: User = Depends(require_adm
     if body.os not in ("ubuntu", "windows"):
         raise HTTPException(status_code=400, detail="OS invalide : ubuntu ou windows")
     with Session(engine) as session:
-        profile = Profile(**body.model_dump())
+        data = body.model_dump()
+        data["tv_suffix"] = encrypt(data.get("tv_suffix", ""))
+        data["domain_join_password"] = encrypt(data.get("domain_join_password", ""))
+        profile = Profile(**data)
         session.add(profile)
         _log(session, current_user, "create_profile", details={"name": body.name, "os": body.os})
         session.commit()
@@ -362,6 +424,10 @@ def update_profile(profile_id: int, patch: ProfilePatch, current_user: User = De
         if not profile:
             raise HTTPException(status_code=404, detail="Profil introuvable")
         changes = patch.model_dump(exclude_none=True)
+        if "tv_suffix" in changes:
+            changes["tv_suffix"] = encrypt(changes["tv_suffix"])
+        if "domain_join_password" in changes:
+            changes["domain_join_password"] = encrypt(changes["domain_join_password"])
         for field, value in changes.items():
             setattr(profile, field, value)
         session.add(profile)
@@ -466,7 +532,7 @@ def get_boot_script(request: Request, mac: str | None = None):
         if machine.status == "deployed":
             script = "#!ipxe\n"
             script += f"echo [OSIRIS] {machine.hostname} est deploye - boot local\n"
-            script += "exit\n"
+            script += "exit 1\n"
             return Response(content=script, media_type="text/plain")
 
         machine.status = "deploying"
@@ -535,12 +601,14 @@ def get_unattend_xml(mac: str):
                 media_type="application/xml", status_code=404,
             )
         profile = _resolve_profile(session, machine)
+        profile_ctx = _profile_for_template(profile)
 
     content = jinja_env.get_template("unattend.xml.j2").render(
         hostname=escape(machine.hostname),
         client=escape(machine.client),
-        ou=escape(machine.ou),
-        profile=profile,
+        ou=escape(machine.ou or ""),
+        profile=profile_ctx,
+        win_timezone=escape(_win_timezone(profile_ctx["timezone"])),
     )
     return Response(content=content, media_type="application/xml")
 
@@ -694,8 +762,11 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
             raise HTTPException(status_code=404, detail="Machine introuvable")
         machine.status = status
         if status == "deployed":
-            machine.deployed_at = datetime.utcnow()
+            machine.deployed_at = datetime.now(timezone.utc)
             deployed_at = machine.deployed_at.isoformat()
+        if status == "pending":
+            _deploy_logs.pop(clean_mac, None)
+            _deploy_progress.pop(clean_mac, None)
         session.add(machine)
         session.commit()
     background_tasks.add_task(
@@ -703,6 +774,36 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
         {"mac": clean_mac, "status": status, "deployed_at": deployed_at},
     )
     return {"detail": "Statut mis à jour"}
+
+
+@app.post("/machines/{mac}/deploy-progress")
+@limiter.limit("60/minute")
+async def report_deploy_progress(request: Request, mac: str, p: int):
+    """Appelé par WinPE à chaque étape pour mettre à jour la progression DISM."""
+    clean_mac = validate_mac(mac)
+    progress = max(0, min(100, p))
+    _deploy_progress[clean_mac] = progress
+    await manager.broadcast({"mac": clean_mac, "dism_progress": progress})
+    return {"ok": True}
+
+
+@app.post("/machines/{mac}/log")
+@limiter.limit("120/minute")
+async def append_deploy_log(request: Request, mac: str, msg: str):
+    """Appelé par WinPE pour envoyer une ligne de log en temps réel."""
+    clean_mac = validate_mac(mac)
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    _deploy_logs.setdefault(clean_mac, []).append(line)
+    await manager.broadcast({"mac": clean_mac, "log_line": line})
+    return {"ok": True}
+
+
+@app.get("/machines/{mac}/logs", dependencies=[Depends(get_current_user)])
+def get_deploy_logs(mac: str):
+    """Retourne les logs de déploiement en mémoire pour une machine."""
+    clean_mac = validate_mac(mac)
+    return {"logs": _deploy_logs.get(clean_mac, [])}
 
 
 def _ip_to_mac(ip: str) -> Optional[str]:
@@ -722,13 +823,19 @@ def _ip_to_mac(ip: str) -> Optional[str]:
 @app.get("/winpe-auto")
 def get_winpe_script_auto(request: Request):
     """Identifie la machine par son IP source (lookup dnsmasq), retourne le script de déploiement."""
-    client_ip = request.client.host
+    client_ip = (
+        request.headers.get("X-Real-IP")
+        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or request.client.host
+    )
     mac = _ip_to_mac(client_ip)
     if not mac:
         return Response(
             content=f"echo [OSIRIS] IP {client_ip} inconnue dans les leases DHCP\r\npause\r\nexit /b 1",
             media_type="text/plain", status_code=404,
         )
+    if mac in _capture_jobs and _capture_jobs[mac]["status"] == "waiting":
+        return _build_capture_script(mac)
     return _build_winpe_script(mac)
 
 
@@ -756,14 +863,15 @@ def _build_winpe_script(mac: str) -> Response:
             media_type="text/plain", status_code=503,
         )
 
-    locale = getattr(profile, "locale", "fr_FR").replace("_", "-")[:5]
+    profile_ctx = _profile_for_template(profile)
+    locale = profile_ctx["locale"].replace("_", "-")[:5]
     content = jinja_env.get_template("winpe-deploy.cmd.j2").render(
         machine=machine,
-        profile=profile,
+        profile=profile_ctx,
         mac=mac,
         osiris_url=OSIRIS_BASE_URL,
         osiris_ip=OSIRIS_IP,
-        win_index=1,
+        win_index=profile_ctx["win_index"],
         locale=locale,
     )
     return Response(content=content, media_type="text/plain")
@@ -773,6 +881,228 @@ def _build_winpe_script(mac: str) -> Response:
 def get_winpe_script(mac: str):
     """Script CMD retourné à WinPE pour déployer Windows sur la machine."""
     return _build_winpe_script(validate_mac(mac))
+
+
+def _build_capture_script(mac: str) -> Response:
+    """Script de capture automatique retourné à WinPE quand la machine est en mode capture."""
+    job = _capture_jobs.get(mac, {})
+    wim_name = job.get("wim_name", "golden.wim")
+    _capture_jobs[mac]["status"] = "capturing"
+    content = jinja_env.get_template("winpe-capture.cmd.j2").render(
+        mac=mac,
+        wim_name=wim_name,
+        osiris_ip=OSIRIS_IP,
+    )
+    return Response(content=content, media_type="text/plain")
+
+
+# ── Capture d'image golden ─────────────────────────────────────────────────────
+
+@app.post("/capture/register", dependencies=[Depends(require_admin)])
+def register_capture(mac: str, wim_name: str):
+    """Enregistre une MAC en mode capture. Au prochain boot WinPE elle recevra le script de capture."""
+    clean_mac = validate_mac(mac)
+    if not wim_name.endswith(".wim"):
+        wim_name = wim_name + ".wim"
+    _capture_jobs[clean_mac] = {
+        "mac": clean_mac,
+        "wim_name": wim_name,
+        "status": "waiting",
+        "registered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return {"mac": clean_mac, "wim_name": wim_name, "status": "waiting"}
+
+
+@app.get("/capture", dependencies=[Depends(require_admin)])
+def list_captures():
+    """Liste les jobs de capture en cours."""
+    return {"jobs": list(_capture_jobs.values())}
+
+
+@app.post("/capture/{mac}/done")
+def capture_done(mac: str, success: bool = True):
+    """Appelé par le script WinPE à la fin de la capture."""
+    clean_mac = validate_mac(mac)
+    if clean_mac in _capture_jobs:
+        _capture_jobs[clean_mac]["status"] = "done" if success else "failed"
+        _capture_jobs[clean_mac]["finished_at"] = datetime.now(timezone.utc).isoformat()
+    asyncio.run(manager.broadcast({"type": "capture_done", "mac": clean_mac, "success": success}))
+    return {"ok": True}
+
+
+@app.delete("/capture/{mac}", dependencies=[Depends(require_admin)])
+def delete_capture(mac: str):
+    """Supprime un job de capture (terminé ou annulé)."""
+    clean_mac = validate_mac(mac)
+    _capture_jobs.pop(clean_mac, None)
+    return {"ok": True}
+
+
+# ── Drivers constructeurs ──────────────────────────────────────────────────────
+
+@app.get("/drivers", dependencies=[Depends(get_current_user)])
+def list_driver_packs(vendor: Optional[str] = None, os_code: Optional[str] = None):
+    """Liste les packs de drivers connus (après sync catalogue)."""
+    with Session(engine) as session:
+        query = select(DriverPack)
+        if vendor:
+            query = query.where(DriverPack.vendor == vendor.lower())
+        if os_code:
+            query = query.where(DriverPack.os_code == os_code)
+        packs = session.exec(query.order_by(DriverPack.vendor, DriverPack.model)).all()
+        return [
+            {
+                "id": p.id, "vendor": p.vendor, "model": p.model,
+                "os_code": p.os_code, "size_mb": p.size_mb,
+                "status": p.status, "local_path": p.local_path,
+                "download_url": p.download_url,
+                "catalog_updated": p.catalog_updated.isoformat(),
+            }
+            for p in packs
+        ]
+
+
+@app.post("/drivers/sync/dell", status_code=202)
+async def sync_dell(current_user: User = Depends(require_admin)):
+    await arq_pool.enqueue_job("sync_dell_catalog")
+    return {"detail": "Synchronisation catalogue Dell lancée"}
+
+
+@app.post("/drivers/sync/hp", status_code=202)
+async def sync_hp(current_user: User = Depends(require_admin)):
+    await arq_pool.enqueue_job("sync_hp_catalog")
+    return {"detail": "Synchronisation catalogue HP lancée"}
+
+
+@app.post("/drivers/sync/lenovo", status_code=202)
+async def sync_lenovo(current_user: User = Depends(require_admin)):
+    await arq_pool.enqueue_job("sync_lenovo_catalog")
+    return {"detail": "Synchronisation catalogue Lenovo lancée"}
+
+
+@app.post("/drivers/{pack_id}/download", status_code=202)
+async def download_pack(pack_id: int, current_user: User = Depends(require_admin)):
+    """
+    Lance le téléchargement d'un pack de drivers spécifique en tâche de fond.
+    Durée : 5-30 min selon la taille (300 MB à 3 GB) et la bande passante.
+    Le pack est extrait dans /srv/data/windows/drivers/<vendor>/<model_key>/
+    et sera automatiquement injecté par WinPE lors du prochain déploiement.
+    """
+    with Session(engine) as session:
+        pack = session.get(DriverPack, pack_id)
+        if not pack:
+            raise HTTPException(404, "Pack introuvable")
+        if pack.status == "downloading":
+            raise HTTPException(409, "Ce pack est déjà en cours de téléchargement")
+    await arq_pool.enqueue_job("download_driver_pack", pack_id)
+    return {"detail": f"Téléchargement lancé pour le pack #{pack_id}"}
+
+
+@app.get("/drivers/suggest")
+def suggest_driver(vendor: str, model: str):
+    """
+    Retourne le meilleur pack de drivers pour un couple vendeur+modèle.
+    Appelé par osiris-firstboot.ps1 avec les infos matériel détectées par Windows.
+    Préfère Windows 11 à Windows 10, et les packs déjà téléchargés (ready).
+    """
+    key = normalize_model(model)
+    with Session(engine) as session:
+        # Stratégie de recherche bidirectionnelle :
+        # 1. catalog_key.startswith(query)  → "optiplex7090tower" pour query "optiplex7090"
+        # 2. query.startswith(catalog_key)  → "optiplex7090" pour query "optiplex7090tower"
+        # On essaie du plus précis au plus large (on raccourcit le préfixe si pas de résultat).
+        results = []
+        # On ne dégrade le préfixe que de 4 caractères max pour éviter les faux positifs.
+        # ex: "optiplex7090" → essaie jusqu'à "optiplex70" (4 de moins) mais pas "opti".
+        min_prefix = max(6, len(key) - 4)
+        for prefix_len in range(len(key), min_prefix - 1, -1):
+            prefix = key[:prefix_len]
+            results = session.exec(
+                select(DriverPack)
+                .where(
+                    DriverPack.vendor == vendor.lower(),
+                    DriverPack.model_key.startswith(prefix),
+                )
+                .order_by(
+                    DriverPack.os_code.desc(),   # Windows11 avant Windows10
+                    DriverPack.status.desc(),     # "ready" avant "available"
+                )
+            ).all()
+            if results:
+                break
+
+        if not results:
+            raise HTTPException(404, f"Aucun driver pack pour {vendor} {model!r}")
+
+        p = results[0]
+        return {
+            "id": p.id, "vendor": p.vendor, "model": p.model,
+            "os_code": p.os_code, "size_mb": p.size_mb,
+            "status": p.status, "download_url": p.download_url,
+            "local_path": p.local_path,
+        }
+
+
+import wakeonlan
+
+_honeypot_log = logging.getLogger("osiris.honeypot")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+
+@app.post("/machines/{mac}/wol", dependencies=[Depends(get_current_user)])
+@limiter.limit("10/minute")
+def wake_on_lan(request: Request, mac: str):
+    """Envoie un magic packet WOL à la machine (doit être éteinte mais connectée au réseau)."""
+    clean_mac = validate_mac(mac)
+    formatted = ":".join(clean_mac[i:i+2] for i in range(0, 12, 2))
+    wakeonlan.send_magic_packet(formatted, ip_address="10.0.0.255", port=9)
+    return {"detail": f"Magic packet envoyé à {formatted}"}
+
+
+_HONEYPOT_ART = """\
+::  ====================================================================
+::                    STOP ! ATTENTION HACKERMAN !
+::  ====================================================================
+::
+::       .---.
+::      /     \\       Tu es fier de toi ? Tu as sniffé le réseau
+::      \\.---./       et fouillé dans nos partages SMB ?
+::       |o_o|
+::       |:_/|        Sache que ce compte 'osiris_technicien' :
+::      //   \\\\       1. Est restreint en LECTURE SEULE.
+::     (|     |)      2. N'a accès qu'à des fichiers ISO publics.
+::    /'\\\\_ _/`\\\\     3. Ne te permettra JAMAIS de pivoter sur l'infra.
+::    \\___)=(___)
+::
+::  Bref, tu as perdu ton temps. Bisous de l'équipe OSIRIS. 😎
+::  ====================================================================
+"""
+
+
+@app.get("/admin-backup")
+@app.post("/admin-backup")
+@app.get("/admin-credentials")
+@app.post("/admin-credentials")
+@app.get("/.env")
+@app.get("/config/database")
+@limiter.limit("5/minute")
+async def honeypot(request: Request):
+    ip = (
+        request.headers.get("X-Real-IP")
+        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or request.client.host
+    )
+    _honeypot_log.warning(
+        "HONEYPOT HIT — method=%s path=%s ip=%s ua=%s",
+        request.method, request.url.path, ip,
+        request.headers.get("User-Agent", "—"),
+    )
+    body = (
+        _HONEYPOT_ART
+        + f":: IP enregistrée : {ip}\n"
+        + ":: Cadeau de consolation : https://www.youtube.com/watch?v=dQw4w9WgXcQ\n"
+    )
+    return Response(content=body, media_type="text/plain; charset=utf-8", status_code=418)
 
 
 @app.websocket("/ws/machines")

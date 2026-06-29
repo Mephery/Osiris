@@ -1,0 +1,93 @@
+@echo off
+setlocal
+
+set MAC={{ mac }}
+set OSIRIS_IP={{ osiris_ip }}
+set WIM_NAME={{ wim_name }}
+
+echo.
+echo  =============================================
+echo    OSIRIS - Capture Golden Image
+echo  =============================================
+echo.
+echo  Machine  : %MAC%
+echo  Fichier  : %WIM_NAME%
+echo  Serveur  : %OSIRIS_IP%
+echo.
+X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Mode+capture+demarre+:+%WIM_NAME%" >nul 2>&1
+
+REM ── Connexion au partage SMB ──────────────────────────────────────────────
+echo [OSIRIS] Connexion au partage SMB...
+:retry_smb
+net use Z: \\%OSIRIS_IP%\windows /user:guest "" 2>nul
+if errorlevel 1 (
+    echo [OSIRIS] Partage SMB pas encore pret, nouvelle tentative dans 5s...
+    ping -n 6 127.0.0.1 >nul
+    goto retry_smb
+)
+echo [OSIRIS] Partage SMB connecte.
+X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=SMB+connecte" >nul 2>&1
+
+REM ── Verification que C:\Windows existe (sysprep fait ?) ──────────────────
+if not exist C:\Windows (
+    echo.
+    echo  ERREUR : C:\Windows introuvable !
+    echo  La machine de reference a-t-elle bien ete syspreepee ?
+    echo  (sysprep /generalize /oobe /shutdown)
+    echo.
+    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/capture/%MAC%/done?success=false" >nul 2>&1
+    pause
+    exit /b 1
+)
+
+REM ── Verification espace disque sur le partage ────────────────────────────
+echo [OSIRIS] Verification de l'espace disponible...
+if exist Z:\%WIM_NAME% (
+    echo [OSIRIS] ATTENTION : Z:\%WIM_NAME% existe deja, il sera ecrase.
+    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Avertissement+:+%WIM_NAME%+existe+deja,+ecrasement..." >nul 2>&1
+)
+
+REM ── Lancement de la capture ──────────────────────────────────────────────
+echo.
+echo [OSIRIS] Demarrage de la capture DISM...
+echo [OSIRIS] Duree estimee : 15 a 40 minutes selon la taille.
+echo [OSIRIS] Ne pas fermer cette fenetre et ne pas eteindre la machine !
+echo.
+X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Capture+DISM+en+cours..." >nul 2>&1
+
+dism /Capture-Image ^
+     /ImageFile:Z:\%WIM_NAME% ^
+     /CaptureDir:C:\ ^
+     /Name:"OSIRIS Golden Image" ^
+     /Description:"Capture automatique OSIRIS" ^
+     /ScratchDir:X:\ ^
+     /CheckIntegrity
+
+if errorlevel 1 (
+    echo.
+    echo  ERREUR : la capture a echoue !
+    echo  Verifiez l'espace disponible sur le partage SMB.
+    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=ERREUR+:+capture+echouee+!" >nul 2>&1
+    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/capture/%MAC%/done?success=false" >nul 2>&1
+    pause
+    exit /b 1
+)
+
+REM ── Notification succes ──────────────────────────────────────────────────
+X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Capture+terminee+:+%WIM_NAME%" >nul 2>&1
+X:\curl.exe -sf "http://%OSIRIS_IP%:8000/capture/%MAC%/done?success=true" >nul 2>&1
+
+echo.
+echo  =============================================
+echo    Capture terminee avec succes !
+echo.
+echo    Fichier cree : \\%OSIRIS_IP%\windows\%WIM_NAME%
+echo.
+echo    Dans OSIRIS :
+echo    Administration > Profils > profil Windows
+echo    Champ "Golden image" : %WIM_NAME%
+echo  =============================================
+echo.
+echo  Cette fenetre se fermera dans 30 secondes.
+ping -n 31 127.0.0.1 >nul
+wpeutil reboot

@@ -54,6 +54,10 @@ interface Profile {
   extra_packages: string;
   join_domain: boolean;
   domain: string;
+  domain_join_user: string;
+  domain_join_password: string;
+  win_image: string;
+  win_index: number;
   tv_suffix: string;
 }
 
@@ -245,6 +249,11 @@ export default function App() {
 
   // ── Section admin : gestion des orgs et users ──────────────────────────────
   const [showAdmin, setShowAdmin]       = useState(false)
+  const [showCapture, setShowCapture]   = useState(false)
+  const [captureJobs, setCaptureJobs]   = useState<{mac:string;wim_name:string;status:string;registered_at:string;finished_at?:string}[]>([])
+  const [captureMac, setCaptureMac]     = useState('')
+  const [captureWim, setCaptureWim]     = useState('')
+  const [captureStep, setCaptureStep]   = useState(1)
   const [newOrgName, setNewOrgName]     = useState('')
   const [newOrgSlug, setNewOrgSlug]     = useState('')
   const [users, setUsers]               = useState<{ id: number; email: string; role: string }[]>([])
@@ -254,11 +263,12 @@ export default function App() {
 
   // ── Profils ────────────────────────────────────────────────────────────────
   const [profiles, setProfiles] = useState<Profile[]>([])
+  const [editingProfile, setEditingProfile] = useState<Profile | null>(null)
 
   // ── Images OS ──────────────────────────────────────────────────────────────
   const [images, setImages] = useState<OsImage[]>([])
   const [newImage, setNewImage] = useState({ name: '', version: '', os: 'ubuntu', iso_url: '' })
-  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', tv_suffix: '' })
+  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, tv_suffix: '' })
 
   // ── Drivers ────────────────────────────────────────────────────────────────
   const [showDrivers, setShowDrivers]   = useState(false)
@@ -324,6 +334,26 @@ export default function App() {
       .then((res) => res.json())
       .then(setProfiles)
       .catch(() => {})
+  }
+
+  const fetchCaptures = (token: string) => {
+    fetch(`${API_URL}/capture`, { headers: authHeader(token) })
+      .then(r => r.json()).then(d => setCaptureJobs(d.jobs ?? []))
+      .catch(() => {})
+  }
+
+  const handleRegisterCapture = () => {
+    if (!captureMac || !captureWim) return
+    fetch(`${API_URL}/capture/register?mac=${encodeURIComponent(captureMac)}&wim_name=${encodeURIComponent(captureWim)}`,
+      { method: 'POST', headers: authHeader(auth!.token) })
+      .then(r => r.json())
+      .then(() => { fetchCaptures(auth!.token); setCaptureStep(4) })
+      .catch(() => alert('Erreur lors de l\'enregistrement'))
+  }
+
+  const handleDeleteCapture = (mac: string) => {
+    fetch(`${API_URL}/capture/${mac}`, { method: 'DELETE', headers: authHeader(auth!.token) })
+      .then(() => fetchCaptures(auth!.token))
   }
 
   const fetchAuditLogs = (token: string) => {
@@ -515,7 +545,7 @@ export default function App() {
     })
       .then((res) => res.json())
       .then(() => {
-        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', tv_suffix: '' })
+        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, tv_suffix: '' })
         fetchProfiles(auth.token)
       })
       .catch(() => {})
@@ -541,8 +571,16 @@ export default function App() {
 
   const handleDeleteProfile = (id: number) => {
     fetch(`${API_URL}/profiles/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
-      .then(() => fetchProfiles(auth.token))
+      .then(r => { if (r.ok) fetchProfiles(auth.token) })
       .catch(() => {})
+  }
+
+  const handlePatchProfile = (id: number, patch: Partial<Profile>) => {
+    fetch(`${API_URL}/profiles/${id}`, {
+      method: 'PATCH',
+      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then(r => r.ok ? fetchProfiles(auth.token) : null).catch(() => {})
   }
 
   // ── Drivers ────────────────────────────────────────────────────────────────
@@ -642,6 +680,10 @@ export default function App() {
                   className={`osiris-btn-ghost text-xs ${showAuditLog ? 'text-blue-400' : ''}`}>
                   <IcoMenu /> Journal
                 </button>
+                <button onClick={() => { setShowCapture(!showCapture); if (!showCapture) fetchCaptures(auth.token) }}
+                  className={`osiris-btn-ghost text-xs ${showCapture ? 'text-blue-400' : ''}`}>
+                  <IcoDownload cls="w-3.5 h-3.5 rotate-180" /> Capture
+                </button>
               </>
             )}
             <span className="text-xs font-mono text-slate-700 hidden sm:block">{auth.email}</span>
@@ -717,12 +759,16 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {profiles.map(p => (
                   <div key={p.id} className="flex items-center justify-between py-1.5 px-3 border border-slate-800/60 rounded">
-                    <div>
+                    <div className="min-w-0">
                       <span className="text-white text-sm font-medium">{p.name}</span>
                       <span className={`ml-2 osiris-os-badge osiris-os-badge--${p.os}`}>{p.os}</span>
                       <p className="text-[10px] font-mono text-slate-600 mt-0.5">{p.locale} · {p.keyboard} · {p.timezone}</p>
+                      {p.os === 'windows' && <p className="text-[10px] font-mono text-slate-500">WIM index: <strong className="text-slate-300">{p.win_index}</strong>{p.domain ? ` · ${p.domain}` : ''}</p>}
                     </div>
-                    <button onClick={() => handleDeleteProfile(p.id)} className="osiris-action-btn osiris-action-btn--danger ml-3 flex-shrink-0" title="Supprimer"><IcoX /></button>
+                    <div className="flex gap-1 ml-3 flex-shrink-0">
+                      <button onClick={() => setEditingProfile(p)} className="osiris-action-btn" title="Éditer"><IcoPencil /></button>
+                      <button onClick={() => handleDeleteProfile(p.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -747,6 +793,10 @@ export default function App() {
                       Joindre l'AD
                     </label>
                     <input placeholder="Domaine AD" value={newProfile.domain ?? ''} onChange={e => setNewProfile({ ...newProfile, domain: e.target.value })} className="osiris-input text-xs font-mono" />
+                    <input placeholder="Compte jonction AD (ex: svc-joinpc)" value={newProfile.domain_join_user ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_user: e.target.value })} className="osiris-input text-xs font-mono" />
+                    <input type="password" placeholder="Mot de passe jonction AD" value={newProfile.domain_join_password ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_password: e.target.value })} className="osiris-input text-xs font-mono" />
+                    <input placeholder="Golden image (ex: golden_clientA.wim)" title="Laissez vide pour utiliser install.wim de l'ISO" value={newProfile.win_image ?? ''} onChange={e => setNewProfile({ ...newProfile, win_image: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
+                    <input type="number" min={1} max={20} placeholder="Index WIM (6=Pro)" title="Index de l'édition dans install.wim (1=Home, 6=Pro)" value={newProfile.win_index ?? 6} onChange={e => setNewProfile({ ...newProfile, win_index: parseInt(e.target.value) || 6 })} className="osiris-input text-xs font-mono" />
                   </>
                 )}
                 <input placeholder="Suffixe TeamViewer (optionnel)" title="Mot de passe TV = NOMPC_MAJUSCULES + ce suffixe" value={newProfile.tv_suffix ?? ''} onChange={e => setNewProfile({ ...newProfile, tv_suffix: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
@@ -859,6 +909,104 @@ export default function App() {
                       </tr>
                     )
                   })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {/* ── Capture Golden Image ─────────────────────────────────────────── */}
+        {showCapture && auth.role === 'admin' && (
+          <div className="osiris-table-wrap overflow-x-auto">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800/80">
+              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Capture d'une Golden Image</h2>
+              <button onClick={() => fetchCaptures(auth.token)} className="osiris-btn-ghost text-[10px]">
+                <IcoRefresh cls="w-3 h-3 inline" /> Rafraîchir
+              </button>
+            </div>
+
+            {/* ── Guide pas-à-pas ── */}
+            <div className="px-5 py-4 border-b border-slate-800/60 space-y-5">
+              <p className="text-xs text-slate-500 font-mono">
+                Suivez les étapes dans l'ordre. La machine de référence doit être sur le même réseau qu'OSIRIS.
+              </p>
+
+              {/* Étapes */}
+              {[
+                { n: 1, titre: 'Préparer la machine de référence', desc: 'Déployez un Windows via OSIRIS (ou installez-le manuellement), installez toutes vos applications (TeamViewer Host, antivirus, Office…). Ne joignez pas de domaine.' },
+                { n: 2, titre: 'Lancer Sysprep', desc: 'Sur la machine de référence, ouvrez une invite de commandes en administrateur et lancez :', cmd: 'C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown', note: 'La machine s\'éteint toute seule. Ne la redémarrez pas avant la capture !' },
+                { n: 3, titre: 'Enregistrer la machine dans OSIRIS', desc: 'Renseignez l\'adresse MAC de la machine de référence et le nom du fichier WIM à créer, puis cliquez sur Enregistrer.' },
+                { n: 4, titre: 'Démarrer la machine en PXE', desc: 'Démarrez la machine de référence sur le réseau (PXE). OSIRIS détecte automatiquement qu\'elle est en mode capture et lance le script. Attendez la fin (15–40 min).' },
+              ].map(step => (
+                <div key={step.n} className={`flex gap-4 ${captureStep >= step.n ? '' : 'opacity-40'}`}>
+                  <div className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border
+                    ${captureStep > step.n ? 'bg-emerald-900 border-emerald-700 text-emerald-400' :
+                      captureStep === step.n ? 'bg-blue-900 border-blue-600 text-blue-300' :
+                      'border-slate-700 text-slate-600'}`}>
+                    {captureStep > step.n ? <IcoCheck cls="w-3 h-3" /> : step.n}
+                  </div>
+                  <div className="flex-1 space-y-1">
+                    <p className="text-xs font-semibold text-white">{step.titre}</p>
+                    <p className="text-[11px] text-slate-500">{step.desc}</p>
+                    {'cmd' in step && (
+                      <pre className="text-[10px] bg-slate-950 border border-slate-800 rounded px-3 py-2 text-emerald-400 font-mono overflow-x-auto">{step.cmd}</pre>
+                    )}
+                    {'note' in step && (
+                      <p className="text-[10px] text-amber-600 font-mono">{step.note}</p>
+                    )}
+                    {/* Étape 3 : formulaire */}
+                    {step.n === 3 && (
+                      <div className="flex gap-2 mt-2 flex-wrap">
+                        <input placeholder="Adresse MAC  (ex: aa:bb:cc:dd:ee:ff)"
+                          value={captureMac} onChange={e => { setCaptureMac(e.target.value); setCaptureStep(3) }}
+                          className="osiris-input text-xs font-mono w-52" />
+                        <input placeholder="Nom du fichier  (ex: golden_clientA.wim)"
+                          value={captureWim} onChange={e => setCaptureWim(e.target.value)}
+                          className="osiris-input text-xs font-mono w-60" />
+                        <button onClick={handleRegisterCapture} className="osiris-btn text-xs">
+                          Enregistrer
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* ── Liste des jobs ── */}
+            {captureJobs.length > 0 && (
+              <table className="w-full text-sm">
+                <thead><tr className="border-b border-slate-800/60">
+                  {['MAC', 'Fichier WIM', 'Statut', 'Enregistré le', 'Action'].map(h => (
+                    <th key={h} className="text-left px-4 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-slate-600">{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {captureJobs.map(job => (
+                    <tr key={job.mac} className="osiris-row">
+                      <td className="px-4 py-2 font-mono text-xs text-slate-400">{job.mac}</td>
+                      <td className="px-4 py-2 font-mono text-xs text-white">{job.wim_name}</td>
+                      <td className="px-4 py-2">
+                        <span className={`osiris-status-badge ${
+                          job.status === 'done'      ? 'osiris-status--deployed' :
+                          job.status === 'capturing' ? 'osiris-status--deploying' :
+                          job.status === 'failed'    ? 'osiris-status--failed' :
+                                                       'osiris-status--pending'}`}>
+                          {job.status === 'waiting' ? 'En attente de boot PXE' :
+                           job.status === 'capturing' ? 'Capture en cours…' :
+                           job.status === 'done' ? 'Terminé' : 'Échec'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2 font-mono text-xs text-slate-600">
+                        {new Date(job.registered_at).toLocaleString('fr-FR')}
+                      </td>
+                      <td className="px-4 py-2">
+                        {(job.status === 'done' || job.status === 'failed') && (
+                          <button onClick={() => handleDeleteCapture(job.mac)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             )}
@@ -1294,6 +1442,40 @@ export default function App() {
               <div className="flex gap-3 justify-end">
                 <button onClick={() => setDeletingMac(null)} className="osiris-btn-ghost">Annuler</button>
                 <button onClick={() => handleDelete(deletingMac)} className="osiris-btn osiris-btn--danger">Supprimer</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Modale : édition profil ───────────────────────────────────────── */}
+      {editingProfile && (
+        <div className="osiris-overlay" onClick={e => { if (e.target === e.currentTarget) setEditingProfile(null) }}>
+          <div className="osiris-modal">
+            <div className="osiris-modal-header">
+              <span className="font-semibold text-white">Éditer — {editingProfile.name}</span>
+              <button onClick={() => setEditingProfile(null)} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1"><IcoX cls="w-4 h-4" /></button>
+            </div>
+            <div className="p-5 space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="text-xs text-slate-400 self-center">Domaine AD</label>
+                <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain} onChange={e => setEditingProfile({ ...editingProfile, domain: e.target.value })} />
+                <label className="text-xs text-slate-400 self-center">Compte jonction</label>
+                <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain_join_user} onChange={e => setEditingProfile({ ...editingProfile, domain_join_user: e.target.value })} />
+                <label className="text-xs text-slate-400 self-center">Mot de passe jonction</label>
+                <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, domain_join_password: e.target.value })} />
+                {editingProfile.os === 'windows' && (<>
+                  <label className="text-xs text-slate-400 self-center">Index WIM</label>
+                  <input type="number" min={1} max={20} className="osiris-input text-xs font-mono" defaultValue={editingProfile.win_index} onChange={e => setEditingProfile({ ...editingProfile, win_index: parseInt(e.target.value) || 1 })} />
+                  <label className="text-xs text-slate-400 self-center">Golden image</label>
+                  <input className="osiris-input text-xs font-mono" placeholder="vide = install.wim auto" defaultValue={editingProfile.win_image} onChange={e => setEditingProfile({ ...editingProfile, win_image: e.target.value })} />
+                </>)}
+                <label className="text-xs text-slate-400 self-center">Suffixe TeamViewer</label>
+                <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, tv_suffix: e.target.value })} />
+              </div>
+              <div className="flex gap-2 justify-end pt-2">
+                <button onClick={() => setEditingProfile(null)} className="osiris-btn-ghost text-xs">Annuler</button>
+                <button onClick={() => { handlePatchProfile(editingProfile.id!, editingProfile); setEditingProfile(null) }} className="osiris-btn text-xs">Enregistrer</button>
               </div>
             </div>
           </div>
