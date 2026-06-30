@@ -11,3 +11,7 @@ slowapi
 jinja2
 arq
 aiohttp
+wakeonlan
+cryptography
+pyotp
+qrcode[pil]

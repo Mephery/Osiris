@@ -27,7 +27,32 @@ class User(SQLModel, table=True):
     email: str = Field(unique=True, index=True)
     hashed_password: str
     role: str = Field(default="technician")   # "admin" ou "technician"
+    totp_secret: str = Field(default="")      # secret TOTP chiffre Fernet - vide = 2FA desactive
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ApiKey(SQLModel, table=True):
+    __tablename__ = "api_key"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    name: str                              # label choisi par l'utilisateur
+    prefix: str = Field(index=True)        # 16 premiers caracteres de la cle (pour lookup rapide)
+    key_hash: str                          # SHA-256 de la cle complete
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_used_at: Optional[datetime] = Field(default=None)
+
+
+class DomainConfig(SQLModel, table=True):
+    __tablename__ = "domain_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    organization_id: int = Field(foreign_key="organization.id", index=True)
+    name: str                              # label affiche dans l'UI, ex: "Siege principal"
+    domain: str                            # "corp.example.local"
+    join_user: str = Field(default="")    # compte de jonction (clair)
+    join_password: str = Field(default="")  # chiffre Fernet
+    default_ou: str = Field(default="")   # OU par defaut pour les machines
 
 
 class Profile(SQLModel, table=True):
@@ -50,6 +75,7 @@ class Profile(SQLModel, table=True):
     network_drives: str = Field(default="")         # JSON : [{"letter":"Z","path":"\\\\srv\\share"}]
     printers: str = Field(default="")              # JSON : ["\\\\srv\\imprimante1"]
     post_script: str = Field(default="")
+    domain_config_id: Optional[int] = Field(default=None, foreign_key="domain_config.id")  # si set, prend le dessus sur les champs domain/join_* inline
     tv_suffix: str = Field(default="")              # Suffixe TeamViewer chiffré Fernet
     app_ids: str   = Field(default="")              # IDs d'apps séparés par virgule : "1,3,7"
 
@@ -176,4 +202,7 @@ def init_db():
         conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS network_drives VARCHAR NOT NULL DEFAULT ''"))
         conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS printers VARCHAR NOT NULL DEFAULT ''"))
         conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS post_script TEXT NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS domain_config_id INTEGER REFERENCES domain_config(id) ON DELETE SET NULL"))
+        conn.execute(text("ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS totp_secret VARCHAR NOT NULL DEFAULT ''"))
         conn.commit()
+        # api_key cree par SQLModel.metadata.create_all si elle n'existe pas

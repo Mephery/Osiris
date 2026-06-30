@@ -1,10 +1,13 @@
 import asyncio
+import base64
+import hashlib
+import io
 import json
 import logging
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
@@ -24,7 +27,9 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from jinja2 import Environment, FileSystemLoader
 
-from models import Application, AuditLog, DeploymentEvent, DriverPack, Machine, Organization, OsImage, Profile, User, engine, init_db, normalize_model
+import pyotp
+import qrcode
+from models import ApiKey, Application, AuditLog, DeploymentEvent, DriverPack, DomainConfig, Machine, Organization, OsImage, Profile, User, engine, init_db, normalize_model
 from auth import (
     hash_password, verify_password, create_token,
     get_current_user, require_admin
@@ -48,7 +53,16 @@ async def lifespan(app: FastAPI):
     await arq_pool.aclose()
 
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    lifespan=lifespan,
+    title="OSIRIS API",
+    description=(
+        "API REST du serveur de déploiement PXE OSIRIS.\n\n"
+        "Authentification : `Authorization: Bearer <jwt>` ou `Authorization: Bearer osiris_sk_...` (clé API personnelle).\n\n"
+        "Documentation complète : voir le README du projet."
+    ),
+    version="1.0.0",
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -145,6 +159,15 @@ def validate_mac(raw: str) -> str:
 
 
 # ── Schémas de requête ─────────────────────────────────────────────────────────
+
+class WebhookNewMachine(SQLModel):
+    """Payload simplifié pour créer une machine depuis un outil externe (GLPI, Jira, RMM...)."""
+    mac: str
+    hostname: str = ""
+    client: str = ""
+    os: str = "windows"
+    organization_id: Optional[int] = None
+    profile_id: Optional[int] = None
 
 class MachinePatch(SQLModel):
     hostname: Optional[str] = None
@@ -303,7 +326,7 @@ def _log(session: Session, user: User, action: str,
 
 
 async def _send_webhook(url: str, machine: Machine, status: str):
-    """Envoie une notification webhook compatible Teams / Slack / Discord."""
+    """Envoie une notification webhook compatible Teams / Slack / Discord / Make / n8n."""
     if not url:
         return
     icons = {"deployed": "✅", "failed": "❌", "deploying": "🔄", "pending": "⏳"}
@@ -311,7 +334,20 @@ async def _send_webhook(url: str, machine: Machine, status: str):
     labels = {"deployed": "déployée", "failed": "échec", "deploying": "en cours", "pending": "en attente"}
     label  = labels.get(status, status)
     text = f"{icon} **{machine.hostname}** — {label} ({machine.os.upper()} · {machine.client})"
-    payload = {"text": text}   # compatible Teams et Slack
+    payload = {
+        # Champ "text" : compatibilité Teams / Slack / Discord (message lisible)
+        "text": text,
+        # Champs structurés : utilisables par Make, Zapier, n8n, scripts
+        "event": f"machine.{status}",
+        "hostname": machine.hostname,
+        "mac": machine.mac,
+        "client": machine.client,
+        "os": machine.os,
+        "hw_model": machine.hw_model,
+        "hw_ram_gb": machine.hw_ram_gb,
+        "hw_serial": machine.hw_serial,
+        "osiris_url": OSIRIS_BASE_URL,
+    }
     try:
         import urllib.request as _req
         data = json.dumps(payload).encode()
@@ -356,7 +392,12 @@ def login(request: Request, body: LoginRequest):
         _log(session, user, "login")
         session.commit()
         user_id, user_role, user_email = user.id, user.role, user.email
-    token = create_token(user_id, user_role)
+        has_totp = bool(user.totp_secret)
+    if has_totp:
+        from auth import create_temp_token
+        temp = create_temp_token(str(user_id))
+        return {"totp_required": True, "temp_token": temp}
+    token = create_token({"sub": str(user_id), "role": user_role, "email": user_email})
     return {"access_token": token, "token_type": "bearer", "role": user_role, "email": user_email}
 
 
@@ -428,6 +469,80 @@ def delete_organization(org_id: int, current_user: User = Depends(require_admin)
         session.commit()
 
 
+# ── Domaines AD par organisation ───────────────────────────────────────────────
+
+class DomainConfigCreate(SQLModel):
+    organization_id: int
+    name: str
+    domain: str
+    join_user: str = ""
+    join_password: str = ""
+    default_ou: str = ""
+
+class DomainConfigPatch(SQLModel):
+    name: Optional[str] = None
+    domain: Optional[str] = None
+    join_user: Optional[str] = None
+    join_password: Optional[str] = None
+    default_ou: Optional[str] = None
+
+@app.get("/domain-configs", dependencies=[Depends(get_current_user)])
+def get_domain_configs(org_id: Optional[int] = None):
+    with Session(engine) as session:
+        query = select(DomainConfig)
+        if org_id is not None:
+            query = query.where(DomainConfig.organization_id == org_id)
+        configs = session.exec(query).all()
+        return [
+            {
+                "id": c.id, "organization_id": c.organization_id, "name": c.name,
+                "domain": c.domain, "join_user": c.join_user, "default_ou": c.default_ou,
+                # join_password jamais retourne en clair
+            }
+            for c in configs
+        ]
+
+@app.post("/domain-configs", status_code=201)
+def create_domain_config(data: DomainConfigCreate, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        cfg = DomainConfig(
+            organization_id=data.organization_id,
+            name=data.name,
+            domain=data.domain,
+            join_user=data.join_user,
+            join_password=encrypt(data.join_password) if data.join_password else "",
+            default_ou=data.default_ou,
+        )
+        session.add(cfg)
+        session.commit()
+        session.refresh(cfg)
+        return {"id": cfg.id, "name": cfg.name, "domain": cfg.domain, "join_user": cfg.join_user, "default_ou": cfg.default_ou}
+
+@app.patch("/domain-configs/{cfg_id}")
+def update_domain_config(cfg_id: int, data: DomainConfigPatch, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        cfg = session.get(DomainConfig, cfg_id)
+        if not cfg:
+            raise HTTPException(status_code=404, detail="Configuration introuvable")
+        if data.name is not None: cfg.name = data.name
+        if data.domain is not None: cfg.domain = data.domain
+        if data.join_user is not None: cfg.join_user = data.join_user
+        if data.join_password is not None: cfg.join_password = encrypt(data.join_password) if data.join_password else ""
+        if data.default_ou is not None: cfg.default_ou = data.default_ou
+        session.add(cfg)
+        session.commit()
+        return {"detail": "ok"}
+
+@app.delete("/domain-configs/{cfg_id}", status_code=204)
+def delete_domain_config(cfg_id: int, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        cfg = session.get(DomainConfig, cfg_id)
+        if not cfg:
+            raise HTTPException(status_code=404, detail="Configuration introuvable")
+        session.delete(cfg)
+        session.commit()
+
+
 # ── Utilisateurs ───────────────────────────────────────────────────────────────
 
 @app.get("/users", dependencies=[Depends(require_admin)])
@@ -465,6 +580,151 @@ def delete_user(user_id: int, current_user: User = Depends(require_admin)):
         session.commit()
 
 
+# ── 2FA TOTP ───────────────────────────────────────────────────────────────────
+
+APP_NAME = "OSIRIS"
+
+@app.get("/auth/totp/setup")
+def totp_setup(current_user: User = Depends(get_current_user)):
+    """Genere un nouveau secret TOTP et retourne le QR code en base64. Ne sauvegarde pas encore."""
+    secret = pyotp.random_base32()
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=current_user.email, issuer_name=APP_NAME)
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    qr_b64 = base64.b64encode(buf.getvalue()).decode()
+    return {"secret": secret, "qr_png_b64": qr_b64, "uri": uri}
+
+
+class TotpEnableRequest(SQLModel):
+    secret: str   # le secret genere par /setup
+    code: str     # code 6 chiffres a verifier avant de sauvegarder
+
+@app.post("/auth/totp/enable")
+def totp_enable(data: TotpEnableRequest, current_user: User = Depends(get_current_user)):
+    """Confirme le secret TOTP avec un code valide et l'active sur le compte."""
+    totp = pyotp.TOTP(data.secret)
+    if not totp.verify(data.code, valid_window=1):
+        raise HTTPException(status_code=400, detail="Code invalide ou expire")
+    with Session(engine) as session:
+        user = session.get(User, current_user.id)
+        user.totp_secret = encrypt(data.secret)
+        session.add(user)
+        _log(session, current_user, "totp_enable")
+        session.commit()
+    return {"detail": "Double authentification activee"}
+
+
+class TotpDisableRequest(SQLModel):
+    password: str
+
+@app.post("/auth/totp/disable")
+def totp_disable(data: TotpDisableRequest, current_user: User = Depends(get_current_user)):
+    """Desactive le 2FA apres verification du mot de passe courant."""
+    if not verify_password(data.password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Mot de passe incorrect")
+    with Session(engine) as session:
+        user = session.get(User, current_user.id)
+        user.totp_secret = ""
+        session.add(user)
+        _log(session, current_user, "totp_disable")
+        session.commit()
+    return {"detail": "Double authentification desactivee"}
+
+
+@app.get("/auth/totp/status")
+def totp_status(current_user: User = Depends(get_current_user)):
+    return {"totp_enabled": bool(current_user.totp_secret)}
+
+
+class TotpVerifyRequest(SQLModel):
+    temp_token: str
+    code: str
+
+@app.post("/auth/totp/verify")
+@limiter.limit("10/minute")
+def totp_verify(request: Request, data: TotpVerifyRequest):
+    """Deuxieme etape du login : verifie le code TOTP et retourne le vrai JWT."""
+    from auth import decode_temp_token
+    payload = decode_temp_token(data.temp_token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Token temporaire invalide ou expire")
+    user_id = payload.get("sub")
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.id == int(user_id))).first()
+        if not user or not user.totp_secret:
+            raise HTTPException(status_code=401, detail="Utilisateur introuvable ou 2FA non configure")
+        totp = pyotp.TOTP(decrypt(user.totp_secret))
+        if not totp.verify(data.code, valid_window=1):
+            raise HTTPException(status_code=400, detail="Code incorrect")
+        token = create_token({"sub": str(user.id), "role": user.role, "email": user.email})
+        return {"access_token": token, "token_type": "bearer"}
+
+
+# ── Cles API personnelles ──────────────────────────────────────────────────────
+
+@app.get("/auth/api-keys")
+def list_api_keys(current_user: User = Depends(get_current_user)):
+    """Liste les cles API de l'utilisateur connecte (jamais la cle en clair)."""
+    with Session(engine) as session:
+        keys = session.exec(select(ApiKey).where(ApiKey.user_id == current_user.id)).all()
+        return [
+            {
+                "id": k.id,
+                "name": k.name,
+                "prefix": k.prefix,
+                "created_at": k.created_at.isoformat(),
+                "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
+            }
+            for k in keys
+        ]
+
+
+class ApiKeyCreate(SQLModel):
+    name: str
+
+@app.post("/auth/api-keys", status_code=201)
+def create_api_key(data: ApiKeyCreate, current_user: User = Depends(get_current_user)):
+    """Genere une nouvelle cle API. La cle est retournee en clair UNE SEULE FOIS."""
+    if not data.name.strip():
+        raise HTTPException(status_code=400, detail="Le nom de la cle est requis")
+    raw_key = "osiris_sk_" + secrets.token_hex(24)   # osiris_sk_ + 48 chars hex = 58 chars total
+    prefix = raw_key[:16]                              # "osiris_sk_" + 6 chars
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    with Session(engine) as session:
+        api_key = ApiKey(
+            user_id=current_user.id,
+            name=data.name.strip(),
+            prefix=prefix,
+            key_hash=key_hash,
+        )
+        session.add(api_key)
+        _log(session, current_user, "create_api_key", details={"name": data.name})
+        session.commit()
+        session.refresh(api_key)
+        return {
+            "id": api_key.id,
+            "name": api_key.name,
+            "prefix": api_key.prefix,
+            "key": raw_key,   # retourne en clair UNE SEULE FOIS
+            "created_at": api_key.created_at.isoformat(),
+        }
+
+
+@app.delete("/auth/api-keys/{key_id}", status_code=204)
+def revoke_api_key(key_id: int, current_user: User = Depends(get_current_user)):
+    """Revoque une cle API. Seul le proprietaire peut la supprimer."""
+    with Session(engine) as session:
+        api_key = session.get(ApiKey, key_id)
+        if not api_key:
+            raise HTTPException(status_code=404, detail="Cle introuvable")
+        if api_key.user_id != current_user.id and current_user.role != "admin":
+            raise HTTPException(status_code=403, detail="Acces refuse")
+        _log(session, current_user, "revoke_api_key", details={"name": api_key.name})
+        session.delete(api_key)
+        session.commit()
+
+
 # ── Profils de déploiement ─────────────────────────────────────────────────────
 
 def _profile_dict(p: Profile) -> dict:
@@ -487,14 +747,24 @@ def _profile_dict(p: Profile) -> dict:
     }
 
 
-def _profile_for_template(p: Profile) -> dict:
+def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
     """Profil avec secrets déchiffrés — uniquement pour les templates Jinja2, jamais renvoyé au client."""
+    # Résolution du domaine AD : DomainConfig en priorité sur les champs inline
+    domain = p.domain
+    domain_join_user = p.domain_join_user
+    domain_join_password = decrypt(p.domain_join_password or "")
+    if p.domain_config_id and session:
+        dc = session.get(DomainConfig, p.domain_config_id)
+        if dc:
+            domain = dc.domain
+            domain_join_user = dc.join_user
+            domain_join_password = decrypt(dc.join_password or "")
     return {
         "locale": p.locale, "keyboard": p.keyboard, "timezone": p.timezone,
         "default_user": p.default_user, "extra_packages": p.extra_packages,
-        "join_domain": p.join_domain, "domain": p.domain,
-        "domain_join_user": p.domain_join_user,
-        "domain_join_password": decrypt(p.domain_join_password or ""),
+        "join_domain": p.join_domain, "domain": domain,
+        "domain_join_user": domain_join_user,
+        "domain_join_password": domain_join_password,
         "win_image": p.win_image or "",
         "win_index": p.win_index,
         "enable_bitlocker": p.enable_bitlocker,
@@ -504,6 +774,7 @@ def _profile_for_template(p: Profile) -> dict:
         "post_script": p.post_script or "",
         "tv_suffix": decrypt(p.tv_suffix or ""),
         "app_ids": p.app_ids or "",
+        "domain_config_id": p.domain_config_id,
     }
 
 
@@ -803,7 +1074,7 @@ def get_unattend_xml(mac: str):
                 media_type="application/xml", status_code=404,
             )
         profile = _resolve_profile(session, machine)
-        profile_ctx = _profile_for_template(profile)
+        profile_ctx = _profile_for_template(profile, session)
 
     content = jinja_env.get_template("unattend.xml.j2").render(
         hostname=escape(machine.hostname),
@@ -863,7 +1134,7 @@ def get_ubuntu_firstboot(mac: str):
         profile = _resolve_profile(session, machine)
         app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
         linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
-    profile_ctx = _profile_for_template(profile)
+    profile_ctx = _profile_for_template(profile, session)
     tv_suffix = profile_ctx.get("tv_suffix", "")
     tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
     content = jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
@@ -888,7 +1159,7 @@ def get_preseed(mac: str):
     packages = [p.strip() for p in (profile.extra_packages or "").split(",") if p.strip()]
     content = jinja_env.get_template("preseed.cfg.j2").render(
         machine=machine,
-        profile=_profile_for_template(profile),
+        profile=_profile_for_template(profile, session),
         packages=packages,
         mac=clean_mac,
         osiris_url=OSIRIS_BASE_URL,
@@ -908,7 +1179,7 @@ def get_debian_firstboot(mac: str):
         profile = _resolve_profile(session, machine)
         app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
         linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
-    profile_ctx = _profile_for_template(profile)
+    profile_ctx = _profile_for_template(profile, session)
     tv_suffix = profile_ctx.get("tv_suffix", "")
     tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
     content = jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
@@ -932,7 +1203,7 @@ def get_windows_firstboot(mac: str):
         profile = _resolve_profile(session, machine)
         app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
         win_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.winget_id != "")).all() if app_id_list else []
-    profile_ctx = _profile_for_template(profile)
+    profile_ctx = _profile_for_template(profile, session)
     tv_suffix = profile_ctx.get("tv_suffix", "")
     tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
     content = jinja_env.get_template("firstboot-windows.ps1.j2").render(
@@ -971,6 +1242,40 @@ def create_machine(machine: Machine, current_user: User = Depends(get_current_us
         "status": machine.status, "organization_id": machine.organization_id,
         "profile_id": machine.profile_id, "password": plaintext_password,
     }
+
+
+@app.post("/webhooks/new-machine", status_code=200)
+def webhook_new_machine(data: WebhookNewMachine, current_user: User = Depends(get_current_user)):
+    """
+    Endpoint simplifié pour pré-enregistrer une machine depuis un outil externe.
+    Idempotent : si la MAC existe déjà, retourne la machine existante sans erreur.
+    Champs requis : mac. Tout le reste est optionnel avec des valeurs par défaut.
+    """
+    clean_mac = validate_mac(data.mac)
+    with Session(engine) as session:
+        existing = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if existing:
+            return {"created": False, "mac": existing.mac, "hostname": existing.hostname,
+                    "client": existing.client, "os": existing.os, "status": existing.status}
+        machine = Machine(
+            mac=clean_mac,
+            hostname=data.hostname or clean_mac,
+            client=data.client,
+            os=data.os,
+            status="pending",
+            organization_id=data.organization_id,
+            profile_id=data.profile_id,
+            ou="",
+            password_hash=sha512_crypt.using(rounds=100000).hash(secrets.token_urlsafe(16)),
+        )
+        session.add(machine)
+        _log(session, current_user, "create_machine", target_mac=clean_mac,
+             details={"hostname": machine.hostname, "client": machine.client,
+                      "os": machine.os, "source": "webhook"})
+        session.commit()
+        session.refresh(machine)
+    return {"created": True, "mac": machine.mac, "hostname": machine.hostname,
+            "client": machine.client, "os": machine.os, "status": machine.status}
 
 
 @app.get("/machines", dependencies=[Depends(get_current_user)])
@@ -1135,6 +1440,82 @@ def redeploy_now(mac: str):
     except Exception:
         pass
     return {"detail": f"Machine {clean_mac} repassee en pending + WoL envoye"}
+
+
+@app.get("/dashboard", dependencies=[Depends(get_current_user)])
+def get_dashboard():
+    """Statistiques globales pour le tableau de bord."""
+    now = datetime.now(timezone.utc)
+    stuck_deploying_threshold = now - timedelta(minutes=30)
+    failed_threshold = now - timedelta(hours=24)
+
+    with Session(engine) as session:
+        machines = session.exec(select(Machine)).all()
+        orgs = {o.id: o.name for o in session.exec(select(Organization)).all()}
+
+        # Stats globales par statut
+        status_counts = {"pending": 0, "deploying": 0, "deployed": 0, "failed": 0}
+        for m in machines:
+            status_counts[m.status] = status_counts.get(m.status, 0) + 1
+
+        # Stats par organisation
+        org_stats: dict = {}
+        for m in machines:
+            oid = m.organization_id or 0
+            if oid not in org_stats:
+                org_stats[oid] = {
+                    "org_id": oid,
+                    "org_name": orgs.get(oid, "Sans organisation"),
+                    "pending": 0, "deploying": 0, "deployed": 0, "failed": 0, "total": 0,
+                }
+            org_stats[oid][m.status] = org_stats[oid].get(m.status, 0) + 1
+            org_stats[oid]["total"] += 1
+
+        # Alertes : machines bloquees
+        alerts = []
+        for m in machines:
+            if m.status == "deploying":
+                # On cherche le dernier evenement deploying
+                last_ev = session.exec(
+                    select(DeploymentEvent)
+                    .where(DeploymentEvent.mac == m.mac, DeploymentEvent.status == "deploying")
+                    .order_by(DeploymentEvent.timestamp.desc())
+                ).first()
+                if last_ev and last_ev.timestamp.replace(tzinfo=timezone.utc) < stuck_deploying_threshold:
+                    alerts.append({"type": "stuck_deploying", "hostname": m.hostname, "mac": m.mac,
+                                   "since": last_ev.timestamp.isoformat()})
+            elif m.status == "failed":
+                last_ev = session.exec(
+                    select(DeploymentEvent)
+                    .where(DeploymentEvent.mac == m.mac, DeploymentEvent.status == "failed")
+                    .order_by(DeploymentEvent.timestamp.desc())
+                ).first()
+                if last_ev and last_ev.timestamp.replace(tzinfo=timezone.utc) > failed_threshold:
+                    alerts.append({"type": "failed_recent", "hostname": m.hostname, "mac": m.mac,
+                                   "since": last_ev.timestamp.isoformat()})
+
+        # Derniers deploiements termines
+        recent_events = session.exec(
+            select(DeploymentEvent)
+            .where(DeploymentEvent.status.in_(["deployed", "failed"]))
+            .order_by(DeploymentEvent.timestamp.desc())
+            .limit(15)
+        ).all()
+
+        return {
+            "status_counts": status_counts,
+            "total_machines": len(machines),
+            "org_stats": list(org_stats.values()),
+            "alerts": alerts,
+            "recent_deployments": [
+                {
+                    "hostname": e.hostname, "mac": e.mac, "status": e.status,
+                    "os": e.os, "profile_name": e.profile_name,
+                    "timestamp": e.timestamp.isoformat(),
+                }
+                for e in recent_events
+            ],
+        }
 
 
 @app.get("/audit-logs", dependencies=[Depends(require_admin)])
@@ -1306,7 +1687,7 @@ def _build_winpe_script(mac: str) -> Response:
             media_type="text/plain", status_code=503,
         )
 
-    profile_ctx = _profile_for_template(profile)
+    profile_ctx = _profile_for_template(profile, session)
     locale = profile_ctx["locale"].replace("_", "-")[:5]
     content = jinja_env.get_template("winpe-deploy.cmd.j2").render(
         machine=machine,

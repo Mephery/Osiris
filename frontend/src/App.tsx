@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Toaster, toast } from 'sonner'
+import { QRCodeSVG } from 'qrcode.react'
 import './App.css'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
@@ -187,10 +188,11 @@ const IcoCheck     = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M2 8l4
 const IcoChevDown  = ({ cls = 'w-3 h-3' }: IProps) => <S cls={cls} p="M3 5l5 5 5-5" />
 const IcoChevUp    = ({ cls = 'w-3 h-3' }: IProps) => <S cls={cls} p="M3 11l5-5 5 5" />
 const IcoChevRight = ({ cls = 'w-3 h-3' }: IProps) => <S cls={cls} p="M5 3l5 5-5 5" />
+const IcoGear      = ({ cls = 'w-4 h-4' }: IProps) => <S cls={cls} p="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM1.5 8a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0z" />
 
 // ── Composant Login ────────────────────────────────────────────────────────────
 
-function LoginPage({ onLogin }: { onLogin: (auth: AuthState) => void }) {
+function LoginPage({ onLogin, onTotpRequired }: { onLogin: (auth: AuthState) => void, onTotpRequired: (temp_token: string) => void }) {
   const [email, setEmail]       = useState('')
   const [password, setPassword] = useState('')
   const [error, setError]       = useState<string | null>(null)
@@ -212,7 +214,10 @@ function LoginPage({ onLogin }: { onLogin: (auth: AuthState) => void }) {
         }
         return res.json()
       })
-      .then((data) => onLogin({ token: data.access_token, email: data.email, role: data.role }))
+      .then((data) => {
+        if (data.totp_required) { onTotpRequired(data.temp_token); setLoading(false); return }
+        onLogin({ token: data.access_token, email: data.email, role: data.role })
+      })
       .catch((err) => { setError(err.message); setLoading(false) })
   }
 
@@ -256,6 +261,124 @@ function LoginPage({ onLogin }: { onLogin: (auth: AuthState) => void }) {
   )
 }
 
+// ── Onglet Integrations ───────────────────────────────────────────────────────
+
+function CopyBlock({ label, code }: { label: string; code: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    navigator.clipboard.writeText(code)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <span className="text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
+        <button onClick={copy} className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors cursor-pointer">
+          {copied ? 'Copie !' : 'Copier'}
+        </button>
+      </div>
+      <pre className="text-[10px] font-mono text-slate-400 bg-slate-950 border border-slate-800/60 rounded p-3 overflow-x-auto whitespace-pre-wrap break-all leading-relaxed">{code}</pre>
+    </div>
+  )
+}
+
+function IntegrationsTab({ apiUrl }: { apiUrl: string }) {
+  const curlExample = `curl -H "Authorization: Bearer osiris_sk_..." \\
+  ${apiUrl}/machines`
+
+  const psExample = `$headers = @{ Authorization = "Bearer osiris_sk_..." }
+$machines = Invoke-RestMethod "${apiUrl}/machines" -Headers $headers
+$machines | Format-Table hostname, client, status`
+
+  const pythonExample = `import requests
+
+r = requests.get(
+    "${apiUrl}/machines",
+    headers={"Authorization": "Bearer osiris_sk_..."}
+)
+for m in r.json():
+    print(m["hostname"], m["status"])`
+
+  const webhookInExample = `POST ${apiUrl}/webhooks/new-machine
+Authorization: Bearer osiris_sk_...
+Content-Type: application/json
+
+{
+  "mac": "aa:bb:cc:dd:ee:ff",
+  "hostname": "PC-DUPONT",
+  "client": "Acme Corp",
+  "os": "windows"
+}`
+
+  const grafanaExample = `# Plugin Grafana : Infinity Datasource
+# URL : ${apiUrl}/machines
+# Methode : GET
+# Header : Authorization = Bearer osiris_sk_...
+# Type : JSON
+# Format : Table`
+
+  const redeployExample = `# Redeclencher un deploiement (RMM, script cron...)
+curl -X POST \\
+  -H "Authorization: Bearer osiris_sk_..." \\
+  ${apiUrl}/machines/aabbccddeeff/redeploy-now`
+
+  const swaggerUrl = apiUrl.replace(/\/$/, '') + '/docs'
+
+  return (
+    <div className="p-6 space-y-5 overflow-y-auto" style={{ maxHeight: '70vh' }}>
+      <div className="border-l-2 border-blue-800 pl-3 py-0.5 space-y-1">
+        <p className="text-xs text-slate-300">Remplacez <code className="text-blue-400 text-[11px]">osiris_sk_...</code> par une cle API generee dans l'onglet "Cles API".</p>
+        <a href={swaggerUrl} target="_blank" rel="noopener noreferrer"
+          className="text-[10px] text-blue-500 hover:text-blue-400 transition-colors">
+          Documentation interactive (Swagger) - {swaggerUrl}
+        </a>
+      </div>
+
+      <div className="space-y-3">
+        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Lecture - lister les machines</p>
+        <CopyBlock label="curl / bash" code={curlExample} />
+        <CopyBlock label="PowerShell (RMM, ConnectWise, N-central)" code={psExample} />
+        <CopyBlock label="Python (script interne, Zabbix, Make)" code={pythonExample} />
+      </div>
+
+      <div className="space-y-3 pt-2 border-t border-slate-800/40">
+        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Creation - pre-enregistrer une machine (GLPI, Jira, ticketing)</p>
+        <p className="text-[10px] text-slate-600">Si la machine existe deja, aucune erreur - retour 200 avec les donnees existantes.</p>
+        <CopyBlock label="Requete HTTP (GLPI webhook, Jira automation)" code={webhookInExample} />
+      </div>
+
+      <div className="space-y-3 pt-2 border-t border-slate-800/40">
+        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Redeploiement - depuis un RMM ou un script</p>
+        <CopyBlock label="curl" code={redeployExample} />
+      </div>
+
+      <div className="space-y-3 pt-2 border-t border-slate-800/40">
+        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Grafana - Infinity Datasource</p>
+        <CopyBlock label="Configuration Infinity Datasource" code={grafanaExample} />
+      </div>
+
+      <div className="pt-2 border-t border-slate-800/40 space-y-1">
+        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Make / Zapier / n8n - webhook sortant</p>
+        <p className="text-[10px] text-slate-500">
+          Dans Administration &gt; Organisations, collez l'URL Make/Zapier/n8n dans le champ "Webhook URL".
+          OSIRIS envoie automatiquement un JSON structure a chaque changement de statut :
+          <code className="block text-[10px] font-mono mt-1 text-slate-400">event, hostname, mac, client, os, hw_model, hw_ram_gb, hw_serial, osiris_url</code>
+        </p>
+      </div>
+
+      <div className="pt-2 border-t border-slate-800/40 space-y-1">
+        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Snipe-IT / Lansweeper - export inventaire</p>
+        <p className="text-[10px] text-slate-500">
+          Endpoint CSV : <code className="text-slate-400">{apiUrl}/machines/export</code><br/>
+          Contient : MAC, hostname, client, OS, profil, statut, modele, RAM, numero de serie, utilisateur, notes.
+          A appeler depuis une tache planifiee ou le CMDB directement.
+        </p>
+      </div>
+    </div>
+  )
+}
+
 // ── Composant principal ────────────────────────────────────────────────────────
 
 export default function App() {
@@ -283,7 +406,7 @@ export default function App() {
   const [oneTimePassword, setOneTimePassword] = useState<{ hostname: string; password: string } | null>(null)
 
   // ── Navigation par onglets ─────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<'machines' | 'admin' | 'drivers' | 'journal' | 'capture'>('machines')
+  const [activeTab, setActiveTab] = useState<'machines' | 'admin' | 'drivers' | 'journal' | 'capture' | 'dashboard'>('machines')
 
   // ── Section admin : gestion des orgs et users ──────────────────────────────
   const [captureJobs, setCaptureJobs]   = useState<{mac:string;wim_name:string;status:string;registered_at:string;finished_at?:string}[]>([])
@@ -384,7 +507,11 @@ export default function App() {
   const [statusFilter, setStatusFilter] = useState('')
 
   // ── Changement de mot de passe ─────────────────────────────────────────────
-  const [showPasswordModal, setShowPasswordModal] = useState(false)
+  const [showSettingsModal, setShowSettingsModal] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<'password' | 'totp' | 'apikeys' | 'integrations'>('password')
+  const [apiKeys, setApiKeys] = useState<any[]>([])
+  const [newKeyName, setNewKeyName] = useState('')
+  const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [pwCurrent, setPwCurrent] = useState('')
   const [pwNew, setPwNew]         = useState('')
   const [pwConfirm, setPwConfirm] = useState('')
@@ -395,6 +522,25 @@ export default function App() {
   // ── Journal d'activité ──────────────────────────────────────────────────────
   const [auditLogs, setAuditLogs]         = useState<AuditLogEntry[]>([])
   const [auditLoading, setAuditLoading]   = useState(false)
+
+  // Dashboard
+  const [dashboard, setDashboard] = useState<any>(null)
+  const [dashboardLoading, setDashboardLoading] = useState(false)
+
+  // Domaines AD par organisation
+  const [domainConfigs, setDomainConfigs] = useState<any[]>([])
+  const [newDomainConfig, setNewDomainConfig] = useState({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '' })
+
+  // 2FA
+  const [totpSetup, setTotpSetup] = useState<{secret: string, uri: string} | null>(null)
+  const [totpCode, setTotpCode] = useState('')
+  const [totpEnabled, setTotpEnabled] = useState(false)
+  const [totpDisablePassword, setTotpDisablePassword] = useState('')
+  const [totpStep, setTotpStep] = useState<null | 'setup' | 'confirm_disable'>(null)
+
+  // Login 2FA
+  const [pendingTotp, setPendingTotp] = useState<{temp_token: string} | null>(null)
+  const [totpLoginCode, setTotpLoginCode] = useState('')
 
   // ── Chargement des données ──────────────────────────────────────────────────
 
@@ -466,6 +612,105 @@ export default function App() {
       .then(() => { fetchCaptures(auth!.token); toast.success('Job de capture supprimé') })
   }
 
+  const fetchDashboard = (token: string) => {
+    setDashboardLoading(true)
+    fetch(`${API_URL}/dashboard`, { headers: authHeader(token) })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => { setDashboard(data); setDashboardLoading(false) })
+      .catch(() => { setDashboard({}); setDashboardLoading(false) })
+  }
+
+  const fetchDomainConfigs = (token: string, orgId?: number) => {
+    const url = orgId ? `${API_URL}/domain-configs?org_id=${orgId}` : `${API_URL}/domain-configs`
+    fetch(url, { headers: authHeader(token) })
+      .then(r => r.ok ? r.json() : [])
+      .then(setDomainConfigs)
+      .catch(() => {})
+  }
+
+  const fetchTotpStatus = (token: string) => {
+    fetch(`${API_URL}/auth/totp/status`, { headers: authHeader(token) })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setTotpEnabled(data.totp_enabled) })
+      .catch(() => {})
+  }
+
+  const startTotpSetup = () => {
+    if (!auth) return
+    fetch(`${API_URL}/auth/totp/setup`, { headers: authHeader(auth.token) })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => { setTotpSetup({ secret: data.secret, uri: data.uri }); setTotpStep('setup'); setTotpCode('') })
+      .catch(() => toast.error('Impossible de demarrer la configuration 2FA'))
+  }
+
+  const confirmTotpEnable = () => {
+    if (!auth || !totpSetup) return
+    fetch(`${API_URL}/auth/totp/enable`, {
+      method: 'POST',
+      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret: totpSetup.secret, code: totpCode }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject(r))
+      .then(() => { setTotpEnabled(true); setTotpStep(null); setTotpSetup(null); toast.success('Double authentification activee') })
+      .catch(() => toast.error('Code incorrect ou expire'))
+  }
+
+  const disableTotp = () => {
+    if (!auth) return
+    fetch(`${API_URL}/auth/totp/disable`, {
+      method: 'POST',
+      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: totpDisablePassword }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(() => { setTotpEnabled(false); setTotpStep(null); setTotpDisablePassword(''); toast.success('Double authentification desactivee') })
+      .catch(() => toast.error('Mot de passe incorrect'))
+  }
+
+  const submitTotpLogin = () => {
+    if (!pendingTotp) return
+    fetch(`${API_URL}/auth/totp/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ temp_token: pendingTotp.temp_token, code: totpLoginCode }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => {
+        const token = data.access_token
+        const payload = JSON.parse(atob(token.split('.')[1]))
+        setAuth({ token, role: payload.role, email: payload.email })
+        setPendingTotp(null)
+        setTotpLoginCode('')
+      })
+      .catch(() => toast.error('Code incorrect'))
+  }
+
+  const fetchApiKeys = (token: string) => {
+    fetch(`${API_URL}/auth/api-keys`, { headers: authHeader(token) })
+      .then(r => r.ok ? r.json() : [])
+      .then(setApiKeys)
+      .catch(() => {})
+  }
+
+  const createApiKey = () => {
+    if (!auth || !newKeyName.trim()) return
+    fetch(`${API_URL}/auth/api-keys`, {
+      method: 'POST',
+      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newKeyName.trim() }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => { setCreatedKey(data.key); setNewKeyName(''); fetchApiKeys(auth.token); toast.success('Cle creee') })
+      .catch(() => toast.error('Erreur creation cle'))
+  }
+
+  const revokeApiKey = (id: number) => {
+    if (!auth) return
+    fetch(`${API_URL}/auth/api-keys/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
+      .then(r => { if (r.ok) { fetchApiKeys(auth.token); toast.success('Cle revoquee') } else throw new Error() })
+      .catch(() => toast.error('Erreur revocation'))
+  }
+
   const fetchWims = () => {
     if (!auth) return
     fetch(`${API_URL}/wims`, { headers: authHeader(auth.token) })
@@ -527,6 +772,8 @@ export default function App() {
     if (!auth || auth.role !== 'admin') return
     if (activeTab === 'drivers') fetchDrivers(auth.token)
     else if (activeTab === 'journal') fetchAuditLogs(auth.token)
+    else if (activeTab === 'dashboard') fetchDashboard(auth.token)
+    else if (activeTab === 'admin') { fetchDomainConfigs(auth.token); fetchTotpStatus(auth.token) }
     else if (activeTab === 'capture') fetchCaptures(auth.token)
   }, [activeTab])
 
@@ -596,7 +843,21 @@ export default function App() {
     }
   }, [deployLogs, expandedLogs])
 
-  if (!auth) return <LoginPage onLogin={setAuth} />
+  if (pendingTotp) return (
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <div className="w-full max-w-sm space-y-4">
+        <h1 className="text-white text-lg font-bold text-center">Double authentification</h1>
+        <p className="text-slate-400 text-xs text-center">Saisissez le code a 6 chiffres de votre application d'authentification</p>
+        <input autoFocus maxLength={6} placeholder="000000" value={totpLoginCode}
+          onChange={e => setTotpLoginCode(e.target.value.replace(/\D/g, ''))}
+          onKeyDown={e => e.key === 'Enter' && submitTotpLogin()}
+          className="osiris-input text-center text-xl tracking-widest font-mono w-full" />
+        <button onClick={submitTotpLogin} className="osiris-btn w-full">Verifier</button>
+        <button onClick={() => { setPendingTotp(null); setTotpLoginCode('') }} className="osiris-btn-ghost w-full text-xs">Retour</button>
+      </div>
+    </div>
+  )
+  if (!auth) return <LoginPage onLogin={setAuth} onTotpRequired={token => setPendingTotp({ temp_token: token })} />
 
   // ── Modale helpers ──────────────────────────────────────────────────────────
 
@@ -838,12 +1099,6 @@ export default function App() {
       .finally(() => setDownloadingPack(null))
   }
 
-  const openPasswordModal = () => {
-    setPwCurrent(''); setPwNew(''); setPwConfirm('')
-    setPwError(null); setPwSuccess(false)
-    setShowPasswordModal(true)
-  }
-
   const handlePasswordChange = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     setPwError(null)
@@ -902,18 +1157,19 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs font-mono text-slate-700 hidden sm:block">{auth.email}</span>
-            <button onClick={openPasswordModal} className="osiris-btn-ghost text-xs">Mot de passe</button>
-            <button onClick={() => setAuth(null)} className="osiris-btn-ghost text-xs">Déconnexion</button>
+            <button onClick={() => { setShowSettingsModal(true); fetchTotpStatus(auth.token); fetchApiKeys(auth.token); setPwCurrent(''); setPwNew(''); setPwConfirm(''); setPwError(null); setPwSuccess(false); setSettingsTab('password'); setCreatedKey(null) }} className="osiris-action-btn" title="Parametres du compte"><IcoGear /></button>
+            <button onClick={() => setAuth(null)} className="osiris-btn-ghost text-xs">Deconnexion</button>
           </div>
         </div>
         {/* ── Onglets ──────────────────────────────────────────────────── */}
         <div className="max-w-7xl mx-auto px-6 flex items-center gap-0 border-t border-slate-800/40">
           {([
-            { id: 'machines' as const, label: 'Machines',       adminOnly: false },
-            { id: 'admin'    as const, label: 'Administration', adminOnly: true  },
-            { id: 'drivers'  as const, label: 'Drivers',        adminOnly: true  },
-            { id: 'journal'  as const, label: 'Journal',        adminOnly: true  },
-            { id: 'capture'  as const, label: 'Capture',        adminOnly: true  },
+            { id: 'machines'  as const, label: 'Machines',       adminOnly: false },
+            { id: 'dashboard' as const, label: 'Tableau de bord', adminOnly: false },
+            { id: 'admin'     as const, label: 'Administration', adminOnly: true  },
+            { id: 'drivers'   as const, label: 'Drivers',        adminOnly: true  },
+            { id: 'journal'   as const, label: 'Journal',        adminOnly: true  },
+            { id: 'capture'   as const, label: 'Capture',        adminOnly: true  },
           ]).filter(t => !t.adminOnly || auth.role === 'admin').map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)}
               className={`px-5 py-2.5 text-xs font-semibold tracking-wide border-b-2 transition-colors cursor-pointer ${
@@ -1181,6 +1437,88 @@ export default function App() {
           </div>
         )}
 
+        {/* ── Onglet Tableau de bord ───────────────────────────────────────── */}
+        {activeTab === 'dashboard' && (
+          <div className="max-w-7xl mx-auto px-6 py-6 space-y-6">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Tableau de bord</h2>
+              <button onClick={() => fetchDashboard(auth.token)} className="osiris-btn text-xs">
+                {dashboardLoading ? 'Chargement...' : <><IcoRefresh cls="w-3 h-3 inline" /> Rafraichir</>}
+              </button>
+            </div>
+            {dashboardLoading ? (
+              <p className="text-slate-700 font-mono text-xs">Chargement...</p>
+            ) : !dashboard || dashboard.total_machines === 0 ? (
+              <p className="text-slate-700 font-mono text-xs">Aucune machine enregistree pour l'instant.</p>
+            ) : (
+              <>
+                {/* Compteurs globaux */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {(['deployed', 'pending', 'deploying', 'failed'] as const).map(s => {
+                    const colors: Record<string, string> = { deployed: 'text-green-400', pending: 'text-blue-400', deploying: 'text-yellow-400', failed: 'text-red-400' }
+                    const labels: Record<string, string> = { deployed: 'Deployes', pending: 'En attente', deploying: 'En cours', failed: 'Echoues' }
+                    return (
+                      <div key={s} className="bg-slate-900 border border-slate-800/60 rounded p-4 text-center">
+                        <p className={`text-3xl font-bold ${colors[s]}`}>{dashboard.status_counts[s] ?? 0}</p>
+                        <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest">{labels[s]}</p>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* Alertes */}
+                {dashboard.alerts.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-[9px] uppercase tracking-widest text-slate-600">Alertes</p>
+                    {dashboard.alerts.map((a: any, i: number) => (
+                      <div key={i} className={`text-xs p-2 rounded border font-mono ${a.type === 'stuck_deploying' ? 'border-yellow-800/50 bg-yellow-950/30 text-yellow-400' : 'border-red-800/50 bg-red-950/30 text-red-400'}`}>
+                        {a.type === 'stuck_deploying' ? `En cours depuis plus de 30 min` : `Echec recent`} - <strong>{a.hostname}</strong> ({a.mac})
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Stats par org */}
+                {dashboard.org_stats.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-[9px] uppercase tracking-widest text-slate-600">Par organisation</p>
+                    {dashboard.org_stats.sort((a: any, b: any) => b.total - a.total).map((o: any) => (
+                      <div key={o.org_id} className="bg-slate-900 border border-slate-800/60 rounded p-3 flex items-center gap-4">
+                        <span className="text-slate-300 text-sm font-medium w-40 truncate">{o.org_name}</span>
+                        <div className="flex-1 flex gap-1 h-2">
+                          {(['deployed', 'pending', 'deploying', 'failed'] as const).map(s => {
+                            const pct = o.total ? Math.round((o[s] ?? 0) / o.total * 100) : 0
+                            const colors = { deployed: 'bg-green-500', pending: 'bg-blue-500', deploying: 'bg-yellow-500', failed: 'bg-red-500' }
+                            return pct > 0 ? <div key={s} className={`${colors[s]} rounded`} style={{ width: `${pct}%` }} title={`${s}: ${o[s]}`} /> : null
+                          })}
+                        </div>
+                        <span className="text-slate-600 text-[10px] font-mono w-16 text-right">{o.total} machine{o.total > 1 ? 's' : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Derniers deploiements */}
+                {dashboard.recent_deployments.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-[9px] uppercase tracking-widest text-slate-600">Deploiements recents</p>
+                    <div className="border border-slate-800/60 rounded overflow-hidden">
+                      {dashboard.recent_deployments.map((e: any, i: number) => (
+                        <div key={i} className={`flex items-center gap-3 px-3 py-2 text-xs font-mono ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
+                          <span className={`w-16 text-center rounded px-1 py-0.5 text-[9px] font-bold ${e.status === 'deployed' ? 'bg-green-900/60 text-green-400' : 'bg-red-900/60 text-red-400'}`}>{e.status}</span>
+                          <span className="text-slate-300 w-40 truncate">{e.hostname}</span>
+                          <span className="text-slate-600 flex-1 truncate">{e.profile_name}</span>
+                          <span className="text-slate-700">{new Date(e.timestamp).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
         {/* ── Onglet Journal ───────────────────────────────────────────────── */}
         {activeTab === 'journal' && auth.role === 'admin' && (
           <div className="osiris-table-wrap overflow-x-auto">
@@ -1236,6 +1574,46 @@ export default function App() {
                 </tbody>
               </table>
             )}
+          </div>
+        )}
+
+        {/* ── Domaines AD (dans onglet Admin, section separee) ─────────────── */}
+        {activeTab === 'admin' && auth.role === 'admin' && (
+          <div className="max-w-7xl mx-auto px-6 py-4 border-t border-slate-800/40 space-y-3">
+            <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Domaines AD par organisation</h2>
+            <p className="text-[10px] text-slate-600">Configurez les credentials AD au niveau de l'organisation. Les profils peuvent utiliser ces configs au lieu de saisir le domaine manuellement.</p>
+            {domainConfigs.length > 0 && (
+              <div className="space-y-1">
+                {domainConfigs.map((dc: any) => (
+                  <div key={dc.id} className="flex items-center justify-between py-1.5 px-3 border border-slate-800/60 rounded text-xs">
+                    <div>
+                      <span className="text-white font-medium">{dc.name}</span>
+                      <span className="text-slate-500 ml-3 font-mono">{dc.domain}</span>
+                      {dc.join_user && <span className="text-slate-600 ml-2">({dc.join_user})</span>}
+                      {dc.default_ou && <span className="text-slate-700 ml-2 font-mono text-[9px]">{dc.default_ou}</span>}
+                    </div>
+                    <button onClick={() => fetch(`${API_URL}/domain-configs/${dc.id}`, { method: 'DELETE', headers: authHeader(auth.token) }).then(r => { if (r.ok) fetchDomainConfigs(auth.token) })} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-2 border-t border-slate-800/40">
+              <select value={newDomainConfig.organization_id} onChange={e => setNewDomainConfig({...newDomainConfig, organization_id: parseInt(e.target.value)})} className="osiris-input text-xs">
+                <option value={0}>-- Organisation --</option>
+                {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+              </select>
+              <input placeholder="Nom (ex: Siege principal)" value={newDomainConfig.name} onChange={e => setNewDomainConfig({...newDomainConfig, name: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input placeholder="Domaine (ex: corp.local)" value={newDomainConfig.domain} onChange={e => setNewDomainConfig({...newDomainConfig, domain: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input placeholder="Compte jonction AD" value={newDomainConfig.join_user} onChange={e => setNewDomainConfig({...newDomainConfig, join_user: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input type="password" placeholder="Mot de passe jonction" value={newDomainConfig.join_password} onChange={e => setNewDomainConfig({...newDomainConfig, join_password: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input placeholder="OU par defaut (optionnel)" value={newDomainConfig.default_ou} onChange={e => setNewDomainConfig({...newDomainConfig, default_ou: e.target.value})} className="osiris-input text-xs font-mono" />
+              <button onClick={() => {
+                if (!newDomainConfig.organization_id || !newDomainConfig.name || !newDomainConfig.domain) { toast.error('Organisation, nom et domaine requis'); return }
+                fetch(`${API_URL}/domain-configs`, { method: 'POST', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify(newDomainConfig) })
+                  .then(r => { if (r.ok) { fetchDomainConfigs(auth.token); setNewDomainConfig({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '' }); toast.success('Configuration AD ajoutee') } else throw new Error() })
+                  .catch(() => toast.error('Erreur'))
+              }} className="osiris-btn text-xs col-span-2 sm:col-span-1">Ajouter</button>
+            </div>
           </div>
         )}
 
@@ -1849,52 +2227,162 @@ export default function App() {
       </div>
 
       {/* ── Modale : changement de mot de passe ──────────────────────────── */}
-      {showPasswordModal && (
-        <div className="osiris-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowPasswordModal(false) }}>
-          <div className="osiris-modal">
+      {showSettingsModal && (
+        <div className="osiris-overlay" onClick={(e) => { if (e.target === e.currentTarget) { setShowSettingsModal(false); setTotpStep(null); setTotpSetup(null) } }}>
+          <div className="osiris-modal" style={{ maxWidth: '480px' }}>
             <div className="osiris-modal-header">
-              <h2 className="text-xs font-bold uppercase tracking-widest text-white">Changer mon mot de passe</h2>
-              <button onClick={() => setShowPasswordModal(false)} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1"><IcoX cls="w-4 h-4" /></button>
+              <h2 className="text-xs font-bold uppercase tracking-widest text-white">Parametres du compte</h2>
+              <button onClick={() => { setShowSettingsModal(false); setTotpStep(null); setTotpSetup(null) }} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1"><IcoX cls="w-4 h-4" /></button>
             </div>
-            {pwSuccess ? (
-              <div className="p-6 space-y-5">
-                <div className="border-l-2 border-emerald-700 pl-3 py-1">
-                  <p className="text-emerald-400 text-sm font-mono">Mot de passe mis à jour avec succès.</p>
+            {/* Sous-onglets */}
+            <div className="flex border-b border-slate-800">
+              {([
+                { id: 'password', label: 'Mot de passe' },
+                { id: 'totp', label: '2FA' },
+                { id: 'apikeys', label: 'Cles API' },
+                { id: 'integrations', label: 'Integrations' },
+              ] as const).map(t => (
+                <button key={t.id} onClick={() => { setSettingsTab(t.id as any); if (t.id === 'apikeys') fetchApiKeys(auth.token) }}
+                  className={`px-5 py-2.5 text-xs font-semibold tracking-wide border-b-2 transition-colors cursor-pointer ${settingsTab === t.id ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-600 hover:text-slate-400'}`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Onglet mot de passe */}
+            {settingsTab === 'password' && (
+              pwSuccess ? (
+                <div className="p-6 space-y-5">
+                  <div className="border-l-2 border-emerald-700 pl-3 py-1">
+                    <p className="text-emerald-400 text-sm font-mono">Mot de passe mis a jour avec succes.</p>
+                  </div>
+                  <button onClick={() => setShowSettingsModal(false)} className="osiris-btn w-full justify-center">Fermer</button>
                 </div>
-                <button onClick={() => setShowPasswordModal(false)} className="osiris-btn w-full justify-center">Fermer</button>
-              </div>
-            ) : (
-              <form onSubmit={handlePasswordChange} className="p-6 space-y-4">
-                {pwError && (
-                  <div className="border-l-2 border-red-700 pl-3 py-1">
-                    <p className="text-red-400 text-xs font-mono">{pwError}</p>
+              ) : (
+                <form onSubmit={handlePasswordChange} className="p-6 space-y-4">
+                  {pwError && <div className="border-l-2 border-red-700 pl-3 py-1"><p className="text-red-400 text-xs font-mono">{pwError}</p></div>}
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Mot de passe actuel</label>
+                    <input required type="password" placeholder="..." value={pwCurrent} onChange={e => setPwCurrent(e.target.value)} className="osiris-input" autoFocus />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Nouveau mot de passe</label>
+                    <input required type="password" placeholder="8 caracteres minimum" value={pwNew} onChange={e => setPwNew(e.target.value)} className="osiris-input" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Confirmer</label>
+                    <input required type="password" placeholder="..." value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} className="osiris-input" />
+                  </div>
+                  <div className="flex justify-end gap-3 pt-2">
+                    <button type="button" onClick={() => setShowSettingsModal(false)} className="osiris-btn-ghost">Annuler</button>
+                    <button type="submit" disabled={pwLoading} className="osiris-btn">{pwLoading ? 'Mise a jour...' : 'Changer le mot de passe'}</button>
+                  </div>
+                </form>
+              )
+            )}
+
+            {/* Onglet 2FA */}
+            {/* Onglet cles API */}
+            {settingsTab === 'apikeys' && (
+              <div className="p-6 space-y-4">
+                {/* Cle nouvellement creee - a copier maintenant */}
+                {createdKey && (
+                  <div className="border border-amber-800/60 bg-amber-950/30 rounded p-3 space-y-2">
+                    <p className="text-amber-400 text-xs font-semibold">Copiez cette cle maintenant - elle ne sera plus affichee.</p>
+                    <div className="flex gap-2 items-center">
+                      <code className="text-amber-300 text-[11px] font-mono break-all flex-1">{createdKey}</code>
+                      <button onClick={() => { navigator.clipboard.writeText(createdKey); toast.success('Cle copiee') }} className="osiris-btn text-xs shrink-0">Copier</button>
+                    </div>
+                    <button onClick={() => setCreatedKey(null)} className="osiris-btn-ghost text-[10px]">J'ai copie ma cle</button>
                   </div>
                 )}
-                <div className="space-y-1.5">
-                  <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Mot de passe actuel</label>
-                  <input required type="password" placeholder="••••••••"
-                    value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)}
-                    className="osiris-input" autoFocus />
+
+                {/* Liste des cles */}
+                {apiKeys.length > 0 ? (
+                  <div className="space-y-1">
+                    {apiKeys.map((k: any) => (
+                      <div key={k.id} className="flex items-center justify-between py-2 px-3 border border-slate-800/60 rounded">
+                        <div>
+                          <span className="text-white text-xs font-medium">{k.name}</span>
+                          <span className="text-slate-700 text-[10px] font-mono ml-2">{k.prefix}...</span>
+                          <p className="text-[10px] text-slate-700 mt-0.5">
+                            Creee le {new Date(k.created_at).toLocaleDateString('fr-FR')}
+                            {k.last_used_at ? ` - utilisee le ${new Date(k.last_used_at).toLocaleDateString('fr-FR')}` : ' - jamais utilisee'}
+                          </p>
+                        </div>
+                        <button onClick={() => revokeApiKey(k.id)} className="osiris-action-btn osiris-action-btn--danger shrink-0" title="Revoquer"><IcoX /></button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-slate-700 text-xs">Aucune cle API pour l'instant.</p>
+                )}
+
+                {/* Creer une nouvelle cle */}
+                <div className="pt-2 border-t border-slate-800/40 space-y-2">
+                  <p className="text-[9px] uppercase tracking-widest text-slate-600">Nouvelle cle</p>
+                  <div className="flex gap-2">
+                    <input placeholder="Nom (ex: ConnectWise, Grafana, Script backup)" value={newKeyName} onChange={e => setNewKeyName(e.target.value)} onKeyDown={e => e.key === 'Enter' && createApiKey()} className="osiris-input text-xs flex-1" autoFocus />
+                    <button onClick={createApiKey} disabled={!newKeyName.trim()} className="osiris-btn text-xs shrink-0">Generer</button>
+                  </div>
+                  <p className="text-[10px] text-slate-700">Utilisez la cle dans l'en-tete HTTP : <code className="text-slate-500">Authorization: Bearer osiris_sk_...</code></p>
                 </div>
-                <div className="space-y-1.5">
-                  <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Nouveau mot de passe</label>
-                  <input required type="password" placeholder="••••••••  (8 caractères minimum)"
-                    value={pwNew} onChange={(e) => setPwNew(e.target.value)}
-                    className="osiris-input" />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Confirmer le nouveau mot de passe</label>
-                  <input required type="password" placeholder="••••••••"
-                    value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)}
-                    className="osiris-input" />
-                </div>
-                <div className="flex justify-end gap-3 pt-2">
-                  <button type="button" onClick={() => setShowPasswordModal(false)} className="osiris-btn-ghost">Annuler</button>
-                  <button type="submit" disabled={pwLoading} className="osiris-btn">
-                    {pwLoading ? 'Mise à jour…' : 'Changer le mot de passe'}
-                  </button>
-                </div>
-              </form>
+              </div>
+            )}
+
+            {settingsTab === 'integrations' && (
+              <IntegrationsTab apiUrl={API_URL} />
+            )}
+
+            {settingsTab === 'totp' && (
+              <div className="p-6 space-y-4">
+                {totpEnabled ? (
+                  totpStep === 'confirm_disable' ? (
+                    <div className="space-y-3">
+                      <p className="text-xs text-slate-400">Saisissez votre mot de passe pour desactiver le 2FA :</p>
+                      <div className="flex gap-2">
+                        <input type="password" placeholder="Mot de passe" value={totpDisablePassword} onChange={e => setTotpDisablePassword(e.target.value)} className="osiris-input text-xs flex-1" autoFocus />
+                        <button onClick={disableTotp} className="osiris-btn text-xs">Confirmer</button>
+                        <button onClick={() => setTotpStep(null)} className="osiris-btn-ghost text-xs">Annuler</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-3">
+                        <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
+                        <span className="text-green-400 text-sm">Double authentification active</span>
+                      </div>
+                      <p className="text-xs text-slate-600">Votre compte est protege par un code TOTP a chaque connexion.</p>
+                      <button onClick={() => setTotpStep('confirm_disable')} className="osiris-btn-ghost text-xs text-red-400 border-red-900">Desactiver le 2FA</button>
+                    </div>
+                  )
+                ) : totpStep === 'setup' && totpSetup ? (
+                  <div className="space-y-4">
+                    <p className="text-xs text-slate-400">Scannez ce QR code avec Google Authenticator, Authy ou une app compatible :</p>
+                    <div className="flex justify-center p-4 bg-slate-950 rounded border border-slate-800">
+                      <QRCodeSVG value={totpSetup.uri} size={180} bgColor="#020817" fgColor="#e2e8f0" />
+                    </div>
+                    <p className="text-[10px] text-slate-700 font-mono break-all">Secret manuel : {totpSetup.secret}</p>
+                    <div className="space-y-1.5">
+                      <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Code de confirmation</label>
+                      <div className="flex gap-2">
+                        <input maxLength={6} placeholder="000000" value={totpCode} onChange={e => setTotpCode(e.target.value.replace(/\D/g, ''))} onKeyDown={e => e.key === 'Enter' && confirmTotpEnable()} className="osiris-input text-center text-lg tracking-widest font-mono flex-1" autoFocus />
+                        <button onClick={confirmTotpEnable} className="osiris-btn">Activer</button>
+                      </div>
+                    </div>
+                    <button onClick={() => { setTotpStep(null); setTotpSetup(null) }} className="osiris-btn-ghost text-xs">Annuler</button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <span className="w-2 h-2 rounded-full bg-slate-700 inline-block" />
+                      <span className="text-slate-400 text-sm">Double authentification inactive</span>
+                    </div>
+                    <p className="text-xs text-slate-600">Activez le 2FA pour proteger votre compte avec un code genere par une application d'authentification.</p>
+                    <button onClick={startTotpSetup} className="osiris-btn text-xs">Configurer le 2FA</button>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>

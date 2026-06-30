@@ -1,10 +1,7 @@
 """
 Utilitaires d'authentification : hachage de mots de passe et tokens JWT.
-
-Un JWT (JSON Web Token) c'est un ticket signé que le serveur émet à la connexion.
-Le client le renvoie dans chaque requête. Le serveur vérifie la signature — si elle
-est valide, il sait qui fait la requête sans interroger la base de données.
 """
+import hashlib
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -15,18 +12,15 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlmodel import Session, select
 
-from models import User, engine
+from models import ApiKey, User, engine
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 SECRET_KEY      = os.environ.get("JWT_SECRET", "changeme-generate-a-real-secret")
 ALGORITHM       = "HS256"
-TOKEN_EXPIRE_H  = 12   # le token expire après 12 heures
+TOKEN_EXPIRE_H  = 12
+TEMP_TOKEN_EXPIRE_MIN = 5   # token temporaire 2FA : valable 5 minutes
 
-# CryptContext gère le hachage bcrypt des mots de passe utilisateurs
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# OAuth2PasswordBearer dit à FastAPI où trouver le token dans les requêtes
-# (dans l'en-tête Authorization: Bearer <token>)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
@@ -41,25 +35,58 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 # ── Tokens JWT ─────────────────────────────────────────────────────────────────
 
-def create_token(user_id: int, role: str) -> str:
-    """Crée un JWT signé contenant l'id et le rôle de l'utilisateur."""
+def create_token(payload: dict) -> str:
+    """Cree un JWT signe. payload doit contenir sub, role, email."""
     expire = datetime.now(timezone.utc) + timedelta(hours=TOKEN_EXPIRE_H)
-    payload = {"sub": str(user_id), "role": role, "exp": expire}
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode({**payload, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_temp_token(user_id: str) -> str:
+    """Token temporaire emis apres le mot de passe, avant verification TOTP."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=TEMP_TOKEN_EXPIRE_MIN)
+    return jwt.encode({"sub": user_id, "scope": "totp", "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_temp_token(token: str) -> Optional[dict]:
+    """Decode et valide un token temporaire TOTP. Retourne None si invalide."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("scope") != "totp":
+            return None
+        return payload
+    except JWTError:
+        return None
 
 
 def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
-    """
-    Dépendance FastAPI : décode le token et retourne l'utilisateur.
-    Si le token est absent, expiré ou falsifié → 401.
-    """
     credentials_error = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Token invalide ou expiré",
+        detail="Token invalide ou expire",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+    # Cle API personnelle
+    if token.startswith("osiris_sk_"):
+        prefix = token[:16]
+        key_hash = hashlib.sha256(token.encode()).hexdigest()
+        with Session(engine) as session:
+            api_key = session.exec(select(ApiKey).where(ApiKey.prefix == prefix)).first()
+            if not api_key or api_key.key_hash != key_hash:
+                raise credentials_error
+            user = session.get(User, api_key.user_id)
+            if not user:
+                raise credentials_error
+            # Mise a jour last_used_at (best-effort, pas bloquant)
+            api_key.last_used_at = datetime.now(timezone.utc)
+            session.add(api_key)
+            session.commit()
+        return user
+
+    # JWT standard
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("scope") == "totp":
+            raise credentials_error
         user_id: Optional[str] = payload.get("sub")
         if user_id is None:
             raise credentials_error
@@ -74,7 +101,6 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    """Dépendance : bloque l'accès si l'utilisateur n'est pas admin."""
     if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Réservé aux administrateurs")
+        raise HTTPException(status_code=403, detail="Reserve aux administrateurs")
     return current_user
