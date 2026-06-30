@@ -1,13 +1,43 @@
 #!/bin/bash
-# OSIRIS — Premier démarrage — {{ machine.hostname }}
+# OSIRIS - Premier demarrage - {{ machine.hostname }}
 LOG=/var/log/osiris-firstboot.log
 exec >> "$LOG" 2>&1
 
 ts() { date '+%H:%M:%S'; }
+osiris_url="{{ osiris_url }}"
+_osiris_mac=""
+
+_on_error() {
+    local line=$1
+    echo "[$(ts)] ERREUR FATALE a la ligne $line - firstboot interrompu" | tee -a "$LOG"
+    if [ -n "$_osiris_mac" ]; then
+        curl -s -X POST "$osiris_url/machines/$_osiris_mac/status?status=failed" || true
+    fi
+}
+trap '_on_error $LINENO' ERR
 
 echo "[$(ts)] ============================================"
-echo "[$(ts)] OSIRIS First Boot — {{ machine.hostname }}"
+echo "[$(ts)] OSIRIS First Boot - {{ machine.hostname }}"
 echo "[$(ts)] ============================================"
+
+# ── Inventaire materiel ───────────────────────────────────────────────────────
+echo "[$(ts)] Collecte des informations materiel..."
+HW_SERIAL=$(cat /sys/class/dmi/id/product_serial 2>/dev/null | tr -d '[:space:]') || HW_SERIAL=""
+HW_MODEL=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null | tr -d '\n')
+HW_PRODUCT=$(cat /sys/class/dmi/id/product_name 2>/dev/null | tr -d '\n')
+HW_MODEL="$HW_MODEL $HW_PRODUCT"
+HW_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+HW_RAM_GB=$(( (HW_RAM_KB + 524288) / 1048576 ))
+echo "[$(ts)] Materiel : $HW_MODEL | S/N : $HW_SERIAL | RAM : ${HW_RAM_GB} Go"
+
+MAC=$(cat /sys/class/net/$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')/address 2>/dev/null | tr -d ':')
+_osiris_mac="$MAC"
+if [ -n "$MAC" ]; then
+    curl -s -X POST "$osiris_url/machines/$MAC/hardware" \
+        -H "Content-Type: application/json" \
+        -d "{\"serial\":\"$HW_SERIAL\",\"model\":\"$HW_MODEL\",\"ram_gb\":$HW_RAM_GB}" || true
+    echo "[$(ts)] Inventaire envoye a OSIRIS"
+fi
 
 {% if tv_password %}
 echo "[$(ts)] Installation de TeamViewer Host..."
@@ -28,7 +58,7 @@ for i in $(seq 1 10); do
 done
 
 teamviewer passwd "{{ tv_password }}"
-echo "[$(ts)] TeamViewer configuré — ID : $(teamviewer info 2>/dev/null | grep 'TeamViewer ID' | awk '{print $NF}')"
+echo "[$(ts)] TeamViewer configure - ID : $(teamviewer info 2>/dev/null | grep 'TeamViewer ID' | awk '{print $NF}')"
 {% endif %}
 
 {% if linux_apps %}
@@ -36,9 +66,64 @@ echo "[$(ts)] Installation des applications via apt..."
 apt-get update -qq
 {% for app in linux_apps %}
 apt-get install -y {{ app.apt_package }} 2>&1 | tail -1
-echo "[$(ts)] Installé : {{ app.name }}"
+echo "[$(ts)] Installe : {{ app.name }}"
 {% endfor %}
 {% endif %}
 
-echo "[$(ts)] Premier démarrage OSIRIS terminé."
+{% if profile.join_domain and profile.domain and profile.domain_join_user and profile.domain_join_password %}
+echo "[$(ts)] Jonction au domaine AD : {{ profile.domain }}"
+
+apt-get install -y realmd sssd sssd-tools adcli krb5-user samba-common-bin \
+    libnss-sss libpam-sss packagekit 2>&1 | tail -3
+
+# Configuration Kerberos minimale pour la decouverte du domaine
+cat > /etc/krb5.conf << 'KRBEOF'
+[libdefaults]
+    default_realm = {{ profile.domain | upper }}
+    dns_lookup_realm = true
+    dns_lookup_kdc = true
+KRBEOF
+
+# Jonction au domaine
+{% if machine.ou %}
+echo "{{ profile.domain_join_password }}" | realm join \
+    --user="{{ profile.domain_join_user }}" \
+    --computer-ou="{{ machine.ou }}" \
+    {{ profile.domain }} 2>&1
+{% else %}
+echo "{{ profile.domain_join_password }}" | realm join \
+    --user="{{ profile.domain_join_user }}" \
+    {{ profile.domain }} 2>&1
+{% endif %}
+
+if realm list 2>/dev/null | grep -q "{{ profile.domain }}"; then
+    echo "[$(ts)] Jonction AD reussie"
+
+    # Login sans suffixe @domaine (utilisateur au lieu de utilisateur@domain.local)
+    sed -i 's/use_fully_qualified_names = True/use_fully_qualified_names = False/' /etc/sssd/sssd.conf
+
+    # Creation automatique du dossier home au premier login
+    echo "session optional pam_mkhomedir.so skel=/etc/skel umask=0077" >> /etc/pam.d/common-session
+
+    # Domain Admins en sudo sans mot de passe
+    echo '%domain\ admins ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/domain-admins
+    chmod 440 /etc/sudoers.d/domain-admins
+
+    systemctl restart sssd
+
+    echo "[$(ts)] Connexion AD disponible - login : utilisateur (sans @{{ profile.domain }})"
+else
+    echo "[$(ts)] ECHEC jonction AD - verifier que le DNS resout {{ profile.domain }} et que les identifiants sont corrects"
+fi
+{% endif %}
+
+{% if profile.post_script %}
+echo "[$(ts)] Execution du script post-install personnalise..."
+(
+{{ profile.post_script }}
+) || echo "[$(ts)] AVERTISSEMENT : Script post-install termine avec une erreur"
+echo "[$(ts)] Script post-install termine."
+{% endif %}
+
+echo "[$(ts)] Premier demarrage OSIRIS termine."
 systemctl disable osiris-firstboot.service

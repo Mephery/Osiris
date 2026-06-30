@@ -153,6 +153,9 @@ class MachinePatch(SQLModel):
     ou: Optional[str] = None
     organization_id: Optional[int] = None
     profile_id: Optional[int] = None
+    notes: Optional[str] = None
+    user_name: Optional[str] = None
+    user_email: Optional[str] = None
 
 class ProfileCreate(SQLModel):
     name: str
@@ -168,6 +171,11 @@ class ProfileCreate(SQLModel):
     domain_join_password: str = ""
     win_image: str = ""
     win_index: int = 1
+    enable_bitlocker: bool = True
+    bitlocker_pin: bool = False
+    network_drives: str = ""
+    printers: str = ""
+    post_script: str = ""
     tv_suffix: str = ""
     app_ids: str = ""
 
@@ -184,6 +192,11 @@ class ProfilePatch(SQLModel):
     domain_join_password: Optional[str] = None
     win_image: Optional[str] = None
     win_index: Optional[int] = None
+    enable_bitlocker: Optional[bool] = None
+    bitlocker_pin: Optional[bool] = None
+    network_drives: Optional[str] = None
+    printers: Optional[str] = None
+    post_script: Optional[str] = None
     tv_suffix: Optional[str] = None
     app_ids: Optional[str] = None
 
@@ -255,6 +268,10 @@ _SEED_APPS = [
     {"name": "Java OpenJDK 21",      "winget_id": "Eclipse.Temurin.21",                   "apt_package": "openjdk-21-jre",       "category": "tools",    "icon": "☕"},
     {"name": ".NET Runtime 8",       "winget_id": "Microsoft.DotNet.DesktopRuntime.8",    "apt_package": "",                     "category": "tools",    "icon": "⚡"},
     {"name": "Nextcloud Client",     "winget_id": "Nextcloud.Nextcloud",                  "apt_package": "nextcloud-desktop",    "category": "office",   "icon": "☁️"},
+    {"name": "NetExplorer",          "winget_id": "NetExplorer.NetExplorer",              "apt_package": "",                     "category": "office",   "icon": "📁"},
+    {"name": "Citrix Workspace",     "winget_id": "Citrix.Workspace",                     "apt_package": "",                     "category": "remote",   "icon": "🖥️"},
+    {"name": "OpenVPN",              "winget_id": "OpenVPNTechnologies.OpenVPN",          "apt_package": "openvpn",              "category": "security", "icon": "🔑"},
+    {"name": "WithSecure",           "winget_id": "WithSecure.ElementsAgent",             "apt_package": "",                     "category": "security", "icon": "🛡️"},
 ]
 
 def _seed_apps():
@@ -460,6 +477,11 @@ def _profile_dict(p: Profile) -> dict:
         "domain_join_password": "***" if p.domain_join_password else "",
         "win_image": p.win_image,
         "win_index": p.win_index,
+        "enable_bitlocker": p.enable_bitlocker,
+        "bitlocker_pin": p.bitlocker_pin,
+        "network_drives": p.network_drives or "",
+        "printers": p.printers or "",
+        "post_script": p.post_script or "",
         "tv_suffix": "***" if p.tv_suffix else "",
         "app_ids": p.app_ids or "",
     }
@@ -475,6 +497,11 @@ def _profile_for_template(p: Profile) -> dict:
         "domain_join_password": decrypt(p.domain_join_password or ""),
         "win_image": p.win_image or "",
         "win_index": p.win_index,
+        "enable_bitlocker": p.enable_bitlocker,
+        "bitlocker_pin": p.bitlocker_pin,
+        "network_drives": json.loads(p.network_drives) if p.network_drives else [],
+        "printers": json.loads(p.printers) if p.printers else [],
+        "post_script": p.post_script or "",
         "tv_suffix": decrypt(p.tv_suffix or ""),
         "app_ids": p.app_ids or "",
     }
@@ -543,6 +570,31 @@ def delete_profile(profile_id: int, current_user: User = Depends(require_admin))
         _log(session, current_user, "delete_profile", details={"name": profile.name})
         session.delete(profile)
         session.commit()
+
+
+@app.post("/profiles/{profile_id}/clone", status_code=201)
+def clone_profile(profile_id: int, current_user: User = Depends(require_admin)):
+    """Duplique un profil existant (tous les champs sauf l'id)."""
+    with Session(engine) as session:
+        src = session.get(Profile, profile_id)
+        if not src:
+            raise HTTPException(status_code=404, detail="Profil introuvable")
+        clone = Profile(
+            name=f"{src.name} (copie)",
+            os=src.os, locale=src.locale, keyboard=src.keyboard, timezone=src.timezone,
+            default_user=src.default_user, extra_packages=src.extra_packages,
+            join_domain=src.join_domain, domain=src.domain,
+            domain_join_user=src.domain_join_user, domain_join_password=src.domain_join_password,
+            win_image=src.win_image, win_index=src.win_index,
+            enable_bitlocker=src.enable_bitlocker, bitlocker_pin=src.bitlocker_pin,
+            network_drives=src.network_drives, printers=src.printers, post_script=src.post_script,
+            tv_suffix=src.tv_suffix, app_ids=src.app_ids,
+        )
+        session.add(clone)
+        _log(session, current_user, "clone_profile", details={"source": src.name})
+        session.commit()
+        session.refresh(clone)
+        return _profile_dict(clone)
 
 
 # ── Images OS ─────────────────────────────────────────────────────────────────
@@ -935,6 +987,11 @@ def get_all_machines(org_id: Optional[int] = None):
                 "status": m.status, "organization_id": m.organization_id,
                 "profile_id": m.profile_id,
                 "deployed_at": m.deployed_at.isoformat() if m.deployed_at else None,
+                "hw_serial": m.hw_serial, "hw_model": m.hw_model, "hw_ram_gb": m.hw_ram_gb,
+                "notes": m.notes,
+                "user_name": m.user_name, "user_email": m.user_email,
+                "has_bitlocker": bool(m.bitlocker_key),
+                "has_laps": bool(m.laps_password),
             }
             for m in machines
         ]
@@ -972,6 +1029,112 @@ def delete_machine(mac: str, current_user: User = Depends(require_admin)):
              details={"hostname": machine.hostname, "client": machine.client})
         session.delete(machine)
         session.commit()
+
+
+@app.post("/machines/{mac}/hardware")
+def post_hardware(mac: str, data: dict):
+    """Remonte les infos materiel collectees au premier demarrage (sans auth - appele par la machine)."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        machine.hw_serial = (data.get("serial") or "")[:128]
+        machine.hw_model  = (data.get("model") or "")[:128]
+        machine.hw_ram_gb = int(data.get("ram_gb") or 0)
+        session.add(machine)
+        session.commit()
+    return {"detail": "ok"}
+
+
+@app.post("/machines/{mac}/bitlocker-key")
+def post_bitlocker_key(mac: str, data: dict):
+    """Stocke la cle de recuperation et/ou le PIN BitLocker chiffres (sans auth - appele par la machine en firstboot)."""
+    clean_mac = validate_mac(mac)
+    key = (data.get("key") or "").strip()
+    pin = (data.get("pin") or "").strip()
+    if not key and not pin:
+        raise HTTPException(status_code=400, detail="Cle ou PIN manquant")
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        if key:
+            machine.bitlocker_key = encrypt(key)
+        if pin:
+            machine.bitlocker_pin = encrypt(pin)
+        session.add(machine)
+        session.commit()
+    return {"detail": "ok"}
+
+
+@app.get("/machines/{mac}/bitlocker-key")
+def get_bitlocker_key(mac: str, current_user: User = Depends(require_admin)):
+    """Retourne la cle de recuperation et le PIN BitLocker en clair (admins uniquement)."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        if not machine.bitlocker_key and not machine.bitlocker_pin:
+            raise HTTPException(status_code=404, detail="Aucune donnee BitLocker enregistree")
+        return {
+            "key": decrypt(machine.bitlocker_key) if machine.bitlocker_key else None,
+            "pin": decrypt(machine.bitlocker_pin) if machine.bitlocker_pin else None,
+            "hostname": machine.hostname,
+        }
+
+
+@app.post("/machines/{mac}/laps-password")
+def post_laps_password(mac: str, data: dict):
+    """Stocke le mot de passe admin local (LAPS) chiffre (sans auth - appele par la machine en firstboot)."""
+    clean_mac = validate_mac(mac)
+    password = (data.get("password") or "").strip()
+    if not password:
+        raise HTTPException(status_code=400, detail="Mot de passe manquant")
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        machine.laps_password = encrypt(password)
+        session.add(machine)
+        session.commit()
+    return {"detail": "ok"}
+
+
+@app.get("/machines/{mac}/laps-password")
+def get_laps_password(mac: str, current_user: User = Depends(require_admin)):
+    """Retourne le mot de passe admin local en clair (admins uniquement)."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        if not machine.laps_password:
+            raise HTTPException(status_code=404, detail="Aucun mot de passe LAPS enregistre")
+        return {
+            "password": decrypt(machine.laps_password),
+            "hostname": machine.hostname,
+        }
+
+
+@app.post("/machines/{mac}/redeploy-now", dependencies=[Depends(get_current_user)])
+def redeploy_now(mac: str):
+    """Remet la machine en pending ET envoie un magic packet WoL en une seule action."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        machine.status = "pending"
+        session.add(machine)
+        session.commit()
+    formatted = ":".join(clean_mac[i:i+2] for i in range(0, 12, 2))
+    try:
+        wakeonlan.send_magic_packet(formatted, ip_address="10.0.0.255", port=9)
+    except Exception:
+        pass
+    return {"detail": f"Machine {clean_mac} repassee en pending + WoL envoye"}
 
 
 @app.get("/audit-logs", dependencies=[Depends(require_admin)])
@@ -1202,6 +1365,29 @@ def list_wims():
 
 
 # ── Import CSV machines ────────────────────────────────────────────────────────
+
+@app.get("/machines/export", dependencies=[Depends(get_current_user)])
+def export_machines():
+    """Exporte toutes les machines en CSV (UTF-8-BOM pour compatibilite Excel)."""
+    import csv, io
+    with Session(engine) as session:
+        machines = session.exec(select(Machine)).all()
+        profiles = {p.id: p.name for p in session.exec(select(Profile)).all()}
+        orgs     = {o.id: o.name for o in session.exec(select(Organization)).all()}
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["mac", "hostname", "client", "os", "status", "organisation", "profil", "modele", "ram_go", "numero_serie", "notes", "deploye_le"])
+    for m in machines:
+        deployed = m.deployed_at.strftime("%d/%m/%Y %H:%M") if m.deployed_at else ""
+        writer.writerow([
+            m.mac, m.hostname, m.client, m.os, m.status,
+            orgs.get(m.organization_id, ""), profiles.get(m.profile_id, ""),
+            m.hw_model, m.hw_ram_gb or "", m.hw_serial, m.notes, deployed,
+        ])
+    bom = "﻿"
+    return Response(content=bom + out.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=osiris-machines.csv"})
+
 
 @app.post("/machines/import", dependencies=[Depends(require_admin)])
 async def import_machines(request: Request, current_user: User = Depends(require_admin)):

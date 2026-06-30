@@ -1,11 +1,27 @@
 #Requires -RunAsAdministrator
 <#
-    OSIRIS — Premier démarrage Windows — {{ machine.hostname }}
-    Généré à la volée par OSIRIS, téléchargé pendant le déploiement WinPE.
+    OSIRIS - Premier demarrage Windows - {{ machine.hostname }}
+    Genere a la volee par OSIRIS, telecharge pendant le deploiement WinPE.
 #>
 
 $ErrorActionPreference = "Continue"
 $logFile = "C:\osiris-firstboot.log"
+$osirisUrl = "{{ osiris_url }}"
+$script:_mac = $null  # sera defini apres detection reseau
+
+# En cas d'erreur fatale non capturee, signaler l'echec a OSIRIS
+trap {
+    $errMsg = $_.Exception.Message -replace '"', "'"
+    Write-Host "$(Get-Date -Format 'HH:mm:ss') ERREUR FATALE : $errMsg"
+    Add-Content -Path $logFile -Value "$(Get-Date -Format 'HH:mm:ss') ERREUR FATALE : $errMsg" -EA SilentlyContinue
+    if ($script:_mac) {
+        try {
+            Invoke-WebRequest -Uri "$osirisUrl/machines/$($script:_mac)/status?status=failed" `
+                -Method POST -UseBasicParsing -TimeoutSec 10 | Out-Null
+        } catch {}
+    }
+    continue
+}
 
 function Write-Log($msg) {
     $line = "$(Get-Date -Format 'HH:mm:ss') $msg"
@@ -14,15 +30,15 @@ function Write-Log($msg) {
 }
 
 Write-Log "=========================================="
-Write-Log "OSIRIS First Boot — {{ machine.hostname }}"
+Write-Log "OSIRIS First Boot - {{ machine.hostname }}"
 Write-Log "=========================================="
 
-# ── Attendre que le réseau soit disponible ───────────────────────────────────
+# ── Attendre que le reseau soit disponible ───────────────────────────────────
 Write-Log "Attente de la connectivite reseau..."
 $retries = 0
 while ($retries -lt 30) {
     try {
-        $null = Invoke-WebRequest -Uri "{{ osiris_url }}/" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+        $null = Invoke-WebRequest -Uri "$osirisUrl/" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
         break
     } catch {
         Start-Sleep -Seconds 5
@@ -30,26 +46,136 @@ while ($retries -lt 30) {
     }
 }
 
-# ── Récupérer la vraie adresse MAC ───────────────────────────────────────────
+# ── Recuperer la vraie adresse MAC ───────────────────────────────────────────
 $adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.HardwareInterface } | Select-Object -First 1
 if ($adapter) {
     $mac = $adapter.MacAddress -replace '-', '' | ForEach-Object { $_.ToLower() }
+    $script:_mac = $mac
     Write-Log "MAC detectee : $mac"
 } else {
     Write-Log "ERREUR : aucun adaptateur reseau actif"
     $mac = $null
 }
 
+# ── Inventaire materiel ───────────────────────────────────────────────────────
+Write-Log "Collecte des informations materiel..."
+try {
+    $cs   = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+    $bios = Get-CimInstance -ClassName Win32_BIOS           -ErrorAction Stop
+    $hwSerial = $bios.SerialNumber.Trim()
+    $hwModel  = "$($cs.Manufacturer.Trim()) $($cs.Model.Trim())"
+    $hwRamGb  = [math]::Round($cs.TotalPhysicalMemory / 1GB)
+    Write-Log "Materiel : $hwModel | S/N : $hwSerial | RAM : ${hwRamGb} Go"
+
+    if ($mac) {
+        $hwBody = @{ serial = $hwSerial; model = $hwModel; ram_gb = $hwRamGb } | ConvertTo-Json
+        Invoke-WebRequest -Uri "$osirisUrl/machines/$mac/hardware" `
+            -Method POST -Body $hwBody -ContentType "application/json" `
+            -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop | Out-Null
+        Write-Log "Inventaire materiel envoye a OSIRIS"
+    }
+} catch {
+    Write-Log "AVERTISSEMENT : collecte materiel echouee - $_"
+}
+
 # ── Callback "deployed" ──────────────────────────────────────────────────────
 if ($mac) {
     try {
-        $resp = Invoke-WebRequest -Uri "{{ osiris_url }}/machines/$mac/status?status=deployed" `
+        $resp = Invoke-WebRequest -Uri "$osirisUrl/machines/$mac/status?status=deployed" `
             -Method POST -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
         Write-Log "Statut 'deployed' confirme (HTTP $($resp.StatusCode))"
     } catch {
-        Write-Log "AVERTISSEMENT : callback echoue — $_"
+        Write-Log "AVERTISSEMENT : callback echoue - $_"
     }
 }
+
+# ── LAPS - Mot de passe administrateur local unique ───────────────────────────
+Write-Log "Generation du mot de passe administrateur local (LAPS)..."
+try {
+    $chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789!@#$%'.ToCharArray()
+    $lapsPassword = -join ((1..16) | ForEach-Object { $chars | Get-Random })
+    $secLaps = ConvertTo-SecureString $lapsPassword -AsPlainText -Force
+    Set-LocalUser -Name "Administrator" -Password $secLaps -ErrorAction Stop
+    Enable-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
+    Write-Log "Mot de passe administrateur local defini"
+
+    if ($mac) {
+        $lapsBody = @{ password = $lapsPassword } | ConvertTo-Json
+        Invoke-WebRequest -Uri "$osirisUrl/machines/$mac/laps-password" `
+            -Method POST -Body $lapsBody -ContentType "application/json" `
+            -UseBasicParsing -TimeoutSec 10 | Out-Null
+        Write-Log "Mot de passe LAPS sauvegarde dans OSIRIS"
+    }
+} catch {
+    Write-Log "AVERTISSEMENT : LAPS echoue - $_"
+}
+
+{% if profile.enable_bitlocker %}
+# ── BitLocker ─────────────────────────────────────────────────────────────────
+{% if profile.bitlocker_pin %}
+Write-Log "Activation de BitLocker (mode TPM + PIN)..."
+{% else %}
+Write-Log "Activation de BitLocker (mode TPM automatique)..."
+{% endif %}
+try {
+    $tpm = Get-Tpm -ErrorAction Stop
+    if (-not $tpm.TpmPresent -or -not $tpm.TpmReady) {
+        Write-Log "AVERTISSEMENT : TPM absent ou non pret - BitLocker ignore"
+    } else {
+        $blVol = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
+
+        # Recuperer ou generer la cle de recuperation
+        $existingKey = ($blVol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" } | Select-Object -First 1).RecoveryPassword
+        if (-not $existingKey) {
+            Add-BitLockerKeyProtector -MountPoint "C:" -RecoveryPasswordProtector -ErrorAction Stop | Out-Null
+            $blVol = Get-BitLockerVolume -MountPoint "C:"
+            $existingKey = ($blVol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "RecoveryPassword" } | Select-Object -First 1).RecoveryPassword
+        }
+
+        {% if profile.bitlocker_pin %}
+        # Mode TPM + PIN : generer un PIN aleatoire a 6 chiffres
+        $pin = (Get-Random -Minimum 100000 -Maximum 999999).ToString()
+        $securePin = ConvertTo-SecureString $pin -AsPlainText -Force
+
+        $hasTpmPin = ($blVol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "TpmPin" }).Count -gt 0
+        if (-not $hasTpmPin) {
+            Add-BitLockerKeyProtector -MountPoint "C:" -TpmAndPinProtector -Pin $securePin -ErrorAction Stop | Out-Null
+        }
+        if ($blVol.ProtectionStatus -ne "On") {
+            Enable-BitLocker -MountPoint "C:" -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop | Out-Null
+        }
+        Write-Log "BitLocker TPM+PIN active - PIN : $pin"
+
+        if ($mac) {
+            $blBody = @{ key = $existingKey; pin = $pin } | ConvertTo-Json
+            Invoke-WebRequest -Uri "$osirisUrl/machines/$mac/bitlocker-key" `
+                -Method POST -Body $blBody -ContentType "application/json" `
+                -UseBasicParsing -TimeoutSec 10 | Out-Null
+            Write-Log "PIN et cle de recuperation sauvegardes dans OSIRIS"
+        }
+        {% else %}
+        # Mode TPM seul : demarrage automatique
+        if ($blVol.ProtectionStatus -ne "On") {
+            Enable-BitLocker -MountPoint "C:" -EncryptionMethod XtsAes256 `
+                -TpmProtector -SkipHardwareTest -ErrorAction Stop | Out-Null
+        }
+        Write-Log "BitLocker TPM seul active"
+
+        if ($mac -and $existingKey) {
+            $blBody = @{ key = $existingKey } | ConvertTo-Json
+            Invoke-WebRequest -Uri "$osirisUrl/machines/$mac/bitlocker-key" `
+                -Method POST -Body $blBody -ContentType "application/json" `
+                -UseBasicParsing -TimeoutSec 10 | Out-Null
+            Write-Log "Cle de recuperation sauvegardee dans OSIRIS"
+        }
+        {% endif %}
+    }
+} catch {
+    Write-Log "AVERTISSEMENT : BitLocker echoue - $_"
+}
+{% else %}
+Write-Log "BitLocker desactive sur ce profil."
+{% endif %}
 
 {% if tv_password %}
 # ── TeamViewer ───────────────────────────────────────────────────────────────
@@ -87,6 +213,43 @@ foreach ($appId in $apps) {
         --silent 2>&1 | ForEach-Object { Write-Log "  $_" }
 }
 Write-Log "Applications installees."
+{% endif %}
+
+{% if profile.network_drives %}
+# ── Lecteurs reseau ───────────────────────────────────────────────────────────
+Write-Log "Mapping des lecteurs reseau..."
+{% for drive in profile.network_drives %}
+try {
+    New-PSDrive -Name "{{ drive.letter }}" -PSProvider FileSystem -Root "{{ drive.path }}" -Persist -Scope Global -ErrorAction Stop | Out-Null
+    Write-Log "Lecteur {{ drive.letter }}: -> {{ drive.path }}"
+} catch {
+    Write-Log "AVERTISSEMENT : Lecteur {{ drive.letter }}: echoue - $_"
+}
+{% endfor %}
+{% endif %}
+
+{% if profile.printers %}
+# ── Imprimantes reseau ────────────────────────────────────────────────────────
+Write-Log "Ajout des imprimantes reseau..."
+{% for printer in profile.printers %}
+try {
+    Add-Printer -ConnectionName "{{ printer }}" -ErrorAction Stop
+    Write-Log "Imprimante ajoutee : {{ printer }}"
+} catch {
+    Write-Log "AVERTISSEMENT : Imprimante {{ printer }} echouee - $_"
+}
+{% endfor %}
+{% endif %}
+
+{% if profile.post_script %}
+# ── Script post-install personnalise ─────────────────────────────────────────
+Write-Log "Execution du script post-install personnalise..."
+try {
+{{ profile.post_script }}
+} catch {
+    Write-Log "AVERTISSEMENT : Script post-install - $_"
+}
+Write-Log "Script post-install termine."
 {% endif %}
 
 Write-Log "Premier demarrage OSIRIS termine."

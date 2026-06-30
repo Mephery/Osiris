@@ -38,6 +38,14 @@ interface Machine {
   organization_id?: number | null;
   profile_id?: number | null;
   dism_progress?: number;
+  hw_serial?: string;
+  hw_model?: string;
+  hw_ram_gb?: number;
+  has_bitlocker?: boolean;
+  has_laps?: boolean;
+  user_name?: string;
+  user_email?: string;
+  notes?: string;
 }
 
 interface DriverPack {
@@ -67,6 +75,11 @@ interface Profile {
   domain_join_password: string;
   win_image: string;
   win_index: number;
+  enable_bitlocker: boolean;
+  bitlocker_pin: boolean;
+  network_drives: string;
+  printers: string;
+  post_script: string;
   tv_suffix: string;
   app_ids: string;
 }
@@ -298,7 +311,7 @@ export default function App() {
   // ── Images OS ──────────────────────────────────────────────────────────────
   const [images, setImages] = useState<OsImage[]>([])
   const [newImage, setNewImage] = useState({ name: '', version: '', os: 'ubuntu', iso_url: '' })
-  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, tv_suffix: '', app_ids: '' })
+  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '' })
 
   // ── Drivers ────────────────────────────────────────────────────────────────
   const [drivers, setDrivers]           = useState<DriverPack[]>([])
@@ -316,6 +329,9 @@ export default function App() {
   const [expandedLogs, setExpandedLogs]     = useState<Set<string>>(new Set())
   const [machineHistory, setMachineHistory] = useState<Record<string, DeploymentEvent[]>>({})
   const logEndRefs = useRef<Record<string, HTMLPreElement | null>>({})
+  const [bitlockerData, setBitlockerData] = useState<Record<string, { key: string | null, pin: string | null }>>({})
+  const [lapsData, setLapsData] = useState<Record<string, string>>({})
+  const [editingNotes, setEditingNotes] = useState<Record<string, string>>({})
 
   const fetchHistory = (mac: string) => {
     if (!auth) return
@@ -323,6 +339,44 @@ export default function App() {
       .then(r => r.ok ? r.json() : [])
       .then(data => setMachineHistory(prev => ({ ...prev, [mac]: data })))
       .catch(() => {})
+  }
+
+  const fetchBitlockerKey = (mac: string) => {
+    if (!auth) return
+    fetch(`${API_URL}/machines/${mac}/bitlocker-key`, { headers: authHeader(auth.token) })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setBitlockerData(prev => ({ ...prev, [mac]: { key: data.key, pin: data.pin } })))
+      .catch(() => toast.error('Impossible de recuperer les donnees BitLocker'))
+  }
+
+  const fetchLapsPassword = (mac: string) => {
+    if (!auth) return
+    fetch(`${API_URL}/machines/${mac}/laps-password`, { headers: authHeader(auth.token) })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setLapsData(prev => ({ ...prev, [mac]: data.password })))
+      .catch(() => toast.error('Impossible de recuperer le mot de passe LAPS'))
+  }
+
+  const redeployNow = (mac: string) => {
+    if (!auth) return
+    fetch(`${API_URL}/machines/${mac}/redeploy-now`, { method: 'POST', headers: authHeader(auth.token) })
+      .then(r => { if (r.ok) { fetchAll(auth.token); toast.success('Machine repassee en pending + WoL envoye') } else throw new Error() })
+      .catch(() => toast.error('Erreur redeploy-now'))
+  }
+
+  const saveNotes = (mac: string, notes: string) => {
+    if (!auth) return
+    fetch(`${API_URL}/machines/${mac}`, {
+      method: 'PATCH',
+      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes }),
+    })
+      .then(r => { if (!r.ok) throw new Error() })
+      .then(() => {
+        setMachines(prev => prev.map(m => m.mac === mac ? { ...m, notes } : m))
+        toast.success('Notes sauvegardees')
+      })
+      .catch(() => toast.error('Erreur lors de la sauvegarde'))
   }
 
   // ── Recherche + filtre statut ──────────────────────────────────────────────
@@ -673,7 +727,7 @@ export default function App() {
     })
       .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
       .then(() => {
-        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, tv_suffix: '', app_ids: '' })
+        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '' })
         fetchProfiles(auth.token)
         toast.success('Profil créé')
       })
@@ -702,6 +756,12 @@ export default function App() {
     fetch(`${API_URL}/profiles/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
       .then(r => { if (r.ok) { fetchProfiles(auth.token); toast.success('Profil supprimé') } })
       .catch(() => toast.error('Erreur suppression profil'))
+  }
+
+  const handleCloneProfile = (id: number) => {
+    fetch(`${API_URL}/profiles/${id}/clone`, { method: 'POST', headers: authHeader(auth.token) })
+      .then(r => { if (r.ok) { fetchProfiles(auth.token); toast.success('Profil duplique') } else throw new Error() })
+      .catch(() => toast.error('Erreur duplication profil'))
   }
 
   const handlePatchProfile = (id: number, patch: Partial<Profile>) => {
@@ -949,7 +1009,8 @@ export default function App() {
                       {p.os === 'windows' && <p className="text-[10px] font-mono text-slate-500">WIM index: <strong className="text-slate-300">{p.win_index}</strong>{p.domain ? ` · ${p.domain}` : ''}</p>}
                     </div>
                     <div className="flex gap-1 ml-3 flex-shrink-0">
-                      <button onClick={() => setEditingProfile(p)} className="osiris-action-btn" title="Éditer"><IcoPencil /></button>
+                      <button onClick={() => setEditingProfile(p)} className="osiris-action-btn" title="Editer"><IcoPencil /></button>
+                      <button onClick={() => handleCloneProfile(p.id)} className="osiris-action-btn" title="Dupliquer">⎘</button>
                       <button onClick={() => handleDeleteProfile(p.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                     </div>
                   </div>
@@ -965,20 +1026,26 @@ export default function App() {
                 <input placeholder="Locale" value={newProfile.locale ?? ''} onChange={e => setNewProfile({ ...newProfile, locale: e.target.value })} className="osiris-input text-xs font-mono" />
                 <input placeholder="Clavier" value={newProfile.keyboard ?? ''} onChange={e => setNewProfile({ ...newProfile, keyboard: e.target.value })} className="osiris-input text-xs font-mono" />
                 <input placeholder="Fuseau horaire" value={newProfile.timezone ?? ''} onChange={e => setNewProfile({ ...newProfile, timezone: e.target.value })} className="osiris-input text-xs font-mono" />
-                {(newProfile.os === 'ubuntu' || newProfile.os === 'debian') ? (
+                {(newProfile.os === 'ubuntu' || newProfile.os === 'debian') && (
                   <>
                     <input placeholder="Utilisateur local" value={newProfile.default_user ?? ''} onChange={e => setNewProfile({ ...newProfile, default_user: e.target.value })} className="osiris-input text-xs font-mono" />
                     <input placeholder="Paquets supplémentaires (htop,vim,...)" value={newProfile.extra_packages ?? ''} onChange={e => setNewProfile({ ...newProfile, extra_packages: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
                   </>
-                ) : (
+                )}
+                {newProfile.os === 'windows' && (
                   <>
-                    <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-                      <input type="checkbox" checked={newProfile.join_domain ?? true} onChange={e => setNewProfile({ ...newProfile, join_domain: e.target.checked })} className="accent-blue-500" />
-                      Joindre l'AD
-                    </label>
-                    <input placeholder="Domaine AD" value={newProfile.domain ?? ''} onChange={e => setNewProfile({ ...newProfile, domain: e.target.value })} className="osiris-input text-xs font-mono" />
-                    <input placeholder="Compte jonction AD (ex: svc-joinpc)" value={newProfile.domain_join_user ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_user: e.target.value })} className="osiris-input text-xs font-mono" />
-                    <input type="password" placeholder="Mot de passe jonction AD" value={newProfile.domain_join_password ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_password: e.target.value })} className="osiris-input text-xs font-mono" />
+                    <div className="col-span-2 sm:col-span-1 space-y-1">
+                      <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                        <input type="checkbox" checked={newProfile.enable_bitlocker ?? true} onChange={e => setNewProfile({ ...newProfile, enable_bitlocker: e.target.checked })} className="accent-blue-500" />
+                        Activer BitLocker (cle de recuperation dans OSIRIS)
+                      </label>
+                      {newProfile.enable_bitlocker && (
+                        <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer pl-5">
+                          <input type="checkbox" checked={newProfile.bitlocker_pin ?? false} onChange={e => setNewProfile({ ...newProfile, bitlocker_pin: e.target.checked })} className="accent-amber-500" />
+                          PIN a 6 chiffres (TPM+PIN - redemarrage manuel requis)
+                        </label>
+                      )}
+                    </div>
                     <div className="flex gap-1 col-span-2 sm:col-span-1">
                       <input placeholder="Golden image (vide = install.wim auto)" title="Laissez vide pour utiliser install.wim de l'ISO" value={newProfile.win_image ?? ''} onChange={e => setNewProfile({ ...newProfile, win_image: e.target.value })} className="osiris-input text-xs font-mono flex-1 min-w-0" />
                       <button type="button" title="Parcourir les WIM disponibles" onClick={() => { fetchWims(); setShowWimPicker('new') }} className="osiris-btn text-xs px-2 flex-shrink-0">📂</button>
@@ -986,7 +1053,47 @@ export default function App() {
                     <input type="number" min={1} max={20} placeholder="Index WIM (6=Pro)" title="Index de l'édition dans install.wim (1=Home, 6=Pro)" value={newProfile.win_index ?? 6} onChange={e => setNewProfile({ ...newProfile, win_index: parseInt(e.target.value) || 6 })} className="osiris-input text-xs font-mono" />
                   </>
                 )}
+                <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer col-span-2 sm:col-span-1">
+                  <input type="checkbox" checked={newProfile.join_domain ?? true} onChange={e => setNewProfile({ ...newProfile, join_domain: e.target.checked })} className="accent-blue-500" />
+                  Joindre l'AD
+                </label>
+                {newProfile.join_domain && (
+                  <>
+                    <input placeholder="Domaine AD" value={newProfile.domain ?? ''} onChange={e => setNewProfile({ ...newProfile, domain: e.target.value })} className="osiris-input text-xs font-mono" />
+                    <input placeholder="Compte jonction AD (ex: svc-joinpc)" value={newProfile.domain_join_user ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_user: e.target.value })} className="osiris-input text-xs font-mono" />
+                    <input type="password" placeholder="Mot de passe jonction AD" value={newProfile.domain_join_password ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_password: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
+                  </>
+                )}
                 <input placeholder="Suffixe TeamViewer (optionnel)" title="Mot de passe TV = NOMPC_MAJUSCULES + ce suffixe" value={newProfile.tv_suffix ?? ''} onChange={e => setNewProfile({ ...newProfile, tv_suffix: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
+                {newProfile.os === 'windows' && (() => {
+                  const drives: {letter:string,path:string}[] = (() => { try { return JSON.parse(newProfile.network_drives || '[]') } catch { return [] } })()
+                  const printers: string[] = (() => { try { return JSON.parse(newProfile.printers || '[]') } catch { return [] } })()
+                  return (
+                    <div className="col-span-2 sm:col-span-3 space-y-2 pt-1 border-t border-slate-800/40">
+                      <p className="text-[9px] uppercase tracking-widest text-slate-600">Lecteurs reseau</p>
+                      {drives.map((d, i) => (
+                        <div key={i} className="flex gap-1">
+                          <input maxLength={1} placeholder="Z" value={d.letter} onChange={e => { const a=[...drives]; a[i]={...a[i],letter:e.target.value.toUpperCase()}; setNewProfile({...newProfile,network_drives:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono w-12 text-center" />
+                          <input placeholder="\\\\serveur\\partage" value={d.path} onChange={e => { const a=[...drives]; a[i]={...a[i],path:e.target.value}; setNewProfile({...newProfile,network_drives:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono flex-1" />
+                          <button type="button" onClick={() => { const a=drives.filter((_,j)=>j!==i); setNewProfile({...newProfile,network_drives:JSON.stringify(a)}) }} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
+                        </div>
+                      ))}
+                      <button type="button" onClick={() => setNewProfile({...newProfile,network_drives:JSON.stringify([...drives,{letter:'',path:''}])})} className="osiris-btn-ghost text-xs">+ Ajouter un lecteur</button>
+                      <p className="text-[9px] uppercase tracking-widest text-slate-600 pt-1">Imprimantes reseau</p>
+                      {printers.map((pr, i) => (
+                        <div key={i} className="flex gap-1">
+                          <input placeholder="\\\\serveur\\imprimante" value={pr} onChange={e => { const a=[...printers]; a[i]=e.target.value; setNewProfile({...newProfile,printers:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono flex-1" />
+                          <button type="button" onClick={() => { const a=printers.filter((_,j)=>j!==i); setNewProfile({...newProfile,printers:JSON.stringify(a)}) }} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
+                        </div>
+                      ))}
+                      <button type="button" onClick={() => setNewProfile({...newProfile,printers:JSON.stringify([...printers,''])})} className="osiris-btn-ghost text-xs">+ Ajouter une imprimante</button>
+                    </div>
+                  )
+                })()}
+                <div className="col-span-2 sm:col-span-3 space-y-1 pt-1 border-t border-slate-800/40">
+                  <p className="text-[9px] uppercase tracking-widest text-slate-600">Script post-install ({newProfile.os === 'windows' ? 'PowerShell' : 'Bash'})</p>
+                  <textarea rows={3} placeholder={newProfile.os === 'windows' ? '# PowerShell — ex: Set-ItemProperty -Path ... ' : '# Bash — ex: apt-get install -y ...'} value={newProfile.post_script ?? ''} onChange={e => setNewProfile({...newProfile, post_script: e.target.value})} className="osiris-input text-[10px] font-mono w-full resize-y col-span-2 sm:col-span-3" />
+                </div>
                 {/* Sélecteur d'applications */}
                 {(() => {
                   const os = newProfile.os ?? 'ubuntu'
@@ -1437,6 +1544,7 @@ export default function App() {
                 {csvImporting ? 'Import...' : 'Importer CSV'}
               </button>
               <input ref={csvFileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={handleCsvImport} disabled={csvImporting} />
+              <a href={`${API_URL}/machines/export`} download="osiris-machines.csv" className="osiris-btn text-xs">Exporter CSV</a>
               <button onClick={openCreate} className="osiris-btn text-xs">+ Enregistrer un PC</button>
             </div>
           </div>
@@ -1570,10 +1678,17 @@ export default function App() {
                               onClick={() => handleRedeploy(machine.mac, machine.hostname)}
                               disabled={redeployingMac === machine.mac}
                               className="osiris-action-btn"
-                              title="Redéployer"
+                              title="Redeployer (sans WoL)"
                             >
                               {redeployingMac === machine.mac ? '…' : <IcoRefresh />}
                             </button>
+                          )}
+                          {(machine.status === 'deployed' || machine.status === 'failed') && (
+                            <button
+                              onClick={() => redeployNow(machine.mac)}
+                              className="osiris-action-btn"
+                              title="Redeployer maintenant (pending + WoL en une action)"
+                            ><IcoRefresh cls="w-3 h-3 inline" /><IcoPower cls="w-3 h-3 inline" /></button>
                           )}
                           <button onClick={() => openEdit(machine)} className="osiris-action-btn" title="Modifier"><IcoPencil /></button>
                           {auth.role === 'admin' && (
@@ -1613,13 +1728,113 @@ export default function App() {
                                   <div key={ev.id} className="flex items-center gap-3 text-[10px] font-mono py-0.5">
                                     <span className="text-slate-600 shrink-0">{fmt}</span>
                                     <span className={`font-bold uppercase w-16 shrink-0 ${colors[ev.status] ?? 'text-slate-400'}`}>{ev.status}</span>
-                                    <span className="text-slate-500 shrink-0">{ev.os || '—'}</span>
-                                    <span className="text-slate-600 truncate">{ev.profile_name || '—'}</span>
+                                    <span className="text-slate-500 shrink-0">{ev.os || '-'}</span>
+                                    <span className="text-slate-600 truncate">{ev.profile_name || '-'}</span>
                                   </div>
                                 )
                               })}
                             </div>
                           )}
+                        </div>
+                        {/* ── Inventaire materiel ── */}
+                        {(machine.hw_model || machine.hw_serial) && (
+                          <div>
+                            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Inventaire materiel</p>
+                            <div className="flex flex-wrap gap-4 text-[10px] font-mono">
+                              {machine.hw_model  && <span className="text-slate-400">{machine.hw_model}</span>}
+                              {machine.hw_ram_gb  ? <span className="text-slate-500">{machine.hw_ram_gb} Go RAM</span> : null}
+                              {machine.hw_serial && <span className="text-slate-600">S/N : {machine.hw_serial}</span>}
+                            </div>
+                          </div>
+                        )}
+                        {/* ── BitLocker (admins uniquement) ── */}
+                        {auth?.role === 'admin' && machine.os === 'windows' && (
+                          <div>
+                            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">BitLocker</p>
+                            {machine.has_bitlocker ? (
+                              bitlockerData[machine.mac] ? (
+                                <div className="space-y-1.5">
+                                  {bitlockerData[machine.mac].pin && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-[9px] text-slate-600 w-24 shrink-0">PIN (6 chiffres)</span>
+                                      <span className="font-mono text-[12px] text-amber-400 tracking-[0.2em]">{bitlockerData[machine.mac].pin}</span>
+                                      <button onClick={() => { navigator.clipboard.writeText(bitlockerData[machine.mac].pin!); toast.success('PIN copie') }} className="osiris-btn text-[10px] px-2 py-0.5">Copier</button>
+                                    </div>
+                                  )}
+                                  {bitlockerData[machine.mac].key && (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-[9px] text-slate-600 w-24 shrink-0">Cle 48 chiffres</span>
+                                      <span className="font-mono text-[10px] text-slate-300 tracking-wider">{bitlockerData[machine.mac].key}</span>
+                                      <button onClick={() => { navigator.clipboard.writeText(bitlockerData[machine.mac].key!); toast.success('Cle copiee') }} className="osiris-btn text-[10px] px-2 py-0.5">Copier</button>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <button onClick={() => fetchBitlockerKey(machine.mac)} className="osiris-btn text-[10px] px-2 py-1">Afficher les cles</button>
+                              )
+                            ) : (
+                              <span className="text-[10px] font-mono text-slate-700">Aucune cle enregistree</span>
+                            )}
+                          </div>
+                        )}
+                        {/* ── LAPS ── */}
+                        {auth.role === 'admin' && machine.os === 'windows' && (
+                          <div>
+                            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Mot de passe admin local (LAPS)</p>
+                            {machine.has_laps ? (
+                              lapsData[machine.mac] ? (
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-sm text-green-400 tracking-wider">{lapsData[machine.mac]}</span>
+                                  <button onClick={() => { navigator.clipboard.writeText(lapsData[machine.mac]); toast.success('Mot de passe copie') }} className="osiris-btn text-[10px] px-2 py-0.5">Copier</button>
+                                </div>
+                              ) : (
+                                <button onClick={() => fetchLapsPassword(machine.mac)} className="osiris-btn text-[10px] px-2 py-1">Afficher le mot de passe</button>
+                              )
+                            ) : (
+                              <span className="text-[10px] font-mono text-slate-700">Aucun mot de passe LAPS enregistre</span>
+                            )}
+                          </div>
+                        )}
+                        {/* ── Utilisateur affecte ── */}
+                        <div>
+                          <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Utilisateur affecte (optionnel)</p>
+                          <div className="flex gap-2">
+                            <input
+                              placeholder="Nom"
+                              defaultValue={machine.user_name ?? ''}
+                              onBlur={e => {
+                                if (e.target.value !== (machine.user_name ?? ''))
+                                  fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_name: e.target.value }) }).then(r => { if (r.ok) fetchAll(auth.token) })
+                              }}
+                              className="osiris-input text-xs flex-1"
+                            />
+                            <input
+                              placeholder="Email"
+                              defaultValue={machine.user_email ?? ''}
+                              onBlur={e => {
+                                if (e.target.value !== (machine.user_email ?? ''))
+                                  fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_email: e.target.value }) }).then(r => { if (r.ok) fetchAll(auth.token) })
+                              }}
+                              className="osiris-input text-xs flex-1"
+                            />
+                          </div>
+                        </div>
+                        {/* ── Notes ── */}
+                        <div>
+                          <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Notes</p>
+                          <div className="flex gap-2">
+                            <textarea
+                              rows={2}
+                              placeholder="Notes libres sur cette machine..."
+                              defaultValue={machine.notes ?? ''}
+                              onChange={e => setEditingNotes(prev => ({ ...prev, [machine.mac]: e.target.value }))}
+                              className="osiris-input text-[10px] font-mono flex-1 resize-none"
+                            />
+                            <button
+                              onClick={() => saveNotes(machine.mac, editingNotes[machine.mac] ?? machine.notes ?? '')}
+                              className="osiris-btn text-[10px] px-3 self-start"
+                            >Sauvegarder</button>
+                          </div>
                         </div>
                       </td>
                     </tr>
@@ -1878,13 +2093,33 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
             </div>
             <div className="p-5 space-y-3">
               <div className="grid grid-cols-2 gap-2">
-                <label className="text-xs text-slate-400 self-center">Domaine AD</label>
-                <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain} onChange={e => setEditingProfile({ ...editingProfile, domain: e.target.value })} />
-                <label className="text-xs text-slate-400 self-center">Compte jonction</label>
-                <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain_join_user} onChange={e => setEditingProfile({ ...editingProfile, domain_join_user: e.target.value })} />
-                <label className="text-xs text-slate-400 self-center">Mot de passe jonction</label>
-                <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, domain_join_password: e.target.value })} />
+                <label className="text-xs text-slate-400 self-center col-span-2">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={editingProfile.join_domain ?? true} onChange={e => setEditingProfile({ ...editingProfile, join_domain: e.target.checked })} className="accent-blue-500" />
+                    <span>Joindre l'AD</span>
+                  </label>
+                </label>
+                {editingProfile.join_domain && (<>
+                  <label className="text-xs text-slate-400 self-center">Domaine AD</label>
+                  <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain} onChange={e => setEditingProfile({ ...editingProfile, domain: e.target.value })} />
+                  <label className="text-xs text-slate-400 self-center">Compte jonction</label>
+                  <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain_join_user} onChange={e => setEditingProfile({ ...editingProfile, domain_join_user: e.target.value })} />
+                  <label className="text-xs text-slate-400 self-center">Mot de passe jonction</label>
+                  <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, domain_join_password: e.target.value })} />
+                </>)}
                 {editingProfile.os === 'windows' && (<>
+                  <div className="col-span-2 space-y-1">
+                    <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                      <input type="checkbox" checked={editingProfile.enable_bitlocker ?? true} onChange={e => setEditingProfile({ ...editingProfile, enable_bitlocker: e.target.checked })} className="accent-blue-500" />
+                      Activer BitLocker (cle de recuperation dans OSIRIS)
+                    </label>
+                    {editingProfile.enable_bitlocker && (
+                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer pl-5">
+                        <input type="checkbox" checked={editingProfile.bitlocker_pin ?? false} onChange={e => setEditingProfile({ ...editingProfile, bitlocker_pin: e.target.checked })} className="accent-amber-500" />
+                        PIN a 6 chiffres (TPM+PIN - redemarrage manuel requis)
+                      </label>
+                    )}
+                  </div>
                   <label className="text-xs text-slate-400 self-center">Index WIM</label>
                   <input type="number" min={1} max={20} className="osiris-input text-xs font-mono" defaultValue={editingProfile.win_index} onChange={e => setEditingProfile({ ...editingProfile, win_index: parseInt(e.target.value) || 1 })} />
                   <label className="text-xs text-slate-400 self-center">Golden image</label>
@@ -1895,6 +2130,35 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                 </>)}
                 <label className="text-xs text-slate-400 self-center">Suffixe TeamViewer</label>
                 <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, tv_suffix: e.target.value })} />
+              </div>
+              {editingProfile.os === 'windows' && (() => {
+                const drives: {letter:string,path:string}[] = (() => { try { return JSON.parse(editingProfile.network_drives || '[]') } catch { return [] } })()
+                const printers: string[] = (() => { try { return JSON.parse(editingProfile.printers || '[]') } catch { return [] } })()
+                return (
+                  <div className="space-y-2 pt-2 border-t border-slate-800/40">
+                    <p className="text-[9px] uppercase tracking-widest text-slate-600">Lecteurs reseau</p>
+                    {drives.map((d, i) => (
+                      <div key={i} className="flex gap-1">
+                        <input maxLength={1} placeholder="Z" value={d.letter} onChange={e => { const a=[...drives]; a[i]={...a[i],letter:e.target.value.toUpperCase()}; setEditingProfile({...editingProfile,network_drives:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono w-12 text-center" />
+                        <input placeholder="\\\\serveur\\partage" value={d.path} onChange={e => { const a=[...drives]; a[i]={...a[i],path:e.target.value}; setEditingProfile({...editingProfile,network_drives:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono flex-1" />
+                        <button type="button" onClick={() => { const a=drives.filter((_,j)=>j!==i); setEditingProfile({...editingProfile,network_drives:JSON.stringify(a)}) }} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
+                      </div>
+                    ))}
+                    <button type="button" onClick={() => setEditingProfile({...editingProfile,network_drives:JSON.stringify([...drives,{letter:'',path:''}])})} className="osiris-btn-ghost text-xs">+ Ajouter un lecteur</button>
+                    <p className="text-[9px] uppercase tracking-widest text-slate-600 pt-1">Imprimantes reseau</p>
+                    {printers.map((pr, i) => (
+                      <div key={i} className="flex gap-1">
+                        <input placeholder="\\\\serveur\\imprimante" value={pr} onChange={e => { const a=[...printers]; a[i]=e.target.value; setEditingProfile({...editingProfile,printers:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono flex-1" />
+                        <button type="button" onClick={() => { const a=printers.filter((_,j)=>j!==i); setEditingProfile({...editingProfile,printers:JSON.stringify(a)}) }} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
+                      </div>
+                    ))}
+                    <button type="button" onClick={() => setEditingProfile({...editingProfile,printers:JSON.stringify([...printers,''])})} className="osiris-btn-ghost text-xs">+ Ajouter une imprimante</button>
+                  </div>
+                )
+              })()}
+              <div className="pt-2 border-t border-slate-800/40 space-y-1">
+                <p className="text-[9px] uppercase tracking-widest text-slate-600">Script post-install ({editingProfile.os === 'windows' ? 'PowerShell' : 'Bash'})</p>
+                <textarea rows={3} placeholder={editingProfile.os === 'windows' ? '# PowerShell' : '# Bash'} defaultValue={editingProfile.post_script} onChange={e => setEditingProfile({...editingProfile, post_script: e.target.value})} className="osiris-input text-[10px] font-mono w-full resize-y" />
               </div>
               {/* Sélecteur d'applications */}
               {(() => {

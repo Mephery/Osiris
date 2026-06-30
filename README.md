@@ -20,7 +20,7 @@ Il remplace les outils comme MDT/WDS avec une interface web moderne, une API RES
 | Configuration TeamViewer automatique | oui (firstboot.ps1) | oui (firstboot.sh) | - |
 | Barre de progression DISM temps réel | oui | - | - |
 | Drivers Dell (catalogue constructeur) | oui | - | - |
-| Drivers HP / Lenovo | en cours | - | - |
+| Drivers HP / Lenovo | oui | - | - |
 | Wake-on-LAN | oui | oui | oui |
 | Déploiement en lot | oui | oui | oui |
 | Historique de déploiement par machine | oui | oui | oui |

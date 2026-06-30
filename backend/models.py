@@ -45,6 +45,11 @@ class Profile(SQLModel, table=True):
     domain_join_password: str = Field(default="")   # Mot de passe chiffré Fernet
     win_image: str = Field(default="")              # Golden image : nom du .wim sur le partage (vide = install.wim auto)
     win_index: int = Field(default=1)               # Index de l'édition Windows dans le WIM (1=Home, 6=Pro typiquement)
+    enable_bitlocker: bool = Field(default=True)    # Activer BitLocker au premier demarrage Windows
+    bitlocker_pin: bool = Field(default=False)      # True = TPM+PIN (redemarrage manuel), False = TPM seul (auto)
+    network_drives: str = Field(default="")         # JSON : [{"letter":"Z","path":"\\\\srv\\share"}]
+    printers: str = Field(default="")              # JSON : ["\\\\srv\\imprimante1"]
+    post_script: str = Field(default="")
     tv_suffix: str = Field(default="")              # Suffixe TeamViewer chiffré Fernet
     app_ids: str   = Field(default="")              # IDs d'apps séparés par virgule : "1,3,7"
 
@@ -70,6 +75,20 @@ class Machine(SQLModel, table=True):
     deployed_at: Optional[datetime] = Field(default=None)
     organization_id: Optional[int] = Field(default=None, foreign_key="organization.id")
     profile_id: Optional[int] = Field(default=None, foreign_key="profile.id")
+    # Inventaire materiel (collecte au premier demarrage)
+    hw_serial: str = Field(default="")
+    hw_model: str = Field(default="")
+    hw_ram_gb: int = Field(default=0)
+    # BitLocker (Windows uniquement) - chiffres Fernet
+    bitlocker_key: str = Field(default="")
+    bitlocker_pin: str = Field(default="")
+    # Mot de passe administrateur local (LAPS) - chiffre Fernet
+    laps_password: str = Field(default="")
+    # Utilisateur final affecte a cette machine (optionnel)
+    user_name: str = Field(default="")
+    user_email: str = Field(default="")
+    # Notes libres
+    notes: str = Field(default="")
 
 
 class OsImage(SQLModel, table=True):
@@ -143,4 +162,18 @@ def init_db():
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS app_ids VARCHAR NOT NULL DEFAULT ''"))
         conn.execute(text("ALTER TABLE organization ADD COLUMN IF NOT EXISTS webhook_url VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS hw_serial VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS hw_model VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS hw_ram_gb INTEGER NOT NULL DEFAULT 0"))
+        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS bitlocker_key VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS notes VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS bitlocker_pin VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS laps_password VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS user_name VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS user_email VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS enable_bitlocker BOOLEAN NOT NULL DEFAULT TRUE"))
+        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS bitlocker_pin BOOLEAN NOT NULL DEFAULT FALSE"))
+        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS network_drives VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS printers VARCHAR NOT NULL DEFAULT ''"))
+        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS post_script TEXT NOT NULL DEFAULT ''"))
         conn.commit()
