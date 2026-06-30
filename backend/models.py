@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
 import os
 import re
 import urllib.parse
@@ -78,6 +80,7 @@ class Profile(SQLModel, table=True):
     domain_config_id: Optional[int] = Field(default=None, foreign_key="domain_config.id")  # si set, prend le dessus sur les champs domain/join_* inline
     tv_suffix: str = Field(default="")              # Suffixe TeamViewer chiffré Fernet
     app_ids: str   = Field(default="")              # IDs d'apps séparés par virgule : "1,3,7"
+    laps_rotation_days: int = Field(default=0)      # 0 = rotation desactivee
 
 
 class Application(SQLModel, table=True):
@@ -110,11 +113,15 @@ class Machine(SQLModel, table=True):
     bitlocker_pin: str = Field(default="")
     # Mot de passe administrateur local (LAPS) - chiffre Fernet
     laps_password: str = Field(default="")
+    laps_rotated_at: Optional[datetime] = Field(default=None)
     # Utilisateur final affecte a cette machine (optionnel)
     user_name: str = Field(default="")
     user_email: str = Field(default="")
     # Notes libres
     notes: str = Field(default="")
+    # Smoke tests post-deploiement
+    smoke_status: str = Field(default="")   # "" | "ok" | "warnings"
+    smoke_results: str = Field(default="")  # JSON : [{"name": "...", "ok": true, "detail": "..."}]
 
 
 class OsImage(SQLModel, table=True):
@@ -182,27 +189,6 @@ engine       = create_engine(DATABASE_URL, echo=False)
 
 
 def init_db():
-    from sqlalchemy import text
+    # Les migrations de schema sont gerees par Alembic (alembic upgrade head).
+    # create_all reste ici comme filet de securite pour le dev local sans Alembic.
     SQLModel.metadata.create_all(engine)
-    # Migrations légères : ajout de colonnes sans recréer les tables
-    with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS app_ids VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE organization ADD COLUMN IF NOT EXISTS webhook_url VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS hw_serial VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS hw_model VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS hw_ram_gb INTEGER NOT NULL DEFAULT 0"))
-        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS bitlocker_key VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS notes VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS bitlocker_pin VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS laps_password VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS user_name VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS user_email VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS enable_bitlocker BOOLEAN NOT NULL DEFAULT TRUE"))
-        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS bitlocker_pin BOOLEAN NOT NULL DEFAULT FALSE"))
-        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS network_drives VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS printers VARCHAR NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS post_script TEXT NOT NULL DEFAULT ''"))
-        conn.execute(text("ALTER TABLE profile ADD COLUMN IF NOT EXISTS domain_config_id INTEGER REFERENCES domain_config(id) ON DELETE SET NULL"))
-        conn.execute(text("ALTER TABLE \"user\" ADD COLUMN IF NOT EXISTS totp_secret VARCHAR NOT NULL DEFAULT ''"))
-        conn.commit()
-        # api_key cree par SQLModel.metadata.create_all si elle n'existe pas

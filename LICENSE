@@ -1,0 +1,91 @@
+OSIRIS FAIR-SOURCE LICENSE
+
+Copyright (c) 2026 Coline Derycke. All rights reserved.
+
+By using, copying, modifying, or distributing this Software (OSIRIS), you
+agree to the terms of this License.
+
+1. DEFINITIONS
+
+"Software" means the OSIRIS source code, object code, and associated
+documentation, in whole or in part, including any modifications or
+derivative works.
+
+"Licensor" means Coline Derycke.
+
+"You" means the individual or entity exercising rights under this License.
+
+2. PERMITTED USES
+
+Subject to the conditions below, the Licensor grants You a worldwide,
+royalty-free, non-exclusive, perpetual license to:
+
+  a. Read, view, and modify the source code of the Software.
+  b. Install and run the Software for internal business purposes,
+     including within a Managed Service Provider (MSP) environment to
+     deploy and manage client machines.
+  c. Redistribute the source code or modifications for non-commercial
+     purposes, provided that You include this exact license file
+     unmodified.
+
+3. RESTRICTIONS (COMMERCIAL LIMITATIONS)
+
+You are strictly forbidden from using the Software, its source code, or
+any modifications of it to:
+
+  a. Sell, rent, lease, sublicense, or redistribute the Software (or any
+     derivative work) for a fee.
+  b. Provide the Software as a commercial cloud service,
+     Software-as-a-Service (SaaS), Platform-as-a-Service (PaaS), or any
+     competing hosted deployment service.
+  c. Charge customers directly for access to the OSIRIS interface or
+     functionality.
+
+For the avoidance of doubt, charging clients for labor, consulting,
+installation, configuration, or support services related to the Software
+is permitted, provided the Software itself is not sold, sublicensed, or
+offered as a hosted service under Section 3(a)-(c).
+
+4. ATTRIBUTION
+
+You must retain all copyright, trademark, and attribution notices
+pointing to "Coline Derycke" or "OSIRIS" in the source code, the web
+interface, and any documentation. Modifications must be clearly marked
+as Your own, but the core credit to the original author must remain
+visible.
+
+5. TERMINATION
+
+Any use of the Software that violates the restrictions listed in
+Section 3 automatically terminates Your rights under this License with
+immediate effect. Rights may be reinstated only by written agreement
+with the Licensor.
+
+6. NO TRADEMARK LICENSE
+
+This License does not grant You any right to use the Licensor's trade
+names, trademarks, service marks, or product names, except as required
+for reasonable attribution under Section 4.
+
+7. DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
+
+8. SEVERABILITY
+
+If any provision of this License is held unenforceable, the remaining
+provisions will remain in full force and effect, and the unenforceable
+provision will be reformed to the minimum extent necessary to make it
+enforceable.
+
+9. COMMERCIAL LICENSING
+
+For uses not permitted under this License (including those described in
+Section 3), contact the Licensor to negotiate a separate commercial
+license.

@@ -1,0 +1,130 @@
+name: osiris
+
+services:
+
+  # ── Base de données ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${DB_NAME:-osiris}
+      POSTGRES_USER:     ${DB_USER:-osiris_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Definir DB_PASSWORD dans .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - osiris_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-osiris_user} -d ${DB_NAME:-osiris}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── File de taches (jobs ARQ) ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - osiris_net
+
+  # ── API backend ──────────────────────────────────────────────────────────────
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST:  postgres
+      REDIS_URL: redis://redis:6379
+    command: >
+      sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"
+    ports:
+      # Port 8000 : appels directs depuis les machines en cours de deploiement
+      # (boot callbacks, firstboot, smoke tests). Ne pas changer sans adapter
+      # OSIRIS_BASE_URL dans .env et les scripts iPXE generes.
+      - "8000:8000"
+    volumes:
+      - static_data:/app/static
+      - osiris_data:/srv/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - osiris_net
+
+  # ── Worker ARQ (taches longues : telechargement ISO, catalogues drivers) ─────
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST:  postgres
+      REDIS_URL: redis://redis:6379
+    command: arq worker.WorkerSettings
+    volumes:
+      - static_data:/app/static
+      - osiris_data:/srv/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - osiris_net
+
+  # ── Reverse proxy + interface web ────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.docker:/etc/caddy/Caddyfile:ro
+      - ./frontend/dist:/srv/frontend:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      # Pour apporter vos propres certificats TLS :
+      # - ./certs:/etc/caddy/certs:ro
+    depends_on:
+      - backend
+    networks:
+      - osiris_net
+
+  # ── Services reseau PXE (optionnels, commenter si deja sur l'hote) ───────────
+  #
+  # dnsmasq (DHCP + TFTP) : necessite network_mode host pour repondre aux
+  # broadcasts DHCP. Decommentez si vous n'avez pas dnsmasq sur l'hote.
+  #
+  # dnsmasq:
+  #   image: ghcr.io/linuxserver/dnsmasq:latest
+  #   network_mode: host
+  #   cap_add:
+  #     - NET_ADMIN
+  #   volumes:
+  #     - ./dnsmasq.conf:/etc/dnsmasq.conf:ro
+  #     - static_data:/srv/tftp:ro
+  #   restart: unless-stopped
+  #
+  # Samba (partage SMB pour WinPE) : NT1 requis pour WinPE.
+  # Voir smb.conf dans le README.
+  #
+  # samba:
+  #   image: dperson/samba:latest
+  #   network_mode: host
+  #   volumes:
+  #     - osiris_data:/srv/data:ro
+  #   command: -s "windows;/srv/data/windows;yes;no;yes"
+  #   restart: unless-stopped
+
+volumes:
+  postgres_data:  # donnees PostgreSQL persistantes
+  static_data:    # fichiers statiques (WinPE, kernels Ubuntu, wimboot...)
+  osiris_data:    # donnees partagees (images Windows, drivers, captures WIM)
+  caddy_data:     # certificats TLS Caddy
+  caddy_config:   # configuration interne Caddy
+
+networks:
+  osiris_net:
+    driver: bridge

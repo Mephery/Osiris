@@ -1,0 +1,59 @@
+# OSIRIS -- Caddyfile pour Docker Compose
+# L'upstream est le service "backend" sur le reseau interne Docker.
+# Pour la version locale (non-Docker), utiliser Caddyfile a la racine du projet.
+
+{
+    auto_https disable_redirects
+}
+
+# ── HTTPS : interface admin ──────────────────────────────────────────────────
+# "tls internal" = certificat autosigne gere par Caddy.
+# Pour un vrai certificat : remplacer par "tls /etc/caddy/certs/osiris.crt /etc/caddy/certs/osiris.key"
+# et decommentez le volume certs dans docker-compose.yml.
+:443 {
+    tls internal
+
+    handle /auth/*          { reverse_proxy backend:8000 }
+    handle /machines*       { reverse_proxy backend:8000 }
+    handle /organizations*  { reverse_proxy backend:8000 }
+    handle /users*          { reverse_proxy backend:8000 }
+    handle /profiles*       { reverse_proxy backend:8000 }
+    handle /images*         { reverse_proxy backend:8000 }
+    handle /audit-logs*     { reverse_proxy backend:8000 }
+    handle /dashboard*      { reverse_proxy backend:8000 }
+    handle /domain-configs* { reverse_proxy backend:8000 }
+    handle /apps*           { reverse_proxy backend:8000 }
+    handle /capture*        { reverse_proxy backend:8000 }
+    handle /drivers*        { reverse_proxy backend:8000 }
+    handle /wims*           { reverse_proxy backend:8000 }
+    handle /webhooks*       { reverse_proxy backend:8000 }
+    handle /health*         { reverse_proxy backend:8000 }
+    handle /docs*           { reverse_proxy backend:8000 }
+    handle /openapi.json    { reverse_proxy backend:8000 }
+    handle /ws/*            { reverse_proxy backend:8000 }
+
+    handle {
+        root * /srv/frontend
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# ── HTTP : routes PXE (machines en cours de deploiement) ────────────────────
+# Les machines appellent http://OSIRIS_IP:8000 directement (voir OSIRIS_BASE_URL).
+# Ce bloc HTTP permet aussi d'acceder aux memes routes via le port 80 si besoin.
+:80 {
+    handle /boot*         { reverse_proxy backend:8000 }
+    handle /cloud-init/*  { reverse_proxy backend:8000 }
+    handle /static/*      { reverse_proxy backend:8000 }
+    handle /machines/*    { reverse_proxy backend:8000 }
+    handle /winpe-script/* { reverse_proxy backend:8000 }
+    handle /winpe-auto    { reverse_proxy backend:8000 }
+    handle /unattend.xml* { reverse_proxy backend:8000 }
+    handle /preseed/*     { reverse_proxy backend:8000 }
+    handle /health        { reverse_proxy backend:8000 }
+
+    handle {
+        redir https://{host}{uri} 308
+    }
+}

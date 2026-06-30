@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
 """
 Worker ARQ — exécuté dans un processus séparé.
 Lance avec : arq worker.WorkerSettings
@@ -645,4 +647,4 @@ async def sync_lenovo_catalog(ctx):
 class WorkerSettings:
     functions      = [download_iso, sync_dell_catalog, download_driver_pack,
                       sync_hp_catalog, sync_lenovo_catalog]
-    redis_settings = RedisSettings()
+    redis_settings = RedisSettings.from_dsn(os.environ.get("REDIS_URL", "redis://localhost:6379"))

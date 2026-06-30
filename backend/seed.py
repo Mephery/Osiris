@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
 from sqlmodel import Session, select
 from models import Machine, engine, init_db
 

@@ -15,3 +15,4 @@ wakeonlan
 cryptography
 pyotp
 qrcode[pil]
+alembic

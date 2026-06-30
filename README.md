@@ -3,7 +3,7 @@
 OSIRIS est un serveur de déploiement PXE pensé pour les équipes d'infogérance.
 Il remplace les outils comme MDT/WDS avec une interface web moderne, une API REST et une automatisation complète du cycle de vie des postes.
 
-> **Statut :** Production-ready en environnement lab : Windows 11 et Ubuntu 24.04 LTS validés bout-en-bout.
+> **Statut :** Production-ready en environnement lab - Windows 11 et Ubuntu 24.04 LTS validés bout-en-bout.
 
 **Philosophie :** brancher un câble RJ45 suffit. La machine PXE-boot, OSIRIS la déploie, configure TeamViewer, installe les apps, joint le domaine, active BitLocker, tout depuis l'interface.
 
@@ -23,6 +23,8 @@ Il remplace les outils comme MDT/WDS avec une interface web moderne, une API RES
 | Drivers Dell / HP / Lenovo | oui | - | - |
 | BitLocker (TPM seul ou TPM+PIN) | oui | - | - |
 | LAPS - mot de passe admin local unique | oui | - | - |
+| Rotation LAPS automatique (30/60/90/180j) | oui | - | - |
+| Smoke tests post-déploiement | oui | oui | - |
 | Inventaire matériel automatique | oui | oui | - |
 | Mapping lecteurs réseau au démarrage | oui | - | - |
 | Imprimantes réseau au démarrage | oui | - | - |
@@ -32,13 +34,14 @@ Il remplace les outils comme MDT/WDS avec une interface web moderne, une API RES
 | Redéployer maintenant (WoL + pending) | oui | oui | oui |
 | Déploiement en lot | oui | oui | oui |
 | Historique de déploiement par machine | oui | oui | oui |
-| Notifications webhook (Teams / Slack) | oui | oui | oui |
+| Notifications webhook structurées (Teams / Slack) | oui | oui | oui |
 | Capture golden image | oui (WIM) | - | - |
 | Navigateur WIM | oui | - | - |
 | Import / export CSV machines | oui | oui | oui |
 | Notes libres sur les machines | oui | oui | oui |
 | Utilisateur affecté à une machine | oui | oui | oui |
 | Tableau de bord par organisation | oui | oui | oui |
+| Filtres avancés (OS, smoke, recherche) | oui | oui | oui |
 | Clonage de profil | oui | oui | oui |
 | 2FA TOTP (optionnel par compte) | - | - | - |
 | Clés API personnelles | - | - | - |
@@ -65,11 +68,13 @@ GET  /boot?mac=aa:bb:cc:...
      v
  Premier démarrage (firstboot)
      |  Windows : firstboot-windows.ps1 (inventaire, LAPS, BitLocker,
-     |            TeamViewer, winget, lecteurs, imprimantes, script perso)
+     |            TeamViewer, winget, lecteurs, imprimantes, script perso,
+     |            smoke tests, tâche planifiée rotation LAPS si activée)
      |  Ubuntu  : firstboot-ubuntu.sh  (inventaire, TeamViewer, apt,
-     |            jonction AD, script perso)
+     |            jonction AD, script perso, smoke tests)
      v
- Statut mis à jour en temps réel via WebSocket dans l'interface
+ POST /machines/{mac}/smoke-tests -> résultats stockés, badge dans l'UI
+ Statut mis à jour en temps réel via WebSocket
  Webhook envoyé si une URL est configurée sur l'organisation
  Si le script échoue, callback automatique status=failed
 ```
@@ -82,6 +87,7 @@ GET  /boot?mac=aa:bb:cc:...
 |---|---|
 | Backend | Python 3.11 - FastAPI - SQLModel |
 | Base de données | PostgreSQL |
+| Migrations | Alembic |
 | File de tâches | ARQ - Redis |
 | Proxy | Caddy (HTTPS auto via mkcert en local) |
 | Frontend | React 19 - TypeScript - Tailwind CSS v4 - sonner |
@@ -99,57 +105,85 @@ GET  /boot?mac=aa:bb:cc:...
 
 ## Installation
 
-### Prérequis
+### Option A - Docker Compose (recommandé)
 
-- Python 3.11+
-- Node.js 22+
-- PostgreSQL 14+
-- Redis
-- Un serveur DHCP configuré pour pointer vers OSIRIS (`next-server` + `filename`)
-
-### Backend
+Nécessite Docker Engine et Docker Compose v2. Les services dnsmasq et Samba restent sur l'hôte car ils requièrent un accès réseau de bas niveau (broadcasts DHCP, TFTP).
 
 ```bash
-cd backend
+git clone https://github.com/Mephery/Osiris.git
+cd osiris
+
+cp .env.example .env
+# Éditer .env : DB_PASSWORD, JWT_SECRET, ADMIN_PASSWORD, OSIRIS_BASE_URL, OSIRIS_IP...
+
+# Compiler le frontend (nécessite Node.js 22+)
+chmod +x build.sh && ./build.sh
+
+# Démarrer tous les services (postgres, redis, backend, worker, caddy)
+docker compose up -d
+
+# Vérifier l'état
+docker compose logs -f backend
+```
+
+Au premier démarrage, le backend applique automatiquement les migrations Alembic avant de lancer l'API.
+
+### Option B - Installation directe (développement)
+
+Prérequis : Python 3.11+, Node.js 22+, PostgreSQL 14+, Redis.
+
+```bash
+git clone https://github.com/Mephery/Osiris.git
+cd osiris/backend
+
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Éditer .env avec vos valeurs (voir section Variables d'environnement)
+# Éditer .env avec vos valeurs
 
-python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
+# Appliquer les migrations de schéma
+alembic upgrade head
+
+# Démarrer l'API
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-Au premier démarrage, OSIRIS crée automatiquement :
+Dans un second terminal :
+
+```bash
+cd backend && source venv/bin/activate
+arq worker.WorkerSettings
+```
+
+Frontend :
+
+```bash
+cd frontend
+cp .env.example .env   # renseigner VITE_API_URL
+npm install
+npm run build          # génère dist/ servi par Caddy
+```
+
+Au premier démarrage (Docker ou direct), OSIRIS crée automatiquement :
 - Un compte admin depuis `ADMIN_EMAIL` / `ADMIN_PASSWORD`
 - Deux profils par défaut (Ubuntu + Windows)
 - 24 applications courantes dans le catalogue
 
 **Changez le mot de passe admin immédiatement** (icône paramètres en haut à droite).
 
-### Frontend
-
-```bash
-cd frontend
-cp .env.example .env
-# Éditer VITE_API_URL avec l'IP/URL de votre backend
-
-npm install
-npm run build   # production -> dist/ servi par Caddy
-```
-
 ---
 
 ## Variables d'environnement
 
-### `backend/.env`
+Le fichier `.env.example` à la racine du projet documente toutes les variables. Voici les principales :
 
 ```env
 # PostgreSQL
 DB_USER=osiris_user
 DB_PASSWORD=votre_mot_de_passe
-DB_HOST=localhost
+DB_HOST=localhost          # "postgres" en Docker Compose
 DB_NAME=osiris
 
 # JWT - générer avec : python3 -c "import secrets; print(secrets.token_hex(32))"
@@ -163,19 +197,13 @@ ADMIN_PASSWORD=changeme
 OSIRIS_BASE_URL=http://10.0.0.1:8000
 OSIRIS_IP=10.0.0.1
 
-# CORS - origines autorisées pour le frontend (séparées par des virgules)
-ALLOWED_ORIGINS=https://osiris.local,http://192.168.1.x:5173
+# CORS - origines autorisées pour le frontend
+ALLOWED_ORIGINS=https://osiris.local,https://192.168.1.x
 
-# Clé SSH publique déposée sur chaque Ubuntu déployé (optionnel)
-OSIRIS_SSH_PUBKEY=
+# Redis (ARQ)
+REDIS_URL=redis://localhost:6379   # "redis://redis:6379" en Docker Compose
 
-# Chemin local du partage Windows (pour le navigateur WIM)
-WIN_SHARE_PATH=/srv/data/windows
-```
-
-### `frontend/.env`
-
-```env
+# Frontend (build Vite)
 VITE_API_URL=https://osiris.local
 ```
 
@@ -183,59 +211,92 @@ VITE_API_URL=https://osiris.local
 
 ---
 
-## Modèle de données
+## Migrations de schéma (Alembic)
 
-```
-Organization          User                    Profile
-------------          ----                    -------
-id / name / slug      id / email              id / name / os
-webhook_url           hashed_password         locale / keyboard / timezone
-                      role (admin|tech)       default_user / extra_packages
-                      totp_secret (Fernet)    join_domain / domain
-                                              domain_join_user/password (Fernet)
-                                              domain_config_id -> DomainConfig
-                      ApiKey[]                win_image / win_index
-                                              enable_bitlocker / bitlocker_pin
-                                              network_drives (JSON)
-                                              printers (JSON)
-                                              post_script
-                                              tv_suffix (Fernet)
-                                              app_ids -> Application[]
+OSIRIS utilise Alembic pour versionner les migrations de base de données.
 
-Machine               DomainConfig            Application
--------               ------------            -----------
-id / mac / hostname   id / name               id / name
-client / os / ou      organization_id         winget_id (Windows)
-status / deployed_at  domain                  apt_package (Ubuntu)
-organization_id       join_user               category / icon
-profile_id            join_password (Fernet)
-hw_serial / hw_model  default_ou
-hw_ram_gb
-bitlocker_key (Fernet)
-bitlocker_pin (Fernet)
-laps_password (Fernet)
-user_name / user_email
-notes
+### Workflow quotidien
+
+```bash
+cd backend
+
+# Après avoir modifié un modèle dans models.py :
+alembic revision --autogenerate -m "add colonne_truc to machine"
+
+# Relire et vérifier le fichier généré dans alembic/versions/
+# Puis appliquer :
+alembic upgrade head
+
+# Vérifier l'état courant :
+alembic current
 ```
 
----
+### Mise à jour depuis une version sans Alembic
 
-## Rôles
+Les installations créées avant l'introduction d'Alembic peuvent être mises à niveau sans perte de données. La migration initiale (`0001`) est entièrement idempotente :
 
-| Rôle | Peut faire |
-|---|---|
-| `admin` | Tout : organisations, utilisateurs, profils, machines, drivers, captures, clés API |
-| `technician` | Enregistrer et consulter des machines, pas supprimer ni accéder à l'admin |
+```bash
+cd backend && source venv/bin/activate
+alembic upgrade head
+# "Running upgrade -> 0001, Initial schema" - les tables existantes ne sont pas touchées
+```
 
 ---
 
 ## Tableau de bord
 
 L'onglet **Tableau de bord** affiche en temps réel :
-- Compteurs globaux par statut (déployés / en attente / en cours / échoués)
+- Compteurs globaux par statut (déployés / en attente / en cours / échoués / alertes smoke)
 - Barres de répartition par organisation
 - Alertes automatiques : machines bloquées en déploiement depuis plus de 30 minutes, échecs récents
 - Liste des 15 derniers déploiements terminés
+
+---
+
+## Filtres avancés
+
+La barre de recherche de l'onglet **Machines** combine plusieurs filtres simultanément :
+- **Recherche texte** - hostname, client, MAC, modèle, utilisateur affecté, notes
+- **OS** - filtre par Windows / Ubuntu / Debian
+- **Smoke tests** - afficher uniquement les machines avec des alertes post-déploiement
+- **Réinitialiser** - bouton visible dès qu'un filtre est actif
+
+---
+
+## Smoke tests post-déploiement
+
+A la fin du premier démarrage, chaque machine exécute automatiquement une série de vérifications et envoie les résultats à OSIRIS :
+
+**Vérifications effectuées**
+
+| Test | Windows | Ubuntu |
+|---|---|---|
+| Ping passerelle | oui | oui |
+| Résolution DNS | oui | oui |
+| Jonction AD (si profil joint le domaine) | oui | oui |
+| Service TeamViewer | oui | oui |
+| Présence des applications installées | oui | oui |
+
+**Dans l'interface**
+
+- Badge vert "Tests OK" ou badge orange "N alerte(s)" sur chaque ligne machine
+- Cliquer sur le badge développe le détail : chaque test avec un point vert/rouge et le message d'erreur si applicable
+- Compteur "alertes smoke" dans la barre de stats rapides
+- Bouton dans la barre de filtres pour isoler les machines en alerte
+
+**Endpoint de réception**
+
+```
+POST /machines/{mac}/smoke-tests
+Content-Type: application/json
+
+{
+  "tests": [
+    {"name": "Ping passerelle", "ok": true, "detail": ""},
+    {"name": "Résolution DNS", "ok": false, "detail": "getent hosts osiris.local a échoué"}
+  ]
+}
+```
 
 ---
 
@@ -254,7 +315,17 @@ La clé et le PIN ne sont visibles dans l'interface que par les administrateurs,
 
 Au premier démarrage Windows, OSIRIS génère un mot de passe aléatoire de 16 caractères (lettres, chiffres, symboles), l'applique au compte `Administrator` local et le stocke chiffré (Fernet) dans OSIRIS. Chaque machine obtient un mot de passe unique.
 
-Le mot de passe est visible uniquement par les administrateurs, via le bouton "Afficher le mot de passe" dans le panneau de la machine.
+Le mot de passe est visible uniquement par les administrateurs, via le bouton "Afficher le mot de passe" dans le panneau de la machine. La date de la dernière rotation est affichée en dessous.
+
+### Rotation automatique
+
+Dans chaque profil Windows, un champ **Rotation LAPS** permet de configurer le renouvellement automatique : désactivée, 30, 60, 90 ou 180 jours.
+
+Quand la rotation est activée, OSIRIS dépose à la fin du premier démarrage :
+- Un script `osiris-laps-renew.ps1` (chemin : `C:\Windows\System32\`)
+- Une tâche planifiée Windows `OSIRIS-LAPS-Renewal` (SYSTEM, au démarrage, exécution cachée)
+
+A chaque démarrage, le script interroge `GET /machines/{mac}/laps-due`. Si la période est écoulée, il génère un nouveau mot de passe, l'applique localement et le poste à OSIRIS via `POST /machines/{mac}/laps-password`.
 
 ---
 
@@ -344,13 +415,112 @@ Chaque machine conserve un journal des transitions de statut. Cliquer sur le che
 
 ## Notifications webhook
 
-Dans **Administration > Organisations**, chaque organisation dispose d'un champ "Webhook URL". Quand un déploiement se termine (`deployed` ou `failed`), OSIRIS envoie :
+Dans **Administration > Organisations**, chaque organisation dispose d'un champ "Webhook URL". Quand un déploiement se termine (`deployed` ou `failed`), OSIRIS envoie un payload structuré :
 
 ```json
-{"text": "PC-DUPONT déployé avec succès (WINDOWS - Acme Corp)"}
+{
+  "event": "deployed",
+  "hostname": "PC-DUPONT",
+  "mac": "aabbccddeeff",
+  "client": "Acme Corp",
+  "os": "windows",
+  "hw_model": "HP EliteBook 840 G9",
+  "hw_ram_gb": 16,
+  "hw_serial": "5CD1234XYZ",
+  "osiris_url": "https://osiris.local",
+  "text": "PC-DUPONT déployé avec succès (WINDOWS - Acme Corp)"
+}
 ```
 
-Compatible avec Teams (Incoming Webhook), Slack (Incoming Webhook) et Discord (Webhook + `/slack` en fin d'URL).
+Le champ `text` assure la compatibilité avec Teams (Incoming Webhook), Slack et Discord (`/slack` en fin d'URL).
+
+---
+
+## Intégrations API
+
+### Swagger / documentation interactive
+
+L'API complète est documentée et testable depuis le navigateur :
+
+```
+https://osiris.local/docs
+```
+
+### Vérification de santé
+
+```bash
+curl https://osiris.local/health
+# {"status": "ok", "db": "ok", "version": "1.0.0"}
+```
+
+Utile pour les sondes de monitoring (Zabbix, Uptime Kuma, Grafana, healthcheck Docker).
+
+### Enregistrement de machine depuis un outil externe
+
+L'endpoint `POST /webhooks/new-machine` permet à un outil tiers (ticketing, CMDB) d'enregistrer automatiquement une machine dans OSIRIS. Il est idempotent : si la MAC est déjà connue, il renvoie les données existantes sans erreur.
+
+```bash
+curl -X POST https://osiris.local/webhooks/new-machine \
+  -H "Authorization: Bearer osiris_sk_..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mac": "aabbccddeeff",
+    "hostname": "PC-DUPONT",
+    "client": "Acme Corp",
+    "os": "windows"
+  }'
+```
+
+### Sécurité des comptes
+
+#### 2FA TOTP
+
+Chaque utilisateur peut activer la double authentification depuis l'icône paramètres (roue crantée en haut à droite). L'activation n'est pas obligatoire.
+
+Flux d'activation :
+1. OSIRIS génère un secret TOTP et affiche le QR code
+2. L'utilisateur scanne avec Google Authenticator, Authy ou toute app compatible
+3. Saisie d'un code de confirmation pour valider
+4. A chaque connexion suivante : mot de passe + code à 6 chiffres
+
+La désactivation requiert la saisie du mot de passe courant.
+
+#### Clés API personnelles
+
+Les clés API permettent à des outils externes d'interroger OSIRIS sans passer par le flux de connexion JWT :
+
+```bash
+# Lister les machines depuis un script ou un RMM
+curl -H "Authorization: Bearer osiris_sk_..." https://osiris.local/machines
+
+# Export CSV automatisé (cron, backup)
+curl -H "Authorization: Bearer osiris_sk_..." https://osiris.local/machines/export > parc.csv
+
+# Déclencher un redéploiement
+curl -X POST https://osiris.local/machines/aabbccddeeff/redeploy \
+  -H "Authorization: Bearer osiris_sk_..."
+```
+
+```powershell
+# Depuis un script PowerShell ou ConnectWise Automate
+$headers = @{ Authorization = "Bearer osiris_sk_..." }
+$machines = Invoke-RestMethod "https://osiris.local/machines" -Headers $headers
+```
+
+```python
+# Intégration Python (Zabbix, Make, script interne)
+import requests
+r = requests.get("https://osiris.local/machines",
+    headers={"Authorization": "Bearer osiris_sk_..."})
+```
+
+Gestion depuis **Paramètres > Clés API** :
+- Nommer chaque clé (ConnectWise, Grafana, Script backup...)
+- La clé complète est affichée une seule fois à la création, stockée en SHA-256
+- Date de dernière utilisation visible pour auditer les accès
+- Révocation instantanée sans affecter les autres clés ni le compte
+
+**L'onglet Intégrations** (Paramètres > Intégrations) génère automatiquement des snippets de code prêts à l'emploi pour : curl, PowerShell, Python, Grafana, Make/Zapier et la réception de webhooks inbound.
 
 ---
 
@@ -381,63 +551,58 @@ Le suffixe est stocké chiffré (Fernet) et jamais renvoyé en clair via l'API.
 
 ---
 
-## Sécurité des comptes
+## Modèle de données
 
-### 2FA TOTP
+```
+Organization          User                    Profile
+------------          ----                    -------
+id / name / slug      id / email              id / name / os
+webhook_url           hashed_password         locale / keyboard / timezone
+                      role (admin|tech)       default_user / extra_packages
+                      totp_secret (Fernet)    join_domain / domain
+                                              domain_join_user/password (Fernet)
+                      ApiKey[]                domain_config_id -> DomainConfig
+                                              win_image / win_index
+                                              enable_bitlocker / bitlocker_pin
+                                              network_drives (JSON)
+                                              printers (JSON)
+                                              post_script
+                                              tv_suffix (Fernet)
+                                              app_ids -> Application[]
+                                              laps_rotation_days
 
-Chaque utilisateur peut activer la double authentification depuis l'icône paramètres (roue crantée en haut à droite). L'activation n'est pas obligatoire.
-
-Flux d'activation :
-1. OSIRIS génère un secret TOTP et affiche le QR code
-2. L'utilisateur scanne avec Google Authenticator, Authy ou toute app compatible
-3. Saisie d'un code de confirmation pour valider
-4. À chaque connexion suivante : mot de passe + code à 6 chiffres
-
-La désactivation requiert la saisie du mot de passe courant.
-
-### Clés API personnelles
-
-Les clés API permettent à des outils externes d'interroger OSIRIS sans passer par le flux de connexion JWT. Elles s'utilisent exactement comme un token Bearer :
-
-```bash
-# Lister les machines depuis un script ou un RMM
-curl -H "Authorization: Bearer osiris_sk_..." https://osiris.local/machines
-
-# Export CSV automatisé (cron, backup)
-curl -H "Authorization: Bearer osiris_sk_..." https://osiris.local/machines/export > parc.csv
+Machine               DomainConfig            Application
+-------               ------------            -----------
+id / mac / hostname   id / name               id / name
+client / os / ou      organization_id         winget_id (Windows)
+status / deployed_at  domain                  apt_package (Ubuntu)
+organization_id       join_user               category / icon
+profile_id            join_password (Fernet)
+hw_serial / hw_model  default_ou
+hw_ram_gb
+bitlocker_key (Fernet)
+bitlocker_pin (Fernet)
+laps_password (Fernet)
+laps_rotated_at
+user_name / user_email
+notes
+smoke_status / smoke_results
 ```
 
-```powershell
-# Depuis un script PowerShell ou ConnectWise Automate
-$headers = @{ Authorization = "Bearer osiris_sk_..." }
-$machines = Invoke-RestMethod "https://osiris.local/machines" -Headers $headers
-```
+---
 
-```python
-# Intégration Python (Zabbix, Make, script interne)
-import requests
-r = requests.get("https://osiris.local/machines",
-    headers={"Authorization": "Bearer osiris_sk_..."})
-```
+## Rôles
 
-Gestion depuis **Paramètres > Clés API** :
-- Nommer chaque clé (ConnectWise, Grafana, Script backup...)
-- La clé complète est affichée une seule fois à la création, stockée en SHA-256
-- Date de dernière utilisation visible pour auditer les accès
-- Révocation instantanée sans affecter les autres clés ni le compte
-
-Cas d'usage typiques pour un MSP :
-- **RMM** (N-central, ConnectWise Automate, Datto) - déclencher un redéploiement depuis une tâche RMM
-- **Ticketing** (Freshdesk, Halo PSA) - pré-enregistrer une machine quand un ticket "nouveau poste" est créé
-- **CMDB / gestion de parc** (Snipe-IT, Lansweeper) - synchroniser l'inventaire hardware déployé
-- **Monitoring** (Grafana, Zabbix) - afficher l'état des déploiements sur un dashboard externe
-- **Automatisation** (Make, Zapier) - déclencher des actions à chaque déploiement terminé
+| Rôle | Peut faire |
+|---|---|
+| `admin` | Tout : organisations, utilisateurs, profils, machines, drivers, captures, clés API |
+| `technician` | Enregistrer et consulter des machines, pas supprimer ni accéder à l'admin |
 
 ---
 
 ## Fichiers à fournir manuellement
 
-Les binaires et images ISO ne sont pas inclus dans le dépôt. À placer dans `backend/static/` :
+Les binaires et images ISO ne sont pas inclus dans le dépôt. A placer dans `backend/static/` :
 
 | Fichier | Source |
 |---|---|
@@ -478,23 +643,32 @@ Les fichiers Windows sont servis via Samba (requis : protocole NT1 pour WinPE) :
 
 ---
 
-## Caddyfile - routes nécessaires
+## Caddyfile - routes requises
+
+Routes à configurer dans le bloc HTTPS de votre Caddyfile :
 
 ```
-handle /auth*          { reverse_proxy localhost:8000 }
-handle /machines*      { reverse_proxy localhost:8000 }
-handle /profiles*      { reverse_proxy localhost:8000 }
-handle /organizations* { reverse_proxy localhost:8000 }
+handle /auth/*          { reverse_proxy localhost:8000 }
+handle /machines*       { reverse_proxy localhost:8000 }
+handle /organizations*  { reverse_proxy localhost:8000 }
+handle /users*          { reverse_proxy localhost:8000 }
+handle /profiles*       { reverse_proxy localhost:8000 }
+handle /images*         { reverse_proxy localhost:8000 }
+handle /audit-logs*     { reverse_proxy localhost:8000 }
+handle /dashboard*      { reverse_proxy localhost:8000 }
 handle /domain-configs* { reverse_proxy localhost:8000 }
-handle /users*         { reverse_proxy localhost:8000 }
-handle /apps*          { reverse_proxy localhost:8000 }
-handle /images*        { reverse_proxy localhost:8000 }
-handle /capture*       { reverse_proxy localhost:8000 }
-handle /wims*          { reverse_proxy localhost:8000 }
-handle /drivers*       { reverse_proxy localhost:8000 }
-handle /dashboard*     { reverse_proxy localhost:8000 }
-handle /ws*            { reverse_proxy localhost:8000 }
+handle /apps*           { reverse_proxy localhost:8000 }
+handle /capture*        { reverse_proxy localhost:8000 }
+handle /drivers*        { reverse_proxy localhost:8000 }
+handle /wims*           { reverse_proxy localhost:8000 }
+handle /webhooks*       { reverse_proxy localhost:8000 }
+handle /health*         { reverse_proxy localhost:8000 }
+handle /docs*           { reverse_proxy localhost:8000 }
+handle /openapi.json    { reverse_proxy localhost:8000 }
+handle /ws/*            { reverse_proxy localhost:8000 }
 ```
+
+En Docker Compose, le `Caddyfile.docker` inclus utilise `backend:8000` comme upstream et ajoute `tls internal` (certificat auto-signé géré par Caddy).
 
 ---
 
@@ -507,7 +681,7 @@ handle /ws*            { reverse_proxy localhost:8000 }
 | 2FA TOTP | Secret chiffré Fernet en base, token temporaire 5 min entre mot de passe et code |
 | Secrets chiffrés | Mots de passe AD, BitLocker, LAPS, PIN, suffixe TV : Fernet (AES-128-CBC) |
 | Validation MAC | Regex stricte `^[0-9a-f]{12}$` - injection iPXE impossible |
-| Échappement XML | `xml.sax.saxutils.escape` sur tous les champs injectés dans unattend.xml |
+| Echappement XML | `xml.sax.saxutils.escape` sur tous les champs injectés dans unattend.xml |
 | Hachage mots de passe | bcrypt pour les users - sha512_crypt 100k rounds pour les machines |
 | CORS restreint | Origines explicitement listées dans `.env` |
 | Rate limiting | `/auth/login` : 5/min - `/boot` : 30/min - endpoints publics : 10/min |
@@ -515,13 +689,7 @@ handle /ws*            { reverse_proxy localhost:8000 }
 **Risques résiduels documentés :**
 - **Spoofing MAC** - iPXE identifie les machines uniquement par MAC. Mitigation : VLAN PXE dédié.
 - **Scripts en HTTP clair** - les scripts de boot transitent sans chiffrement sur le réseau PXE. Acceptable sur réseau interne isolé.
-- **Endpoints firstboot sans auth** - `/machines/{mac}/status`, `/hardware`, `/laps-password`, `/bitlocker-key` sont appelés par la machine elle-même. La MAC est le seul identifiant. Acceptable sur réseau PXE interne isolé.
-
----
-
-## Migrations de schéma
-
-`init_db()` crée les tables manquantes et applique des migrations légères (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`) à chaque démarrage. Il n'y a pas encore Alembic - les migrations complexes se font manuellement.
+- **Endpoints firstboot sans auth** - `/machines/{mac}/status`, `/hardware`, `/laps-password`, `/laps-due`, `/bitlocker-key`, `/smoke-tests` sont appelés par la machine elle-même. La MAC est le seul identifiant. Acceptable sur réseau PXE interne isolé.
 
 ---
 
@@ -533,4 +701,4 @@ OSIRIS utilise une **base partagée, schéma partagé** (row-level) : toutes les
 
 ---
 
-*Projet open source - licence à définir*
+*Projet fair-source - voir [LICENSE](LICENSE). Usage interne et MSP libre, revente ou hébergement SaaS du logiciel interdits sans accord.*

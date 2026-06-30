@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
 import asyncio
 import base64
 import hashlib
@@ -48,7 +50,8 @@ async def lifespan(app: FastAPI):
     _seed_admin()
     _seed_default_profiles()
     _seed_apps()
-    arq_pool = await create_pool(RedisSettings())
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    arq_pool = await create_pool(RedisSettings.from_dsn(redis_url))
     yield
     await arq_pool.aclose()
 
@@ -964,6 +967,19 @@ def delete_image(image_id: int, current_user: User = Depends(require_admin)):
         session.commit()
 
 
+# ── Health ─────────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    try:
+        with Session(engine) as s:
+            s.exec(select(User).limit(1))
+        db = "ok"
+    except Exception:
+        db = "error"
+    return {"status": "ok" if db == "ok" else "degraded", "db": db, "version": "1.0.0"}
+
+
 # ── Boot iPXE ──────────────────────────────────────────────────────────────────
 
 @app.get("/boot")
@@ -1392,7 +1408,7 @@ def get_bitlocker_key(mac: str, current_user: User = Depends(require_admin)):
 
 @app.post("/machines/{mac}/laps-password")
 def post_laps_password(mac: str, data: dict):
-    """Stocke le mot de passe admin local (LAPS) chiffre (sans auth - appele par la machine en firstboot)."""
+    """Stocke le mot de passe admin local (LAPS) chiffre (sans auth - appele par la machine en firstboot ou rotation)."""
     clean_mac = validate_mac(mac)
     password = (data.get("password") or "").strip()
     if not password:
@@ -1402,9 +1418,35 @@ def post_laps_password(mac: str, data: dict):
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
         machine.laps_password = encrypt(password)
+        machine.laps_rotated_at = datetime.now(timezone.utc)
         session.add(machine)
         session.commit()
     return {"detail": "ok"}
+
+
+@app.get("/machines/{mac}/laps-due")
+def laps_due(mac: str):
+    """
+    Verifie si la rotation LAPS est due pour cette machine.
+    Sans auth : appele par le script de renouvellement au demarrage Windows.
+    Retourne {due: true} si la rotation est activee sur le profil et que la
+    periode est ecoulee depuis la derniere rotation (ou depuis le deploiement).
+    """
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine or not machine.profile_id:
+            return {"due": False}
+        profile = session.get(Profile, machine.profile_id)
+        if not profile or profile.laps_rotation_days == 0:
+            return {"due": False}
+        # Partir de la date de derniere rotation, ou du deploiement, ou de l'epoque
+        last = machine.laps_rotated_at or machine.deployed_at
+        if not last:
+            return {"due": True}
+        last_utc = last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last
+        due_at = last_utc + timedelta(days=profile.laps_rotation_days)
+        return {"due": datetime.now(timezone.utc) >= due_at, "due_at": due_at.isoformat()}
 
 
 @app.get("/machines/{mac}/laps-password")
@@ -1421,6 +1463,41 @@ def get_laps_password(mac: str, current_user: User = Depends(require_admin)):
             "password": decrypt(machine.laps_password),
             "hostname": machine.hostname,
         }
+
+
+@app.post("/machines/{mac}/smoke-tests")
+def post_smoke_tests(mac: str, data: dict):
+    """
+    Recoit le rapport de smoke tests envoye par le script firstboot en fin de deploiement.
+    Pas d'auth : appele par la machine elle-meme comme les autres callbacks firstboot.
+    Payload : {"tests": [{"name": "...", "ok": true/false, "detail": "..."}]}
+    """
+    clean_mac = validate_mac(mac)
+    tests = data.get("tests", [])
+    if not isinstance(tests, list):
+        raise HTTPException(status_code=400, detail="Format invalide : 'tests' doit etre une liste")
+    overall = "ok" if all(t.get("ok", False) for t in tests) else "warnings"
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        machine.smoke_status = overall
+        machine.smoke_results = json.dumps(tests, ensure_ascii=False)
+        session.add(machine)
+        session.commit()
+    import threading
+    def _ws_notify():
+        try:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(
+                manager.broadcast(clean_mac, {"type": "smoke", "status": overall, "tests": tests})
+            )
+            loop.close()
+        except Exception:
+            pass
+    threading.Thread(target=_ws_notify, daemon=True).start()
+    return {"detail": "ok", "status": overall, "tests_count": len(tests),
+            "failed": sum(1 for t in tests if not t.get("ok", False))}
 
 
 @app.post("/machines/{mac}/redeploy-now", dependencies=[Depends(get_current_user)])

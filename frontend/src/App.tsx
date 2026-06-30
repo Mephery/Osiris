@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+// Copyright (c) 2026 Coline Derycke. See LICENSE.
 import React, { useEffect, useRef, useState } from 'react'
 import { Toaster, toast } from 'sonner'
 import { QRCodeSVG } from 'qrcode.react'
@@ -47,6 +49,9 @@ interface Machine {
   user_name?: string;
   user_email?: string;
   notes?: string;
+  smoke_status?: string;
+  smoke_results?: string;
+  laps_rotated_at?: string | null;
 }
 
 interface DriverPack {
@@ -83,6 +88,7 @@ interface Profile {
   post_script: string;
   tv_suffix: string;
   app_ids: string;
+  laps_rotation_days: number;
 }
 
 interface Application {
@@ -381,8 +387,23 @@ curl -X POST \\
 
 // ── Composant principal ────────────────────────────────────────────────────────
 
+const AUTH_KEY = 'osiris_auth'
+
+function loadAuth(): AuthState | null {
+  try {
+    const raw = localStorage.getItem(AUTH_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
+function saveAuth(a: AuthState | null) {
+  if (a) localStorage.setItem(AUTH_KEY, JSON.stringify(a))
+  else localStorage.removeItem(AUTH_KEY)
+}
+
 export default function App() {
-  const [auth, setAuth] = useState<AuthState | null>(null)
+  const [auth, setAuthState] = useState<AuthState | null>(loadAuth)
+  const setAuth = (a: AuthState | null) => { saveAuth(a); setAuthState(a) }
 
   const [machines, setMachines]     = useState<Machine[]>([])
   const [orgs, setOrgs]             = useState<Organization[]>([])
@@ -434,7 +455,7 @@ export default function App() {
   // ── Images OS ──────────────────────────────────────────────────────────────
   const [images, setImages] = useState<OsImage[]>([])
   const [newImage, setNewImage] = useState({ name: '', version: '', os: 'ubuntu', iso_url: '' })
-  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '' })
+  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0 })
 
   // ── Drivers ────────────────────────────────────────────────────────────────
   const [drivers, setDrivers]           = useState<DriverPack[]>([])
@@ -502,9 +523,14 @@ export default function App() {
       .catch(() => toast.error('Erreur lors de la sauvegarde'))
   }
 
-  // ── Recherche + filtre statut ──────────────────────────────────────────────
+  // ── Recherche + filtres ────────────────────────────────────────────────────
   const [search, setSearch]             = useState('')
   const [statusFilter, setStatusFilter] = useState('')
+  const [osFilter, setOsFilter]         = useState('')
+  const [smokeFilter, setSmokeFilter]   = useState(false)
+
+  const resetFilters = () => { setSearch(''); setStatusFilter(''); setOsFilter(''); setSmokeFilter(false) }
+  const hasActiveFilter = !!(search || statusFilter || osFilter || smokeFilter)
 
   // ── Changement de mot de passe ─────────────────────────────────────────────
   const [showSettingsModal, setShowSettingsModal] = useState(false)
@@ -769,10 +795,11 @@ export default function App() {
   }, [auth, selectedOrg])
 
   useEffect(() => {
-    if (!auth || auth.role !== 'admin') return
+    if (!auth) return
+    if (activeTab === 'dashboard') { fetchDashboard(auth.token); return }
+    if (auth.role !== 'admin') return
     if (activeTab === 'drivers') fetchDrivers(auth.token)
     else if (activeTab === 'journal') fetchAuditLogs(auth.token)
-    else if (activeTab === 'dashboard') fetchDashboard(auth.token)
     else if (activeTab === 'admin') { fetchDomainConfigs(auth.token); fetchTotpStatus(auth.token) }
     else if (activeTab === 'capture') fetchCaptures(auth.token)
   }, [activeTab])
@@ -988,7 +1015,7 @@ export default function App() {
     })
       .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
       .then(() => {
-        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '' })
+        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0 })
         fetchProfiles(auth.token)
         toast.success('Profil créé')
       })
@@ -1123,9 +1150,11 @@ export default function App() {
 
   const filteredMachines = machines.filter(m => {
     const q = search.toLowerCase()
-    const matchSearch = !q || m.hostname.toLowerCase().includes(q) || m.client.toLowerCase().includes(q) || m.mac.includes(q)
+    const matchSearch = !q || m.hostname.toLowerCase().includes(q) || m.client.toLowerCase().includes(q) || m.mac.includes(q) || (m.user_name ?? '').toLowerCase().includes(q)
     const matchStatus = !statusFilter || m.status === statusFilter
-    return matchSearch && matchStatus
+    const matchOs     = !osFilter     || m.os === osFilter
+    const matchSmoke  = !smokeFilter  || m.smoke_status === 'warnings'
+    return matchSearch && matchStatus && matchOs && matchSmoke
   })
 
   const statCounts = {
@@ -1133,6 +1162,7 @@ export default function App() {
     deploying: machines.filter(m => m.status === 'deploying').length,
     failed:    machines.filter(m => m.status === 'failed').length,
     pending:   machines.filter(m => m.status === 'pending').length,
+    smokeWarn: machines.filter(m => m.smoke_status === 'warnings').length,
   }
 
   // ── Rendu ───────────────────────────────────────────────────────────────────
@@ -1301,6 +1331,16 @@ export default function App() {
                           PIN a 6 chiffres (TPM+PIN - redemarrage manuel requis)
                         </label>
                       )}
+                      <div className="flex items-center gap-2 pt-1">
+                        <label className="text-xs text-slate-400 shrink-0">Rotation LAPS</label>
+                        <select value={newProfile.laps_rotation_days ?? 0} onChange={e => setNewProfile({ ...newProfile, laps_rotation_days: parseInt(e.target.value) })} className="osiris-input text-xs flex-1">
+                          <option value={0}>Desactivee</option>
+                          <option value={30}>Tous les 30 jours</option>
+                          <option value={60}>Tous les 60 jours</option>
+                          <option value={90}>Tous les 90 jours</option>
+                          <option value={180}>Tous les 180 jours</option>
+                        </select>
+                      </div>
                     </div>
                     <div className="flex gap-1 col-span-2 sm:col-span-1">
                       <input placeholder="Golden image (vide = install.wim auto)" title="Laissez vide pour utiliser install.wim de l'ISO" value={newProfile.win_image ?? ''} onChange={e => setNewProfile({ ...newProfile, win_image: e.target.value })} className="osiris-input text-xs font-mono flex-1 min-w-0" />
@@ -1903,6 +1943,26 @@ export default function App() {
                 <option value="deployed">Déployés</option>
                 <option value="failed">Échec</option>
               </select>
+              <select value={osFilter} onChange={e => setOsFilter(e.target.value)} className="osiris-input text-xs w-32">
+                <option value="">Tous les OS</option>
+                <option value="windows">Windows</option>
+                <option value="ubuntu">Ubuntu</option>
+                <option value="debian">Debian</option>
+              </select>
+              {machines.some(m => m.smoke_status === 'warnings') && (
+                <button
+                  onClick={() => setSmokeFilter(f => !f)}
+                  className={`osiris-btn text-xs ${smokeFilter ? 'border-amber-600 text-amber-400' : 'text-slate-500'}`}
+                  title="Afficher uniquement les machines avec des alertes smoke"
+                >
+                  Alertes smoke{smokeFilter ? ` (${filteredMachines.length})` : ` (${machines.filter(m => m.smoke_status === 'warnings').length})`}
+                </button>
+              )}
+              {hasActiveFilter && (
+                <button onClick={resetFilters} className="osiris-btn-ghost text-xs text-slate-500">
+                  Réinitialiser
+                </button>
+              )}
               <span className="text-[10px] uppercase tracking-widest text-slate-600 font-semibold">Client</span>
               <select value={selectedOrg ?? ''} onChange={(e) => setSelectedOrg(e.target.value ? Number(e.target.value) : null)} className="osiris-input text-xs w-44">
                 <option value="">Tous les clients</option>
@@ -1932,6 +1992,7 @@ export default function App() {
               {statCounts.deploying > 0 && <button onClick={() => setStatusFilter(s => s === 'deploying' ? '' : 'deploying')} className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${statusFilter === 'deploying' ? 'text-blue-400'    : 'text-blue-700    hover:text-blue-500'}`}  ><span className="w-1.5 h-1.5 rounded-full bg-blue-500  inline-block animate-pulse" />{statCounts.deploying} en cours</button>}
               {statCounts.failed    > 0 && <button onClick={() => setStatusFilter(s => s === 'failed'    ? '' : 'failed')}    className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${statusFilter === 'failed'    ? 'text-red-400'     : 'text-red-800     hover:text-red-500'}`}    ><span className="w-1.5 h-1.5 rounded-full bg-red-500   inline-block" />{statCounts.failed}    échec{statCounts.failed    !== 1 ? 's' : ''}</button>}
               {statCounts.pending   > 0 && <button onClick={() => setStatusFilter(s => s === 'pending'   ? '' : 'pending')}   className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${statusFilter === 'pending'   ? 'text-slate-300'   : 'text-slate-700   hover:text-slate-400'}`}  ><span className="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block" />{statCounts.pending}   en attente</button>}
+              {statCounts.smokeWarn > 0 && <button onClick={() => setSmokeFilter(f => !f)} className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${smokeFilter ? 'text-amber-400' : 'text-amber-800 hover:text-amber-500'}`}><span className="w-1.5 h-1.5 rounded-full bg-amber-500 inline-block" />{statCounts.smokeWarn} alerte{statCounts.smokeWarn !== 1 ? 's' : ''} smoke</button>}
             </div>
           )}
         </div>
@@ -2026,6 +2087,20 @@ export default function App() {
                           {new Date(machine.deployed_at).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
                         </span>
                       )}
+                      {machine.smoke_status === 'ok' && (
+                        <span className="inline-block mt-1 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-emerald-800 text-emerald-500">Tests OK</span>
+                      )}
+                      {machine.smoke_status === 'warnings' && (
+                        <span className="inline-block mt-1 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-700 text-amber-400 cursor-pointer"
+                          title="Cliquer pour voir les details"
+                          onClick={() => {
+                            const isOpen = expandedLogs.has(machine.mac)
+                            setExpandedLogs(prev => { const s = new Set(prev); isOpen ? s.delete(machine.mac) : s.add(machine.mac); return s })
+                            if (!expandedLogs.has(machine.mac)) fetchHistory(machine.mac)
+                          }}>
+                          {(() => { try { const t = JSON.parse(machine.smoke_results ?? '[]'); const n = t.filter((x: any) => !x.ok).length; return `${n} alerte${n > 1 ? 's' : ''}` } catch { return 'Alertes' } })()}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
@@ -2114,6 +2189,31 @@ export default function App() {
                             </div>
                           )}
                         </div>
+                        {/* ── Smoke tests ── */}
+                        {machine.smoke_status && (
+                          <div>
+                            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">
+                              Smoke tests
+                              <span className={`ml-2 font-bold ${machine.smoke_status === 'ok' ? 'text-emerald-500' : 'text-amber-400'}`}>
+                                {machine.smoke_status === 'ok' ? 'Tous OK' : 'Alertes detectees'}
+                              </span>
+                            </p>
+                            <div className="space-y-px">
+                              {(() => {
+                                try {
+                                  const tests: {name: string; ok: boolean; detail?: string}[] = JSON.parse(machine.smoke_results ?? '[]')
+                                  return tests.map((t, i) => (
+                                    <div key={i} className="flex items-center gap-2 text-[10px] font-mono py-0.5">
+                                      <span className={`w-3 h-3 rounded-full shrink-0 ${t.ok ? 'bg-emerald-600' : 'bg-amber-500'}`} />
+                                      <span className={t.ok ? 'text-slate-400' : 'text-amber-300'}>{t.name}</span>
+                                      {t.detail && !t.ok && <span className="text-slate-600">- {t.detail}</span>}
+                                    </div>
+                                  ))
+                                } catch { return null }
+                              })()}
+                            </div>
+                          </div>
+                        )}
                         {/* ── Inventaire materiel ── */}
                         {(machine.hw_model || machine.hw_serial) && (
                           <div>
@@ -2160,14 +2260,21 @@ export default function App() {
                           <div>
                             <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Mot de passe admin local (LAPS)</p>
                             {machine.has_laps ? (
-                              lapsData[machine.mac] ? (
-                                <div className="flex items-center gap-2">
-                                  <span className="font-mono text-sm text-green-400 tracking-wider">{lapsData[machine.mac]}</span>
-                                  <button onClick={() => { navigator.clipboard.writeText(lapsData[machine.mac]); toast.success('Mot de passe copie') }} className="osiris-btn text-[10px] px-2 py-0.5">Copier</button>
-                                </div>
-                              ) : (
-                                <button onClick={() => fetchLapsPassword(machine.mac)} className="osiris-btn text-[10px] px-2 py-1">Afficher le mot de passe</button>
-                              )
+                              <div className="space-y-1.5">
+                                {lapsData[machine.mac] ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono text-sm text-green-400 tracking-wider">{lapsData[machine.mac]}</span>
+                                    <button onClick={() => { navigator.clipboard.writeText(lapsData[machine.mac]); toast.success('Mot de passe copie') }} className="osiris-btn text-[10px] px-2 py-0.5">Copier</button>
+                                  </div>
+                                ) : (
+                                  <button onClick={() => fetchLapsPassword(machine.mac)} className="osiris-btn text-[10px] px-2 py-1">Afficher le mot de passe</button>
+                                )}
+                                {machine.laps_rotated_at && (
+                                  <p className="text-[10px] font-mono text-slate-600">
+                                    Derniere rotation : {new Date(machine.laps_rotated_at).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                  </p>
+                                )}
+                              </div>
                             ) : (
                               <span className="text-[10px] font-mono text-slate-700">Aucun mot de passe LAPS enregistre</span>
                             )}
@@ -2607,6 +2714,16 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                         PIN a 6 chiffres (TPM+PIN - redemarrage manuel requis)
                       </label>
                     )}
+                    <div className="flex items-center gap-2 pt-1">
+                      <label className="text-xs text-slate-400 shrink-0">Rotation LAPS</label>
+                      <select value={editingProfile.laps_rotation_days ?? 0} onChange={e => setEditingProfile({ ...editingProfile, laps_rotation_days: parseInt(e.target.value) })} className="osiris-input text-xs flex-1">
+                        <option value={0}>Desactivee</option>
+                        <option value={30}>Tous les 30 jours</option>
+                        <option value={60}>Tous les 60 jours</option>
+                        <option value={90}>Tous les 90 jours</option>
+                        <option value={180}>Tous les 180 jours</option>
+                      </select>
+                    </div>
                   </div>
                   <label className="text-xs text-slate-400 self-center">Index WIM</label>
                   <input type="number" min={1} max={20} className="osiris-input text-xs font-mono" defaultValue={editingProfile.win_index} onChange={e => setEditingProfile({ ...editingProfile, win_index: parseInt(e.target.value) || 1 })} />

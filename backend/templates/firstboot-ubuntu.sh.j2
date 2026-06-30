@@ -126,4 +126,74 @@ echo "[$(ts)] Script post-install termine."
 {% endif %}
 
 echo "[$(ts)] Premier demarrage OSIRIS termine."
+
+# ── Smoke tests ───────────────────────────────────────────────────────────────
+echo "[$(ts)] Smoke tests post-deploiement..."
+_smoke_json="["
+_smoke_first=true
+
+_add_test() {
+    local name="$1" ok="$2" detail="${3:-}"
+    local ok_val=$([ "$ok" = "true" ] && echo "true" || echo "false")
+    local icon=$([ "$ok" = "true" ] && echo "OK" || echo "FAIL")
+    local detail_safe=$(echo "$detail" | sed 's/"/\\"/g')
+    echo "[$(ts)]   [$icon] $name${detail:+ : $detail}"
+    [ "$_smoke_first" = "true" ] && _smoke_first=false || _smoke_json+=","
+    _smoke_json+="{\"name\":\"$(echo "$name" | sed 's/"/\\"/g')\",\"ok\":$ok_val,\"detail\":\"$detail_safe\"}"
+}
+
+# Ping passerelle par defaut
+_gw=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
+if [ -n "$_gw" ] && ping -c 1 -W 3 "$_gw" > /dev/null 2>&1; then
+    _add_test "Ping passerelle ($_gw)" true
+else
+    _add_test "Ping passerelle" false "Passerelle inatteignable"
+fi
+
+# Resolution DNS
+if getent hosts www.google.com > /dev/null 2>&1; then
+    _add_test "Resolution DNS" true
+else
+    _add_test "Resolution DNS" false "Echec DNS"
+fi
+
+{% if profile.join_domain %}
+# Jonction domaine AD
+if realm list 2>/dev/null | grep -q "{{ profile.domain }}"; then
+    _add_test "Jonction domaine AD" true "{{ profile.domain }}"
+else
+    _add_test "Jonction domaine AD" false "Domaine non trouve dans realm list"
+fi
+{% endif %}
+
+# Service TeamViewer
+if systemctl is-active --quiet teamviewerd 2>/dev/null; then
+    _add_test "TeamViewer" true "En cours d'execution"
+else
+    _add_test "TeamViewer" false "Service inactif ou absent"
+fi
+
+{% if ubuntu_packages %}
+# Presence des paquets installes
+{% for pkg in ubuntu_packages %}
+if dpkg -s "{{ pkg }}" > /dev/null 2>&1; then
+    _add_test "Paquet : {{ pkg }}" true
+else
+    _add_test "Paquet : {{ pkg }}" false "Non installe"
+fi
+{% endfor %}
+{% endif %}
+
+_smoke_json+="]"
+
+# Envoi du rapport a OSIRIS
+_smoke_body="{\"tests\":${_smoke_json}}"
+if curl -s -X POST "$osiris_url/machines/$_osiris_mac/smoke-tests" \
+    -H "Content-Type: application/json" \
+    -d "$_smoke_body" --max-time 15; then
+    echo "[$(ts)] Rapport smoke tests envoye."
+else
+    echo "[$(ts)] AVERTISSEMENT : Echec envoi rapport smoke tests."
+fi
+
 systemctl disable osiris-firstboot.service

@@ -33,6 +33,36 @@ https://10.0.0.1, https://192.168.1.18 {
     handle /audit-logs* {
         reverse_proxy localhost:8000
     }
+    handle /dashboard* {
+        reverse_proxy localhost:8000
+    }
+    handle /domain-configs* {
+        reverse_proxy localhost:8000
+    }
+    handle /apps* {
+        reverse_proxy localhost:8000
+    }
+    handle /capture* {
+        reverse_proxy localhost:8000
+    }
+    handle /drivers* {
+        reverse_proxy localhost:8000
+    }
+    handle /wims* {
+        reverse_proxy localhost:8000
+    }
+    handle /webhooks* {
+        reverse_proxy localhost:8000
+    }
+    handle /health* {
+        reverse_proxy localhost:8000
+    }
+    handle /docs* {
+        reverse_proxy localhost:8000
+    }
+    handle /openapi.json {
+        reverse_proxy localhost:8000
+    }
     handle /ws/* {
         reverse_proxy localhost:8000
     }
