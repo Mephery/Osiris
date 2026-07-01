@@ -57,7 +57,7 @@ for i in $(seq 1 10); do
     fi
 done
 
-teamviewer passwd "{{ tv_password }}"
+teamviewer passwd {{ tv_password | bash_squote }}
 echo "[$(ts)] TeamViewer configure - ID : $(teamviewer info 2>/dev/null | grep 'TeamViewer ID' | awk '{print $NF}')"
 {% endif %}
 
@@ -86,13 +86,13 @@ KRBEOF
 
 # Jonction au domaine
 {% if machine.ou %}
-echo "{{ profile.domain_join_password }}" | realm join \
-    --user="{{ profile.domain_join_user }}" \
-    --computer-ou="{{ machine.ou }}" \
+printf '%s' {{ profile.domain_join_password | bash_squote }} | realm join \
+    --user={{ profile.domain_join_user | bash_squote }} \
+    --computer-ou={{ machine.ou | bash_squote }} \
     {{ profile.domain }} 2>&1
 {% else %}
-echo "{{ profile.domain_join_password }}" | realm join \
-    --user="{{ profile.domain_join_user }}" \
+printf '%s' {{ profile.domain_join_password | bash_squote }} | realm join \
+    --user={{ profile.domain_join_user | bash_squote }} \
     {{ profile.domain }} 2>&1
 {% endif %}
 
@@ -115,6 +115,31 @@ if realm list 2>/dev/null | grep -q "{{ profile.domain }}"; then
 else
     echo "[$(ts)] ECHEC jonction AD - verifier que le DNS resout {{ profile.domain }} et que les identifiants sont corrects"
 fi
+{% endif %}
+
+{% if profile.machine_type == 'server' %}
+echo "[$(ts)] Configuration SSH serveur..."
+
+# Clés SSH autorisées
+mkdir -p /home/{{ profile.default_user }}/.ssh
+chmod 700 /home/{{ profile.default_user }}/.ssh
+{% if profile.ssh_authorized_keys %}
+cat > /home/{{ profile.default_user }}/.ssh/authorized_keys << 'SSHEOF'
+{{ profile.ssh_authorized_keys }}
+SSHEOF
+chmod 600 /home/{{ profile.default_user }}/.ssh/authorized_keys
+chown -R {{ profile.default_user }}:{{ profile.default_user }} /home/{{ profile.default_user }}/.ssh
+echo "[$(ts)] Cles SSH injectees"
+{% endif %}
+
+# Durcissement sshd
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+grep -q '^PasswordAuthentication' /etc/ssh/sshd_config || echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config
+grep -q '^PermitRootLogin' /etc/ssh/sshd_config       || echo 'PermitRootLogin no'       >> /etc/ssh/sshd_config
+systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+echo "[$(ts)] SSH : auth par mot de passe desactivee, root interdit"
 {% endif %}
 
 {% if profile.post_script %}
@@ -166,12 +191,28 @@ else
 fi
 {% endif %}
 
+{% if profile.machine_type == 'server' %}
+# Service SSH
+if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
+    _add_test "Service SSH" true "En cours d'execution"
+else
+    _add_test "Service SSH" false "Service SSH inactif"
+fi
+
+# Auth par mot de passe desactivee
+if grep -qE '^PasswordAuthentication\s+no' /etc/ssh/sshd_config 2>/dev/null; then
+    _add_test "SSH - auth mot de passe" true "Desactivee"
+else
+    _add_test "SSH - auth mot de passe" false "Toujours active"
+fi
+{% else %}
 # Service TeamViewer
 if systemctl is-active --quiet teamviewerd 2>/dev/null; then
     _add_test "TeamViewer" true "En cours d'execution"
 else
     _add_test "TeamViewer" false "Service inactif ou absent"
 fi
+{% endif %}
 
 {% if ubuntu_packages %}
 # Presence des paquets installes

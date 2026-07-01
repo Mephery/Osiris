@@ -149,6 +149,13 @@ jinja_env = Environment(
     autoescape=False,    # on gère l'échappement XML manuellement
 )
 
+def _bash_squote(s: str) -> str:
+    """Entoure une valeur de guillemets simples bash, en echappant les apostrophes internes.
+    Sur pour tout caractere : dollar, guillemets, backtick, backslash, espaces, etc."""
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+jinja_env.filters["bash_squote"] = _bash_squote
+
 
 # ── Validation MAC ─────────────────────────────────────────────────────────────
 
@@ -204,6 +211,8 @@ class ProfileCreate(SQLModel):
     post_script: str = ""
     tv_suffix: str = ""
     app_ids: str = ""
+    machine_type: str = "workstation"
+    ssh_authorized_keys: str = ""
 
 class ProfilePatch(SQLModel):
     name: Optional[str] = None
@@ -225,6 +234,8 @@ class ProfilePatch(SQLModel):
     post_script: Optional[str] = None
     tv_suffix: Optional[str] = None
     app_ids: Optional[str] = None
+    machine_type: Optional[str] = None
+    ssh_authorized_keys: Optional[str] = None
 
 class LoginRequest(SQLModel):
     email: str
@@ -269,6 +280,8 @@ def _seed_default_profiles():
         session.add(Profile(name="Ubuntu — par défaut",  os="ubuntu"))
         session.add(Profile(name="Debian — par défaut",  os="debian"))
         session.add(Profile(name="Windows — par défaut", os="windows", locale="fr-FR"))
+        session.add(Profile(name="Ubuntu Server — par défaut", os="ubuntu", machine_type="server", enable_bitlocker=False))
+        session.add(Profile(name="Debian Server — par défaut", os="debian", machine_type="server", enable_bitlocker=False))
         session.commit()
         print("[OSIRIS] Profils par défaut créés")
 
@@ -298,6 +311,19 @@ _SEED_APPS = [
     {"name": "Citrix Workspace",     "winget_id": "Citrix.Workspace",                     "apt_package": "",                     "category": "remote",   "icon": "🖥️"},
     {"name": "OpenVPN",              "winget_id": "OpenVPNTechnologies.OpenVPN",          "apt_package": "openvpn",              "category": "security", "icon": "🔑"},
     {"name": "WithSecure",           "winget_id": "WithSecure.ElementsAgent",             "apt_package": "",                     "category": "security", "icon": "🛡️"},
+    # Services serveur (apt uniquement)
+    {"name": "Docker",               "winget_id": "",    "apt_package": "docker.io",                    "category": "server",   "icon": "🐳"},
+    {"name": "Nginx",                "winget_id": "",    "apt_package": "nginx",                        "category": "server",   "icon": "🌐"},
+    {"name": "Apache2",              "winget_id": "",    "apt_package": "apache2",                      "category": "server",   "icon": "🪶"},
+    {"name": "PostgreSQL",           "winget_id": "",    "apt_package": "postgresql",                   "category": "server",   "icon": "🐘"},
+    {"name": "MariaDB",              "winget_id": "",    "apt_package": "mariadb-server",               "category": "server",   "icon": "🦭"},
+    {"name": "Redis",                "winget_id": "",    "apt_package": "redis-server",                 "category": "server",   "icon": "🔴"},
+    {"name": "Fail2ban",             "winget_id": "",    "apt_package": "fail2ban",                     "category": "server",   "icon": "🚫"},
+    {"name": "UFW",                  "winget_id": "",    "apt_package": "ufw",                          "category": "server",   "icon": "🧱"},
+    {"name": "Certbot (Nginx)",      "winget_id": "",    "apt_package": "python3-certbot-nginx",        "category": "server",   "icon": "🔒"},
+    {"name": "Node Exporter",        "winget_id": "",    "apt_package": "prometheus-node-exporter",     "category": "server",   "icon": "📊"},
+    {"name": "WireGuard",            "winget_id": "",    "apt_package": "wireguard",                    "category": "server",   "icon": "🔑"},
+    {"name": "Netdata",              "winget_id": "",    "apt_package": "netdata",                      "category": "server",   "icon": "📈"},
 ]
 
 def _seed_apps():
@@ -747,6 +773,8 @@ def _profile_dict(p: Profile) -> dict:
         "post_script": p.post_script or "",
         "tv_suffix": "***" if p.tv_suffix else "",
         "app_ids": p.app_ids or "",
+        "machine_type": p.machine_type or "workstation",
+        "ssh_authorized_keys": p.ssh_authorized_keys or "",
     }
 
 
@@ -778,6 +806,8 @@ def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
         "tv_suffix": decrypt(p.tv_suffix or ""),
         "app_ids": p.app_ids or "",
         "domain_config_id": p.domain_config_id,
+        "machine_type": p.machine_type or "workstation",
+        "ssh_authorized_keys": p.ssh_authorized_keys or "",
     }
 
 

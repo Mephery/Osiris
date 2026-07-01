@@ -82,6 +82,9 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
             api_key.last_used_at = datetime.now(timezone.utc)
             session.add(api_key)
             session.commit()
+            # Refresh apres commit : session.commit() expire les objets SQLAlchemy,
+            # ce qui provoquerait un DetachedInstanceError apres la fermeture de session.
+            session.refresh(user)
         return user
 
     # JWT standard

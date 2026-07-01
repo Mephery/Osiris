@@ -81,6 +81,8 @@ class Profile(SQLModel, table=True):
     tv_suffix: str = Field(default="")              # Suffixe TeamViewer chiffré Fernet
     app_ids: str   = Field(default="")              # IDs d'apps séparés par virgule : "1,3,7"
     laps_rotation_days: int = Field(default=0)      # 0 = rotation desactivee
+    machine_type: str = Field(default="workstation")       # "workstation" | "server"
+    ssh_authorized_keys: str = Field(default="")           # clés SSH (une par ligne)
 
 
 class Application(SQLModel, table=True):
@@ -178,14 +180,20 @@ class AuditLog(SQLModel, table=True):
     details: Optional[str] = Field(default=None)       # JSON sérialisé
 
 
-# ── Connexion PostgreSQL ───────────────────────────────────────────────────────
-db_password  = urllib.parse.quote_plus(os.environ["DB_PASSWORD"])
-db_user      = os.environ["DB_USER"]
-db_host      = os.environ["DB_HOST"]
-db_name      = os.environ["DB_NAME"]
-
-DATABASE_URL = f"postgresql://{db_user}:{db_password}@{db_host}/{db_name}"
-engine       = create_engine(DATABASE_URL, echo=False)
+# ── Connexion base de données ─────────────────────────────────────────────────
+# DATABASE_URL peut etre defini directement (tests, Docker, Heroku...).
+# Sinon, reconstruit depuis les variables individuelles.
+if os.environ.get("DATABASE_URL"):
+    DATABASE_URL = os.environ["DATABASE_URL"]
+    engine = create_engine(DATABASE_URL, echo=False,
+                           connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
+else:
+    db_password  = urllib.parse.quote_plus(os.environ["DB_PASSWORD"])
+    db_user      = os.environ["DB_USER"]
+    db_host      = os.environ["DB_HOST"]
+    db_name      = os.environ["DB_NAME"]
+    DATABASE_URL = f"postgresql://{db_user}:{db_password}@{db_host}/{db_name}"
+    engine       = create_engine(DATABASE_URL, echo=False)
 
 
 def init_db():

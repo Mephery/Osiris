@@ -89,6 +89,8 @@ interface Profile {
   tv_suffix: string;
   app_ids: string;
   laps_rotation_days: number;
+  machine_type: string;
+  ssh_authorized_keys: string;
 }
 
 interface Application {
@@ -455,7 +457,7 @@ export default function App() {
   // ── Images OS ──────────────────────────────────────────────────────────────
   const [images, setImages] = useState<OsImage[]>([])
   const [newImage, setNewImage] = useState({ name: '', version: '', os: 'ubuntu', iso_url: '' })
-  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0 })
+  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '' })
 
   // ── Drivers ────────────────────────────────────────────────────────────────
   const [drivers, setDrivers]           = useState<DriverPack[]>([])
@@ -1015,7 +1017,7 @@ export default function App() {
     })
       .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
       .then(() => {
-        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0 })
+        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '' })
         fetchProfiles(auth.token)
         toast.success('Profil créé')
       })
@@ -1291,6 +1293,7 @@ export default function App() {
                     <div className="min-w-0">
                       <span className="text-white text-sm font-medium">{p.name}</span>
                       <span className={`ml-2 osiris-os-badge osiris-os-badge--${p.os}`}>{p.os}</span>
+                      {p.machine_type === 'server' && <span className="ml-1 inline-block border border-amber-700/60 text-amber-500 rounded px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider">serveur</span>}
                       <p className="text-[10px] font-mono text-slate-600 mt-0.5">{p.locale} · {p.keyboard} · {p.timezone}</p>
                       {p.os === 'windows' && <p className="text-[10px] font-mono text-slate-500">WIM index: <strong className="text-slate-300">{p.win_index}</strong>{p.domain ? ` · ${p.domain}` : ''}</p>}
                     </div>
@@ -1314,8 +1317,18 @@ export default function App() {
                 <input placeholder="Fuseau horaire" value={newProfile.timezone ?? ''} onChange={e => setNewProfile({ ...newProfile, timezone: e.target.value })} className="osiris-input text-xs font-mono" />
                 {(newProfile.os === 'ubuntu' || newProfile.os === 'debian') && (
                   <>
+                    <select value={newProfile.machine_type ?? 'workstation'} onChange={e => setNewProfile({ ...newProfile, machine_type: e.target.value })} className="osiris-input text-xs">
+                      <option value="workstation">Poste de travail</option>
+                      <option value="server">Serveur</option>
+                    </select>
                     <input placeholder="Utilisateur local" value={newProfile.default_user ?? ''} onChange={e => setNewProfile({ ...newProfile, default_user: e.target.value })} className="osiris-input text-xs font-mono" />
                     <input placeholder="Paquets supplémentaires (htop,vim,...)" value={newProfile.extra_packages ?? ''} onChange={e => setNewProfile({ ...newProfile, extra_packages: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
+                    {newProfile.machine_type === 'server' && (
+                      <div className="col-span-2 sm:col-span-3 space-y-1">
+                        <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
+                        <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" value={newProfile.ssh_authorized_keys ?? ''} onChange={e => setNewProfile({ ...newProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
+                      </div>
+                    )}
                   </>
                 )}
                 {newProfile.os === 'windows' && (
@@ -2735,7 +2748,20 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                 </>)}
                 <label className="text-xs text-slate-400 self-center">Suffixe TeamViewer</label>
                 <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, tv_suffix: e.target.value })} />
+                {(editingProfile.os === 'ubuntu' || editingProfile.os === 'debian') && (<>
+                  <label className="text-xs text-slate-400 self-center">Type de machine</label>
+                  <select value={editingProfile.machine_type ?? 'workstation'} onChange={e => setEditingProfile({ ...editingProfile, machine_type: e.target.value })} className="osiris-input text-xs">
+                    <option value="workstation">Poste de travail</option>
+                    <option value="server">Serveur</option>
+                  </select>
+                </>)}
               </div>
+              {(editingProfile.os === 'ubuntu' || editingProfile.os === 'debian') && editingProfile.machine_type === 'server' && (
+                <div className="pt-2 border-t border-slate-800/40 space-y-1">
+                  <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
+                  <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" defaultValue={editingProfile.ssh_authorized_keys} onChange={e => setEditingProfile({ ...editingProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
+                </div>
+              )}
               {editingProfile.os === 'windows' && (() => {
                 const drives: {letter:string,path:string}[] = (() => { try { return JSON.parse(editingProfile.network_drives || '[]') } catch { return [] } })()
                 const printers: string[] = (() => { try { return JSON.parse(editingProfile.printers || '[]') } catch { return [] } })()
