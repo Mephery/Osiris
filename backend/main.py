@@ -31,7 +31,7 @@ from jinja2 import Environment, FileSystemLoader
 
 import pyotp
 import qrcode
-from models import ApiKey, Application, AuditLog, DeploymentEvent, DriverPack, DomainConfig, Machine, Organization, OsImage, Profile, User, engine, init_db, normalize_model
+from models import ApiKey, Application, AuditLog, DeploymentEvent, DriverPack, DomainConfig, Hypervisor, Machine, Organization, OsImage, Profile, User, engine, init_db, normalize_model
 from auth import (
     hash_password, verify_password, create_token,
     get_current_user, require_admin
@@ -1343,6 +1343,9 @@ def get_all_machines(org_id: Optional[int] = None):
                 "user_name": m.user_name, "user_email": m.user_email,
                 "has_bitlocker": bool(m.bitlocker_key),
                 "has_laps": bool(m.laps_password),
+                "hypervisor_id": m.hypervisor_id,
+                "proxmox_vm_id": m.proxmox_vm_id,
+                "proxmox_node": m.proxmox_node,
             }
             for m in machines
         ]
@@ -1370,16 +1373,145 @@ def update_machine(mac: str, patch: MachinePatch, current_user: User = Depends(g
 
 
 @app.delete("/machines/{mac}", status_code=204)
-def delete_machine(mac: str, current_user: User = Depends(require_admin)):
+async def delete_machine(mac: str, destroy_proxmox: bool = False, current_user: User = Depends(require_admin)):
     clean_mac = validate_mac(mac)
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
-        _log(session, current_user, "delete_machine", target_mac=clean_mac,
-             details={"hostname": machine.hostname, "client": machine.client})
-        session.delete(machine)
-        session.commit()
+        vm_id = machine.proxmox_vm_id
+        hv_id = machine.hypervisor_id
+        node = machine.proxmox_node
+        hostname = machine.hostname
+        client = machine.client
+        h = session.get(Hypervisor, hv_id) if (destroy_proxmox and vm_id and hv_id) else None
+
+    if destroy_proxmox and vm_id and hv_id and h:
+        try:
+            await _proxmox_request(h, "POST",
+                f"/api2/json/nodes/{node}/qemu/{vm_id}/status/stop")
+            await asyncio.sleep(2)
+            await _proxmox_request(h, "DELETE",
+                f"/api2/json/nodes/{node}/qemu/{vm_id}?purge=1&destroy-unreferenced-disks=1")
+        except HTTPException:
+            pass  # Si la VM n'existe plus côté Proxmox, on supprime quand même d'OSIRIS
+
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if machine:
+            _log(session, current_user, "delete_machine", target_mac=clean_mac,
+                 details={"hostname": hostname, "client": client, "destroy_proxmox": destroy_proxmox})
+            session.delete(machine)
+            session.commit()
+
+
+class VmPowerBody(SQLModel):
+    action: str  # "start" | "shutdown" | "stop" | "reboot"
+
+
+@app.post("/machines/{mac}/vm-power")
+async def vm_power(mac: str, body: VmPowerBody, current_user: User = Depends(require_admin)):
+    """Contrôle l'état d'alimentation d'une VM Proxmox (start/shutdown/stop/reboot)."""
+    if body.action not in ("start", "shutdown", "stop", "reboot"):
+        raise HTTPException(status_code=400, detail="Action invalide")
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine or not machine.proxmox_vm_id or not machine.hypervisor_id:
+            raise HTTPException(status_code=404, detail="Machine introuvable ou non liée à Proxmox")
+        h = session.get(Hypervisor, machine.hypervisor_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+        vm_id = machine.proxmox_vm_id
+        node = machine.proxmox_node
+    await _proxmox_post(h,
+        f"/api2/json/nodes/{node}/qemu/{vm_id}/status/{body.action}")
+    return {"ok": True, "action": body.action}
+
+
+@app.get("/machines/{mac}/vm-status")
+async def vm_status(mac: str, _: User = Depends(get_current_user)):
+    """Retourne le statut d'alimentation live d'une VM Proxmox."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine or not machine.proxmox_vm_id or not machine.hypervisor_id:
+            raise HTTPException(status_code=404, detail="Machine introuvable ou non liée à Proxmox")
+        h = session.get(Hypervisor, machine.hypervisor_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+        vm_id = machine.proxmox_vm_id
+        node = machine.proxmox_node
+    data = await _proxmox_get(h,
+        f"/api2/json/nodes/{node}/qemu/{vm_id}/status/current")
+    return {
+        "vm_id":  vm_id,
+        "node":   node,
+        "status": data.get("status", "unknown"),  # "running" | "stopped" | "paused"
+        "cpu":    round(data.get("cpu", 0) * 100, 1),
+        "mem_mb": round(data.get("mem", 0) / 1048576),
+        "uptime": data.get("uptime", 0),
+    }
+
+
+class SnapshotCreateBody(SQLModel):
+    name: str
+    description: str = ""
+
+
+def _get_vm_and_hypervisor(mac: str) -> tuple:
+    """Retourne (h, vm_id, node) pour une machine VM, ou lève 404."""
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+        if not machine or not machine.proxmox_vm_id or not machine.hypervisor_id:
+            raise HTTPException(status_code=404, detail="Machine introuvable ou non liée à Proxmox")
+        h = session.get(Hypervisor, machine.hypervisor_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+        return h, machine.proxmox_vm_id, machine.proxmox_node
+
+
+@app.get("/machines/{mac}/snapshots")
+async def list_snapshots(mac: str, _: User = Depends(require_admin)):
+    clean_mac = validate_mac(mac)
+    h, vm_id, node = _get_vm_and_hypervisor(clean_mac)
+    data = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/snapshot")
+    return data if isinstance(data, list) else []
+
+
+@app.post("/machines/{mac}/snapshots", status_code=201)
+async def create_snapshot(mac: str, body: SnapshotCreateBody, current_user: User = Depends(require_admin)):
+    import re as _re
+    if not body.name or not _re.match(r'^[a-zA-Z0-9_\-]{1,40}$', body.name):
+        raise HTTPException(status_code=400, detail="Nom de snapshot invalide (alphanumérique, tirets, underscores, max 40 chars)")
+    clean_mac = validate_mac(mac)
+    h, vm_id, node = _get_vm_and_hypervisor(clean_mac)
+    upid = await _proxmox_post(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/snapshot", {
+        "snapname": body.name,
+        "description": body.description,
+    })
+    if isinstance(upid, str):
+        await _proxmox_wait_task(h, node, upid)
+    return {"ok": True, "name": body.name}
+
+
+@app.post("/machines/{mac}/snapshots/{name}/rollback")
+async def rollback_snapshot(mac: str, name: str, _: User = Depends(require_admin)):
+    clean_mac = validate_mac(mac)
+    h, vm_id, node = _get_vm_and_hypervisor(clean_mac)
+    upid = await _proxmox_post(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/snapshot/{name}/rollback", {"start": 0})
+    if isinstance(upid, str):
+        await _proxmox_wait_task(h, node, upid)
+    return {"ok": True}
+
+
+@app.delete("/machines/{mac}/snapshots/{name}", status_code=204)
+async def delete_snapshot(mac: str, name: str, _: User = Depends(require_admin)):
+    clean_mac = validate_mac(mac)
+    h, vm_id, node = _get_vm_and_hypervisor(clean_mac)
+    upid = await _proxmox_delete(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/snapshot/{name}")
+    if isinstance(upid, str):
+        await _proxmox_wait_task(h, node, upid)
 
 
 @app.post("/machines/{mac}/hardware")
@@ -1626,11 +1758,24 @@ def get_dashboard():
 
 
 @app.get("/audit-logs", dependencies=[Depends(require_admin)])
-def get_audit_logs(limit: int = 200):
+def get_audit_logs(
+    limit: int = 100,
+    skip: int = 0,
+    action: str = "",
+    user_email: str = "",
+    mac: str = "",
+):
     with Session(engine) as session:
-        logs = session.exec(
-            select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(limit)
-        ).all()
+        q = select(AuditLog).order_by(AuditLog.timestamp.desc())
+        if action:
+            q = q.where(AuditLog.action == action)
+        if user_email:
+            q = q.where(AuditLog.user_email.contains(user_email))
+        if mac:
+            clean = mac.replace(":", "").replace("-", "").lower()
+            q = q.where(AuditLog.target_mac == clean)
+        q = q.offset(skip).limit(limit)
+        logs = session.exec(q).all()
         return [
             {
                 "id": l.id,
@@ -2162,6 +2307,448 @@ async def honeypot(request: Request):
         + ":: Cadeau de consolation : https://www.youtube.com/watch?v=dQw4w9WgXcQ\n"
     )
     return Response(content=body, media_type="text/plain; charset=utf-8", status_code=418)
+
+
+# ── Hyperviseurs (Proxmox) ────────────────────────────────────────────────────
+
+class HypervisorCreate(SQLModel):
+    name: str
+    type: str = "proxmox"
+    url: str
+    token_id: str = ""
+    token_secret: str = ""
+    tls_verify: bool = False
+    snippets_storage: str = ""
+    organization_id: Optional[int] = None
+
+class HypervisorPatch(SQLModel):
+    name: Optional[str] = None
+    url: Optional[str] = None
+    token_id: Optional[str] = None
+    token_secret: Optional[str] = None
+    tls_verify: Optional[bool] = None
+    snippets_storage: Optional[str] = None
+    organization_id: Optional[int] = None
+
+
+def _hypervisor_dict(h: Hypervisor) -> dict:
+    return {
+        "id": h.id,
+        "name": h.name,
+        "type": h.type,
+        "url": h.url,
+        "token_id": h.token_id,
+        "token_secret": "***" if h.token_secret else "",
+        "tls_verify": h.tls_verify,
+        "snippets_storage": h.snippets_storage or "",
+        "organization_id": h.organization_id,
+        "created_at": h.created_at.isoformat(),
+    }
+
+
+async def _proxmox_request(h: Hypervisor, method: str, path: str, data: dict | None = None) -> dict:
+    """Appel HTTP sur l'API Proxmox. Lève HTTPException si échec."""
+    import aiohttp
+    secret = decrypt(h.token_secret or "")
+    if not secret:
+        raise HTTPException(status_code=502, detail="Token Proxmox non déchiffrable - vérifier FERNET_KEY ou reconfigurer le secret")
+    headers = {"Authorization": f"PVEAPIToken={h.token_id}={secret}"}
+    url = h.url.rstrip("/") + path
+    connector = aiohttp.TCPConnector(ssl=False) if not h.tls_verify else None
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            req = getattr(session, method.lower())
+            kwargs: dict = {"headers": headers, "timeout": aiohttp.ClientTimeout(total=30)}
+            if data is not None:
+                kwargs["json"] = data
+            async with req(url, **kwargs) as resp:
+                if resp.status not in (200, 201):
+                    text = await resp.text()
+                    raise HTTPException(status_code=502, detail=f"Proxmox {resp.status}: {text[:300]}")
+                body = await resp.json()
+                return body.get("data", body)
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"Impossible de joindre Proxmox : {e}")
+
+
+async def _proxmox_get(h: Hypervisor, path: str) -> dict:
+    return await _proxmox_request(h, "GET", path)
+
+
+async def _proxmox_post(h: Hypervisor, path: str, data: dict | None = None) -> dict:
+    return await _proxmox_request(h, "POST", path, data)
+
+
+async def _proxmox_put(h: Hypervisor, path: str, data: dict) -> dict:
+    return await _proxmox_request(h, "PUT", path, data)
+
+
+async def _proxmox_delete(h: Hypervisor, path: str) -> dict:
+    return await _proxmox_request(h, "DELETE", path)
+
+
+async def _proxmox_upload_snippet(h: Hypervisor, node: str, storage: str, filename: str, content: str) -> None:
+    """Upload un fichier texte dans le stockage snippets de Proxmox."""
+    import aiohttp
+    secret = decrypt(h.token_secret or "")
+    headers = {"Authorization": f"PVEAPIToken={h.token_id}={secret}"}
+    url = h.url.rstrip("/") + f"/api2/json/nodes/{node}/storage/{storage}/upload"
+    connector = aiohttp.TCPConnector(ssl=False) if not h.tls_verify else None
+    form = aiohttp.FormData()
+    form.add_field("content", "snippets")
+    form.add_field("filename", filename)
+    form.add_field("file", content.encode("utf-8"), filename=filename, content_type="text/yaml")
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.post(url, headers=headers, data=form,
+                                    timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status not in (200, 201):
+                    text = await resp.text()
+                    raise HTTPException(status_code=502, detail=f"Upload snippet Proxmox: {text[:200]}")
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"Impossible d'uploader le snippet : {e}")
+
+
+async def _proxmox_wait_task(h: Hypervisor, node: str, upid: str, max_wait: int = 120) -> None:
+    """Attend la fin d'une tâche Proxmox (polling toutes les 2 secondes)."""
+    import asyncio, urllib.parse
+    upid_encoded = urllib.parse.quote(upid, safe="")
+    for _ in range(max_wait // 2):
+        await asyncio.sleep(2)
+        data = await _proxmox_get(h, f"/api2/json/nodes/{node}/tasks/{upid_encoded}/status")
+        if data.get("status") == "stopped":
+            if data.get("exitstatus") == "OK":
+                return
+            raise HTTPException(status_code=502, detail=f"Tâche Proxmox échouée : {data.get('exitstatus')}")
+    raise HTTPException(status_code=504, detail="Timeout attente tâche Proxmox (clone VM)")
+
+
+@app.get("/hypervisors", dependencies=[Depends(require_admin)])
+def get_hypervisors():
+    with Session(engine) as session:
+        return [_hypervisor_dict(h) for h in session.exec(select(Hypervisor)).all()]
+
+
+@app.post("/hypervisors", status_code=201)
+def create_hypervisor(body: HypervisorCreate, current_user: User = Depends(require_admin)):
+    data = body.model_dump()
+    if data.get("token_secret"):
+        data["token_secret"] = encrypt(data["token_secret"])
+    with Session(engine) as session:
+        h = Hypervisor(**data)
+        session.add(h)
+        _log(session, current_user, "create_hypervisor", details={"name": body.name, "url": body.url})
+        session.commit()
+        session.refresh(h)
+        return _hypervisor_dict(h)
+
+
+@app.patch("/hypervisors/{hv_id}")
+def update_hypervisor(hv_id: int, patch: HypervisorPatch, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        h = session.get(Hypervisor, hv_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+        data = patch.model_dump(exclude_unset=True)
+        if "token_secret" in data and data["token_secret"]:
+            data["token_secret"] = encrypt(data["token_secret"])
+        for field, value in data.items():
+            setattr(h, field, value)
+        session.add(h)
+        _log(session, current_user, "update_hypervisor", details={"id": hv_id})
+        session.commit()
+        session.refresh(h)
+        return _hypervisor_dict(h)
+
+
+@app.delete("/hypervisors/{hv_id}", status_code=204)
+def delete_hypervisor(hv_id: int, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        h = session.get(Hypervisor, hv_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+        _log(session, current_user, "delete_hypervisor", details={"name": h.name})
+        session.delete(h)
+        session.commit()
+
+
+@app.post("/hypervisors/{hv_id}/test")
+async def test_hypervisor(hv_id: int, _: User = Depends(require_admin)):
+    """Teste la connexion Proxmox et retourne la version + les noeuds disponibles."""
+    with Session(engine) as session:
+        h = session.get(Hypervisor, hv_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+    version = await _proxmox_get(h, "/api2/json/version")
+    nodes   = await _proxmox_get(h, "/api2/json/nodes")
+    return {
+        "ok": True,
+        "proxmox_version": version.get("version", "?"),
+        "nodes": [
+            {
+                "node":   n["node"],
+                "status": n.get("status", "unknown"),
+                "cpu":    round(n.get("cpu", 0) * 100, 1),
+                "maxcpu": n.get("maxcpu", 0),
+                "mem_gb": round(n.get("mem", 0) / 1073741824, 1),
+                "maxmem_gb": round(n.get("maxmem", 0) / 1073741824, 1),
+            }
+            for n in nodes
+        ],
+    }
+
+
+@app.get("/hypervisors/{hv_id}/nodes")
+async def get_hypervisor_nodes(hv_id: int, _: User = Depends(require_admin)):
+    """Liste les noeuds Proxmox avec leurs ressources disponibles (appel live)."""
+    with Session(engine) as session:
+        h = session.get(Hypervisor, hv_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+    nodes = await _proxmox_get(h, "/api2/json/nodes")
+    return [
+        {
+            "node":       n["node"],
+            "status":     n.get("status", "unknown"),
+            "cpu":        round(n.get("cpu", 0) * 100, 1),
+            "maxcpu":     n.get("maxcpu", 0),
+            "mem_gb":     round(n.get("mem", 0) / 1073741824, 1),
+            "maxmem_gb":  round(n.get("maxmem", 0) / 1073741824, 1),
+        }
+        for n in nodes
+    ]
+
+
+@app.get("/hypervisors/{hv_id}/nodes/{node}/storages")
+async def get_node_storages(hv_id: int, node: str, _: User = Depends(require_admin)):
+    """Liste les pools de stockage disponibles sur un noeud Proxmox."""
+    with Session(engine) as session:
+        h = session.get(Hypervisor, hv_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+    storages = await _proxmox_get(h, f"/api2/json/nodes/{node}/storage")
+    return [
+        {
+            "storage":   s["storage"],
+            "type":      s.get("type", "?"),
+            "active":    s.get("active", 0) == 1,
+            "avail_gb":  round(s.get("avail", 0) / 1073741824, 1),
+            "total_gb":  round(s.get("total", 0) / 1073741824, 1),
+            "content":   s.get("content", ""),
+        }
+        for s in storages
+        if "images" in s.get("content", "")  # ne garder que ceux qui acceptent des disques VM
+    ]
+
+
+@app.get("/hypervisors/{hv_id}/nodes/{node}/networks")
+async def get_node_networks(hv_id: int, node: str, _: User = Depends(require_admin)):
+    """Liste les bridges réseau disponibles sur un noeud Proxmox."""
+    with Session(engine) as session:
+        h = session.get(Hypervisor, hv_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+    networks = await _proxmox_get(h, f"/api2/json/nodes/{node}/network")
+    return [
+        {
+            "iface":   n["iface"],
+            "type":    n.get("type", "?"),
+            "address": n.get("address", ""),
+            "comments": n.get("comments", ""),
+        }
+        for n in networks
+        if n.get("type") in ("bridge", "bond")
+    ]
+
+
+@app.get("/hypervisors/{hv_id}/nodes/{node}/templates")
+async def get_node_templates(hv_id: int, node: str, _: User = Depends(require_admin)):
+    """Liste les VMs configurées comme templates sur un noeud Proxmox."""
+    with Session(engine) as session:
+        h = session.get(Hypervisor, hv_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+    vms = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu")
+    return [
+        {
+            "vmid":   int(v["vmid"]),
+            "name":   v.get("name", f"VM {v['vmid']}"),
+            "status": v.get("status", "unknown"),
+            "cores":  v.get("cpus", 0),
+            "maxmem_gb": round(v.get("maxmem", 0) / 1073741824, 1),
+        }
+        for v in vms
+        if v.get("template") == 1
+    ]
+
+
+class VmCreateBody(SQLModel):
+    # Identité OSIRIS
+    hostname: str
+    client: str
+    os: str                          # "ubuntu" | "debian"
+    profile_id: Optional[int] = None
+    organization_id: Optional[int] = None
+    ou: str = ""
+    # Ressources VM
+    node: str                        # noeud Proxmox cible
+    storage: str                     # pool de stockage (ex: local-lvm)
+    bridge: str = "vmbr0"            # bridge réseau
+    vcpus: int = 2
+    ram_mb: int = 2048               # RAM en Mo
+    disk_gb: int = 20                # disque en Go
+    # Mode de boot
+    boot_mode: str = "pxe"          # "pxe" | "cloudinit"
+    # PXE : ISO a booter (ex: "local:iso/ubuntu-24.04.iso") — optionnel
+    iso: str = ""
+    # Cloud-init : VMID du template Proxmox a cloner
+    cloud_template_id: Optional[int] = None
+
+
+@app.post("/hypervisors/{hv_id}/create-vm", status_code=201)
+async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends(require_admin)):
+    """
+    Crée une VM sur Proxmox via PXE ou cloud-init (clone de template).
+    - PXE : crée une VM vierge qui boote sur le réseau OSIRIS.
+    - Cloud-init : clone un template existant, injecte le user-data via snippets Proxmox.
+    """
+    import urllib.parse
+
+    if body.boot_mode not in ("pxe", "cloudinit"):
+        raise HTTPException(status_code=400, detail="boot_mode invalide (pxe ou cloudinit)")
+    if body.boot_mode == "cloudinit" and not body.cloud_template_id:
+        raise HTTPException(status_code=400, detail="cloud_template_id requis pour le mode cloud-init")
+
+    with Session(engine) as session:
+        h = session.get(Hypervisor, hv_id)
+        if not h:
+            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
+
+    # VMID libre
+    next_id_data = await _proxmox_get(h, "/api2/json/cluster/nextid")
+    vm_id = int(next_id_data) if isinstance(next_id_data, (str, int)) else int(next_id_data.get("nextid", 100))
+
+    # MAC aléatoire (plage "locally administered")
+    mac_bytes  = [0x02] + list(secrets.token_bytes(5))
+    mac_colons = ":".join(f"{b:02x}" for b in mac_bytes)
+    mac_plain  = "".join(f"{b:02x}" for b in mac_bytes)
+
+    if body.boot_mode == "pxe":
+        # ── Chemin PXE ──────────────────────────────────────────────────────────
+        vm_config: dict = {
+            "vmid": vm_id, "name": body.hostname,
+            "cores": body.vcpus, "sockets": 1, "memory": body.ram_mb,
+            "net0": f"virtio={mac_colons},bridge={body.bridge}",
+            "ostype": "l26", "agent": "enabled=1", "onboot": 1,
+            "boot": "order=net0;scsi0;ide2",
+            "scsihw": "virtio-scsi-pci",
+            "scsi0": f"{body.storage}:{body.disk_gb},format=qcow2",
+        }
+        if body.iso:
+            vm_config["ide2"] = f"{body.iso},media=cdrom"
+        await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu", vm_config)
+        await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
+
+    else:
+        # ── Chemin cloud-init (clone de template) ────────────────────────────────
+        clone_result = await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{body.cloud_template_id}/clone", {
+            "newid":   vm_id,
+            "name":    body.hostname,
+            "full":    1,            # clone complet (indépendant du template)
+            "storage": body.storage,
+        })
+        # Attendre la fin du clone (tâche asynchrone Proxmox)
+        upid = clone_result if isinstance(clone_result, str) else str(clone_result)
+        await _proxmox_wait_task(h, body.node, upid)
+
+        # Résoudre le profil pour le user-data
+        with Session(engine) as session:
+            profile_obj = session.get(Profile, body.profile_id) if body.profile_id else None
+            if not profile_obj:
+                profile_obj = session.exec(select(Profile).where(Profile.os == body.os)).first()
+            if not profile_obj:
+                profile_obj = Profile(name="_fallback", os=body.os)
+
+        profile_tpl = _profile_for_template(profile_obj)
+        linux_apps  = []
+        if profile_obj.app_ids:
+            with Session(engine) as session:
+                ids = [int(i) for i in profile_obj.app_ids.split(",") if i.strip().isdigit()]
+                linux_apps = [a for a in session.exec(select(Application)).all()
+                              if a.id in ids and a.apt_package]
+
+        # Générer le user-data cloud-init
+        osiris_url = os.environ.get("OSIRIS_BASE_URL", "http://osiris:8000")
+        user_data_rendered = jinja_env.get_template("cloud-init-user-data.j2").render(
+            machine={"hostname": body.hostname, "password_hash": "", "mac": mac_plain},
+            profile=profile_tpl,
+            linux_apps=linux_apps,
+            mac=mac_plain,
+            osiris_url=osiris_url,
+        )
+
+        # Configurer le clone : MAC, cloud-init drive, redimensionner le disque
+        cloud_config: dict = {
+            "net0":   f"virtio={mac_colons},bridge={body.bridge}",
+            "cores":  body.vcpus,
+            "memory": body.ram_mb,
+            "agent":  "enabled=1",
+            "onboot": 1,
+            "boot":   "order=scsi0",
+            "ide2":   f"{body.storage}:cloudinit",
+        }
+
+        if h.snippets_storage:
+            snippet_name = f"osiris-{vm_id}-user-data.yaml"
+            await _proxmox_upload_snippet(h, body.node, h.snippets_storage, snippet_name, user_data_rendered)
+            cloud_config["cicustom"] = f"user={h.snippets_storage}:snippets/{snippet_name}"
+        else:
+            # Fallback : paramètres cloud-init basiques sans cicustom
+            cloud_config["ciuser"] = profile_tpl.get("default_user", "osiris")
+            ssh_keys = profile_tpl.get("ssh_authorized_keys", "")
+            if ssh_keys:
+                cloud_config["sshkeys"] = urllib.parse.quote(ssh_keys.strip(), safe="")
+
+        await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config", cloud_config)
+
+        # Redimensionner le disque si nécessaire
+        await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/resize", {
+            "disk": "scsi0", "size": f"{body.disk_gb}G",
+        })
+
+        await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
+
+    # Enregistrer dans OSIRIS
+    with Session(engine) as session:
+        machine = Machine(
+            mac=mac_plain,
+            hostname=body.hostname,
+            client=body.client,
+            os=body.os,
+            ou=body.ou,
+            status="pending",
+            profile_id=body.profile_id,
+            organization_id=body.organization_id,
+            hypervisor_id=hv_id,
+            proxmox_vm_id=vm_id,
+            proxmox_node=body.node,
+        )
+        session.add(machine)
+        _log(session, current_user, "create_vm", details={
+            "hostname": body.hostname, "vm_id": vm_id, "boot_mode": body.boot_mode,
+            "node": body.node, "hypervisor_id": hv_id,
+        })
+        session.commit()
+        session.refresh(machine)
+
+    return {
+        "mac": mac_plain,
+        "vm_id": vm_id,
+        "node": body.node,
+        "hostname": body.hostname,
+        "boot_mode": body.boot_mode,
+        "status": "pending",
+    }
 
 
 @app.websocket("/ws/machines")

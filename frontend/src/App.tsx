@@ -4,389 +4,19 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Toaster, toast } from 'sonner'
 import { QRCodeSVG } from 'qrcode.react'
 import './App.css'
+import type {
+  AuthState, Organization, WimFile, Machine, DriverPack, Profile, Application,
+  DeploymentEvent, Hypervisor, ProxmoxTemplate, ProxmoxNode, OsImage, SnapshotEntry, AuditLogEntry,
+} from './types'
+import { ACTION_META, IMAGE_STATUS, formatDetails, formatMac, EMPTY_FORM, authHeader } from './types'
+import {
+  IcoOsiris, IcoDownload, IcoRefresh, IcoSearch, IcoPower, IcoPencil, IcoX, IcoCheck,
+  IcoChevDown, IcoChevUp, IcoChevRight, IcoGear, IcoTerminal, IcoCamera,
+} from './icons'
+import { LoginPage } from './LoginPage'
+import { IntegrationsTab } from './IntegrationsTab'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
-
-// ── Types ──────────────────────────────────────────────────────────────────────
-
-interface AuthState {
-  token: string;
-  email: string;
-  role: string;
-}
-
-interface Organization {
-  id: number;
-  name: string;
-  slug: string;
-  webhook_url: string;
-}
-
-interface WimFile {
-  name: string;
-  size_mb: number;
-  modified_at: string;
-  is_golden: boolean;
-}
-
-interface Machine {
-  id?: number;
-  mac: string;
-  client: string;
-  os: string;
-  hostname: string;
-  ou: string;
-  status?: string;
-  deployed_at?: string | null;
-  organization_id?: number | null;
-  profile_id?: number | null;
-  dism_progress?: number;
-  hw_serial?: string;
-  hw_model?: string;
-  hw_ram_gb?: number;
-  has_bitlocker?: boolean;
-  has_laps?: boolean;
-  user_name?: string;
-  user_email?: string;
-  notes?: string;
-  smoke_status?: string;
-  smoke_results?: string;
-  laps_rotated_at?: string | null;
-}
-
-interface DriverPack {
-  id: number;
-  vendor: string;
-  model: string;
-  os_code: string;
-  size_mb: number;
-  status: string;
-  local_path: string;
-  download_url: string;
-  catalog_updated: string;
-}
-
-interface Profile {
-  id: number;
-  name: string;
-  os: string;
-  locale: string;
-  keyboard: string;
-  timezone: string;
-  default_user: string;
-  extra_packages: string;
-  join_domain: boolean;
-  domain: string;
-  domain_join_user: string;
-  domain_join_password: string;
-  win_image: string;
-  win_index: number;
-  enable_bitlocker: boolean;
-  bitlocker_pin: boolean;
-  network_drives: string;
-  printers: string;
-  post_script: string;
-  tv_suffix: string;
-  app_ids: string;
-  laps_rotation_days: number;
-  machine_type: string;
-  ssh_authorized_keys: string;
-}
-
-interface Application {
-  id: number;
-  name: string;
-  winget_id: string;
-  apt_package: string;
-  category: string;
-  icon: string;
-}
-
-interface DeploymentEvent {
-  id: number;
-  timestamp: string;
-  status: string;
-  os: string;
-  profile_name: string;
-  hostname: string;
-}
-
-interface OsImage {
-  id: number;
-  name: string;
-  version: string;
-  os: string;
-  status: string;   // queued/downloading/extracting/ready/failed
-  progress: number;
-  nfs_path: string;
-  error: string | null;
-  created_at: string;
-}
-
-interface AuditLogEntry {
-  id: number;
-  timestamp: string;
-  user_email: string;
-  action: string;
-  target_mac: string | null;
-  details: Record<string, unknown> | null;
-}
-
-const ACTION_META: Record<string, { label: string; cls: string }> = {
-  login:            { label: 'Connexion',            cls: 'text-slate-400 border-slate-700' },
-  create_machine:   { label: 'Machine créée',         cls: 'text-emerald-400 border-emerald-800' },
-  update_machine:   { label: 'Machine modifiée',      cls: 'text-blue-400 border-blue-800' },
-  delete_machine:   { label: 'Machine supprimée',     cls: 'text-red-400 border-red-800' },
-  create_user:      { label: 'Utilisateur créé',      cls: 'text-emerald-400 border-emerald-800' },
-  delete_user:      { label: 'Utilisateur supprimé',  cls: 'text-red-400 border-red-800' },
-  create_org:       { label: 'Organisation créée',    cls: 'text-emerald-400 border-emerald-800' },
-  delete_org:       { label: 'Organisation supprimée',cls: 'text-red-400 border-red-800' },
-  create_image:     { label: 'Image téléchargée',     cls: 'text-blue-400 border-blue-800' },
-  delete_image:     { label: 'Image supprimée',       cls: 'text-red-400 border-red-800' },
-}
-
-const IMAGE_STATUS: Record<string, { label: string; bar: string; badge: string }> = {
-  queued:      { label: 'En attente',     bar: 'bg-slate-500',   badge: 'text-slate-400 border-slate-700' },
-  downloading: { label: 'Téléchargement', bar: 'bg-blue-500',    badge: 'text-blue-400 border-blue-800' },
-  extracting:  { label: 'Extraction',     bar: 'bg-amber-500',   badge: 'text-amber-400 border-amber-800' },
-  ready:       { label: 'Prête',          bar: 'bg-emerald-500', badge: 'text-emerald-400 border-emerald-800' },
-  failed:      { label: 'Erreur',         bar: 'bg-red-500',     badge: 'text-red-400 border-red-800' },
-}
-
-function formatDetails(d: Record<string, unknown> | null): string {
-  if (!d) return '—'
-  return Object.entries(d).map(([k, v]) => `${k}: ${v}`).join(' · ')
-}
-
-function formatMac(mac: string): string {
-  return mac.match(/.{1,2}/g)?.join(':').toUpperCase() ?? mac
-}
-
-const EMPTY_FORM: Machine = { mac: '', client: '', os: 'windows', hostname: '', ou: '', organization_id: null, profile_id: null }
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function authHeader(token: string) {
-  return { 'Authorization': `Bearer ${token}` }
-}
-
-// ── SVG Icons ──────────────────────────────────────────────────────────────────
-type IProps = { cls?: string }
-const S = ({ p, cls = 'w-3.5 h-3.5' }: { p: string; cls?: string }) => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
-    strokeLinecap="round" strokeLinejoin="round"
-    className={`inline-block shrink-0 ${cls}`} aria-hidden="true">
-    <path d={p} />
-  </svg>
-)
-const IcoOsiris    = ({ cls = 'w-5 h-5' }: IProps) => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
-    className={`inline-block shrink-0 ${cls}`} aria-hidden="true">
-    <circle cx="8" cy="8" r="6" />
-    <circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none" />
-  </svg>
-)
-const IcoDownload  = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M8 2v8m0 0L5 7m3 3 3-3M2 13h12" />
-const IcoRefresh   = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M14 8A6 6 0 1 1 8 2.5M14 2v4h-4" />
-const IcoSearch    = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10zm7 2-3-3" />
-const IcoPower     = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M8 2v5M5 4A5 5 0 1 0 11 4" />
-const IcoPencil    = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M11 2l3 3-9 9H2v-3z" />
-const IcoX         = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M3 3l10 10M13 3 3 13" />
-const IcoCheck     = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M2 8l4 4 8-8" />
-const IcoChevDown  = ({ cls = 'w-3 h-3' }: IProps) => <S cls={cls} p="M3 5l5 5 5-5" />
-const IcoChevUp    = ({ cls = 'w-3 h-3' }: IProps) => <S cls={cls} p="M3 11l5-5 5 5" />
-const IcoChevRight = ({ cls = 'w-3 h-3' }: IProps) => <S cls={cls} p="M5 3l5 5-5 5" />
-const IcoGear      = ({ cls = 'w-4 h-4' }: IProps) => <S cls={cls} p="M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM1.5 8a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0z" />
-
-// ── Composant Login ────────────────────────────────────────────────────────────
-
-function LoginPage({ onLogin, onTotpRequired }: { onLogin: (auth: AuthState) => void, onTotpRequired: (temp_token: string) => void }) {
-  const [email, setEmail]       = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError]       = useState<string | null>(null)
-  const [loading, setLoading]   = useState(false)
-
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    setError(null)
-    setLoading(true)
-    fetch(`${API_URL}/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          const err = await res.json()
-          throw new Error(err.detail || 'Identifiants incorrects')
-        }
-        return res.json()
-      })
-      .then((data) => {
-        if (data.totp_required) { onTotpRequired(data.temp_token); setLoading(false); return }
-        onLogin({ token: data.access_token, email: data.email, role: data.role })
-      })
-      .catch((err) => { setError(err.message); setLoading(false) })
-  }
-
-  return (
-    <div className="min-h-screen flex items-center justify-center p-4">
-      <div className="w-full max-w-sm">
-        <div className="flex items-center justify-center gap-3 mb-8">
-          <IcoOsiris cls="w-7 h-7 text-blue-500" />
-          <span className="text-2xl font-black tracking-[0.22em] text-white uppercase">Osiris</span>
-        </div>
-
-        <div className="osiris-modal">
-          <div className="osiris-modal-header">
-            <h2 className="text-xs font-bold uppercase tracking-widest text-white">Connexion</h2>
-          </div>
-          <form onSubmit={handleSubmit} className="p-6 space-y-4">
-            {error && (
-              <div className="border-l-2 border-red-700 pl-3 py-1">
-                <p className="text-red-400 text-xs font-mono">{error}</p>
-              </div>
-            )}
-            <div className="space-y-1.5">
-              <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Email</label>
-              <input required type="email" placeholder="admin@osiris.local"
-                value={email} onChange={(e) => setEmail(e.target.value)}
-                className="osiris-input" autoFocus />
-            </div>
-            <div className="space-y-1.5">
-              <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Mot de passe</label>
-              <input required type="password" placeholder="••••••••"
-                value={password} onChange={(e) => setPassword(e.target.value)}
-                className="osiris-input" />
-            </div>
-            <button type="submit" disabled={loading} className="osiris-btn w-full justify-center mt-2">
-              {loading ? 'Connexion…' : 'Se connecter'}
-            </button>
-          </form>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Onglet Integrations ───────────────────────────────────────────────────────
-
-function CopyBlock({ label, code }: { label: string; code: string }) {
-  const [copied, setCopied] = useState(false)
-  const copy = () => {
-    navigator.clipboard.writeText(code)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between">
-        <span className="text-[9px] uppercase tracking-widest text-slate-600">{label}</span>
-        <button onClick={copy} className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors cursor-pointer">
-          {copied ? 'Copie !' : 'Copier'}
-        </button>
-      </div>
-      <pre className="text-[10px] font-mono text-slate-400 bg-slate-950 border border-slate-800/60 rounded p-3 overflow-x-auto whitespace-pre-wrap break-all leading-relaxed">{code}</pre>
-    </div>
-  )
-}
-
-function IntegrationsTab({ apiUrl }: { apiUrl: string }) {
-  const curlExample = `curl -H "Authorization: Bearer osiris_sk_..." \\
-  ${apiUrl}/machines`
-
-  const psExample = `$headers = @{ Authorization = "Bearer osiris_sk_..." }
-$machines = Invoke-RestMethod "${apiUrl}/machines" -Headers $headers
-$machines | Format-Table hostname, client, status`
-
-  const pythonExample = `import requests
-
-r = requests.get(
-    "${apiUrl}/machines",
-    headers={"Authorization": "Bearer osiris_sk_..."}
-)
-for m in r.json():
-    print(m["hostname"], m["status"])`
-
-  const webhookInExample = `POST ${apiUrl}/webhooks/new-machine
-Authorization: Bearer osiris_sk_...
-Content-Type: application/json
-
-{
-  "mac": "aa:bb:cc:dd:ee:ff",
-  "hostname": "PC-DUPONT",
-  "client": "Acme Corp",
-  "os": "windows"
-}`
-
-  const grafanaExample = `# Plugin Grafana : Infinity Datasource
-# URL : ${apiUrl}/machines
-# Methode : GET
-# Header : Authorization = Bearer osiris_sk_...
-# Type : JSON
-# Format : Table`
-
-  const redeployExample = `# Redeclencher un deploiement (RMM, script cron...)
-curl -X POST \\
-  -H "Authorization: Bearer osiris_sk_..." \\
-  ${apiUrl}/machines/aabbccddeeff/redeploy-now`
-
-  const swaggerUrl = apiUrl.replace(/\/$/, '') + '/docs'
-
-  return (
-    <div className="p-6 space-y-5 overflow-y-auto" style={{ maxHeight: '70vh' }}>
-      <div className="border-l-2 border-blue-800 pl-3 py-0.5 space-y-1">
-        <p className="text-xs text-slate-300">Remplacez <code className="text-blue-400 text-[11px]">osiris_sk_...</code> par une cle API generee dans l'onglet "Cles API".</p>
-        <a href={swaggerUrl} target="_blank" rel="noopener noreferrer"
-          className="text-[10px] text-blue-500 hover:text-blue-400 transition-colors">
-          Documentation interactive (Swagger) - {swaggerUrl}
-        </a>
-      </div>
-
-      <div className="space-y-3">
-        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Lecture - lister les machines</p>
-        <CopyBlock label="curl / bash" code={curlExample} />
-        <CopyBlock label="PowerShell (RMM, ConnectWise, N-central)" code={psExample} />
-        <CopyBlock label="Python (script interne, Zabbix, Make)" code={pythonExample} />
-      </div>
-
-      <div className="space-y-3 pt-2 border-t border-slate-800/40">
-        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Creation - pre-enregistrer une machine (GLPI, Jira, ticketing)</p>
-        <p className="text-[10px] text-slate-600">Si la machine existe deja, aucune erreur - retour 200 avec les donnees existantes.</p>
-        <CopyBlock label="Requete HTTP (GLPI webhook, Jira automation)" code={webhookInExample} />
-      </div>
-
-      <div className="space-y-3 pt-2 border-t border-slate-800/40">
-        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Redeploiement - depuis un RMM ou un script</p>
-        <CopyBlock label="curl" code={redeployExample} />
-      </div>
-
-      <div className="space-y-3 pt-2 border-t border-slate-800/40">
-        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Grafana - Infinity Datasource</p>
-        <CopyBlock label="Configuration Infinity Datasource" code={grafanaExample} />
-      </div>
-
-      <div className="pt-2 border-t border-slate-800/40 space-y-1">
-        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Make / Zapier / n8n - webhook sortant</p>
-        <p className="text-[10px] text-slate-500">
-          Dans Administration &gt; Organisations, collez l'URL Make/Zapier/n8n dans le champ "Webhook URL".
-          OSIRIS envoie automatiquement un JSON structure a chaque changement de statut :
-          <code className="block text-[10px] font-mono mt-1 text-slate-400">event, hostname, mac, client, os, hw_model, hw_ram_gb, hw_serial, osiris_url</code>
-        </p>
-      </div>
-
-      <div className="pt-2 border-t border-slate-800/40 space-y-1">
-        <p className="text-[9px] uppercase tracking-widest text-slate-600 font-semibold">Snipe-IT / Lansweeper - export inventaire</p>
-        <p className="text-[10px] text-slate-500">
-          Endpoint CSV : <code className="text-slate-400">{apiUrl}/machines/export</code><br/>
-          Contient : MAC, hostname, client, OS, profil, statut, modele, RAM, numero de serie, utilisateur, notes.
-          A appeler depuis une tache planifiee ou le CMDB directement.
-        </p>
-      </div>
-    </div>
-  )
-}
-
 // ── Composant principal ────────────────────────────────────────────────────────
 
 const AUTH_KEY = 'osiris_auth'
@@ -420,7 +50,16 @@ export default function App() {
   const [submitError, setSubmitError]   = useState<string | null>(null)
 
   // Confirmation suppression
-  const [deletingMac, setDeletingMac]   = useState<string | null>(null)
+  const [deletingMac, setDeletingMac]         = useState<string | null>(null)
+  const [deleteDestroyVm, setDeleteDestroyVm] = useState(false)
+  const [vmPowerState, setVmPowerState]       = useState<Record<string, { status: string; cpu: number; mem_mb: number } | null>>({})
+  const [vmPowerLoading, setVmPowerLoading]   = useState<Record<string, boolean>>({})
+  const [snapshotsMac, setSnapshotsMac]       = useState<string | null>(null)
+  const [snapshots, setSnapshots]             = useState<SnapshotEntry[]>([])
+  const [snapshotsLoading, setSnapshotsLoading] = useState(false)
+  const [snapshotCreating, setSnapshotCreating] = useState(false)
+  const [newSnapName, setNewSnapName]         = useState('')
+  const [newSnapDesc, setNewSnapDesc]         = useState('')
 
   // Redéploiement
   const [redeployingMac, setRedeployingMac] = useState<string | null>(null)
@@ -429,7 +68,7 @@ export default function App() {
   const [oneTimePassword, setOneTimePassword] = useState<{ hostname: string; password: string } | null>(null)
 
   // ── Navigation par onglets ─────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<'machines' | 'admin' | 'drivers' | 'journal' | 'capture' | 'dashboard'>('machines')
+  const [activeTab, setActiveTab] = useState<'machines' | 'admin' | 'drivers' | 'journal' | 'capture' | 'dashboard' | 'infrastructure'>('machines')
 
   // ── Section admin : gestion des orgs et users ──────────────────────────────
   const [captureJobs, setCaptureJobs]   = useState<{mac:string;wim_name:string;status:string;registered_at:string;finished_at?:string}[]>([])
@@ -458,6 +97,22 @@ export default function App() {
   const [images, setImages] = useState<OsImage[]>([])
   const [newImage, setNewImage] = useState({ name: '', version: '', os: 'ubuntu', iso_url: '' })
   const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '' })
+
+  // ── Infrastructure (Hyperviseurs) ──────────────────────────────────────────
+  const [hypervisors, setHypervisors]   = useState<Hypervisor[]>([])
+  const [newHv, setNewHv]               = useState({ name: '', url: '', token_id: '', token_secret: '', tls_verify: false, snippets_storage: '' })
+  const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; proxmox_version?: string; nodes?: ProxmoxNode[]; error?: string } | null>>({})
+  const [hvTesting, setHvTesting]       = useState<Record<number, boolean>>({})
+  // Création de VM
+  const [showVmForm, setShowVmForm]     = useState(false)
+  const [vmHvId, setVmHvId]             = useState<number | ''>('')
+  const [vmNode, setVmNode]             = useState('')
+  const [vmStorages, setVmStorages]     = useState<{storage:string;type:string;avail_gb:number;total_gb:number}[]>([])
+  const [vmNetworks, setVmNetworks]     = useState<{iface:string;type:string;address:string}[]>([])
+  const [vmNodes, setVmNodes]           = useState<ProxmoxNode[]>([])
+  const [vmForm, setVmForm]             = useState({ hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, iso: '', boot_mode: 'pxe', cloud_template_id: '' })
+  const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
+  const [vmCreating, setVmCreating]     = useState(false)
 
   // ── Drivers ────────────────────────────────────────────────────────────────
   const [drivers, setDrivers]           = useState<DriverPack[]>([])
@@ -550,6 +205,9 @@ export default function App() {
   // ── Journal d'activité ──────────────────────────────────────────────────────
   const [auditLogs, setAuditLogs]         = useState<AuditLogEntry[]>([])
   const [auditLoading, setAuditLoading]   = useState(false)
+  const [auditFilterAction, setAuditFilterAction] = useState('')
+  const [auditFilterEmail, setAuditFilterEmail]   = useState('')
+  const [auditFilterMac, setAuditFilterMac]       = useState('')
 
   // Dashboard
   const [dashboard, setDashboard] = useState<any>(null)
@@ -576,36 +234,36 @@ export default function App() {
     setLoading(true)
     const url = orgFilter ? `${API_URL}/machines?org_id=${orgFilter}` : `${API_URL}/machines`
     fetch(url, { headers: authHeader(token) })
-      .then((res) => { if (!res.ok) throw new Error("Erreur API"); return res.json() })
+      .then((res) => { if (res.status === 401) { setAuth(null); throw new Error("Session expirée") } if (!res.ok) throw new Error("Erreur API"); return res.json() })
       .then((data) => { setMachines(data); setLoading(false) })
       .catch((err) => { setError(err.message); setLoading(false) })
   }
 
   const fetchOrgs = (token: string) => {
     fetch(`${API_URL}/organizations`, { headers: authHeader(token) })
-      .then((res) => res.json())
-      .then(setOrgs)
+      .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
+      .then((data) => setOrgs(Array.isArray(data) ? data : []))
       .catch(() => {})
   }
 
   const fetchUsers = (token: string) => {
     fetch(`${API_URL}/users`, { headers: authHeader(token) })
-      .then((res) => res.json())
-      .then(setUsers)
+      .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
+      .then((data) => setUsers(Array.isArray(data) ? data : []))
       .catch(() => {})
   }
 
   const fetchImages = (token: string) => {
     fetch(`${API_URL}/images`, { headers: authHeader(token) })
-      .then((res) => res.json())
-      .then(setImages)
+      .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
+      .then((data) => setImages(Array.isArray(data) ? data : []))
       .catch(() => {})
   }
 
   const fetchProfiles = (token: string) => {
     fetch(`${API_URL}/profiles`, { headers: authHeader(token) })
-      .then((res) => res.json())
-      .then(setProfiles)
+      .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
+      .then((data) => setProfiles(Array.isArray(data) ? data : []))
       .catch(() => {})
   }
 
@@ -780,11 +438,15 @@ export default function App() {
       .catch(() => toast.error('Erreur enregistrement webhook'))
   }
 
-  const fetchAuditLogs = (token: string) => {
+  const fetchAuditLogs = (token: string, action = auditFilterAction, email = auditFilterEmail, mac = auditFilterMac) => {
     setAuditLoading(true)
-    fetch(`${API_URL}/audit-logs`, { headers: authHeader(token) })
-      .then((res) => res.json())
-      .then((data) => { setAuditLogs(data); setAuditLoading(false) })
+    const params = new URLSearchParams({ limit: '100' })
+    if (action)  params.set('action', action)
+    if (email)   params.set('user_email', email)
+    if (mac)     params.set('mac', mac)
+    fetch(`${API_URL}/audit-logs?${params}`, { headers: authHeader(token) })
+      .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
+      .then((data) => { setAuditLogs(Array.isArray(data) ? data : []); setAuditLoading(false) })
       .catch(() => setAuditLoading(false))
   }
 
@@ -804,6 +466,7 @@ export default function App() {
     else if (activeTab === 'journal') fetchAuditLogs(auth.token)
     else if (activeTab === 'admin') { fetchDomainConfigs(auth.token); fetchTotpStatus(auth.token) }
     else if (activeTab === 'capture') fetchCaptures(auth.token)
+    else if (activeTab === 'infrastructure') fetchHypervisors(auth.token)
   }, [activeTab])
 
   // Auto-refresh des images en cours de téléchargement/extraction
@@ -934,10 +597,76 @@ export default function App() {
   // ── Suppression machine ─────────────────────────────────────────────────────
 
   const handleDelete = (mac: string) => {
-    fetch(`${API_URL}/machines/${mac}`, { method: 'DELETE', headers: authHeader(auth.token) })
+    const url = `${API_URL}/machines/${mac}${deleteDestroyVm ? '?destroy_proxmox=true' : ''}`
+    fetch(url, { method: 'DELETE', headers: authHeader(auth.token) })
       .then((res) => { if (!res.ok && res.status !== 204) throw new Error('Erreur suppression') })
-      .then(() => { setDeletingMac(null); fetchAll(auth.token, selectedOrg) })
+      .then(() => { setDeletingMac(null); setDeleteDestroyVm(false); fetchAll(auth.token, selectedOrg) })
       .catch((err) => toast.error(err.message))
+  }
+
+  const handleVmPower = (mac: string, action: string) => {
+    setVmPowerLoading(prev => ({ ...prev, [mac]: true }))
+    fetch(`${API_URL}/machines/${mac}/vm-power`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
+      body: JSON.stringify({ action }),
+    }).then(r => { if (!r.ok) throw new Error(); toast.success(`VM : ${action} envoyé`) })
+      .catch(() => toast.error('Erreur commande VM'))
+      .finally(() => {
+        setVmPowerLoading(prev => ({ ...prev, [mac]: false }))
+        // Refresh statut après 3s
+        setTimeout(() => fetchVmStatus(mac), 3000)
+      })
+  }
+
+  const fetchVmStatus = (mac: string) => {
+    fetch(`${API_URL}/machines/${mac}/vm-status`, { headers: authHeader(auth.token) })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setVmPowerState(prev => ({ ...prev, [mac]: data })) })
+      .catch(() => {})
+  }
+
+  const fetchSnapshots = (mac: string) => {
+    setSnapshotsLoading(true)
+    fetch(`${API_URL}/machines/${mac}/snapshots`, { headers: authHeader(auth.token) })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then((data: SnapshotEntry[]) => setSnapshots(data))
+      .catch(() => toast.error('Impossible de charger les snapshots'))
+      .finally(() => setSnapshotsLoading(false))
+  }
+
+  const handleCreateSnapshot = (mac: string) => {
+    if (!newSnapName.trim()) return
+    setSnapshotCreating(true)
+    fetch(`${API_URL}/machines/${mac}/snapshots`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
+      body: JSON.stringify({ name: newSnapName.trim(), description: newSnapDesc.trim() }),
+    }).then(r => { if (!r.ok) throw new Error(); toast.success('Snapshot créé'); setNewSnapName(''); setNewSnapDesc(''); fetchSnapshots(mac) })
+      .catch(() => toast.error('Erreur création snapshot'))
+      .finally(() => setSnapshotCreating(false))
+  }
+
+  const handleRollback = (mac: string, name: string) => {
+    toast(`Restaurer le snapshot "${name}" ?`, {
+      description: 'La VM sera arrêtée puis restaurée à cet état.',
+      action: {
+        label: 'Restaurer',
+        onClick: () => {
+          fetch(`${API_URL}/machines/${mac}/snapshots/${encodeURIComponent(name)}/rollback`, {
+            method: 'POST', headers: authHeader(auth.token),
+          }).then(r => { if (!r.ok) throw new Error(); toast.success('Rollback en cours…'); setTimeout(() => fetchVmStatus(mac), 5000) })
+            .catch(() => toast.error('Erreur rollback'))
+        },
+      },
+    })
+  }
+
+  const handleDeleteSnapshot = (mac: string, name: string) => {
+    fetch(`${API_URL}/machines/${mac}/snapshots/${encodeURIComponent(name)}`, {
+      method: 'DELETE', headers: authHeader(auth.token),
+    }).then(r => { if (!r.ok) throw new Error(); toast.success('Snapshot supprimé'); fetchSnapshots(mac) })
+      .catch(() => toast.error('Erreur suppression snapshot'))
   }
 
   // ── Redéploiement machine ───────────────────────────────────────────────────
@@ -1102,6 +831,100 @@ export default function App() {
       .finally(() => setDriversLoading(false))
   }
 
+  const fetchHypervisors = (token: string) => {
+    fetch(`${API_URL}/hypervisors`, { headers: authHeader(token) })
+      .then(r => { if (r.status === 401) setAuth(null); return r.ok ? r.json() : [] })
+      .then((data) => setHypervisors(Array.isArray(data) ? data : []))
+      .catch(() => {})
+  }
+
+  const handleCreateHv = (e: React.FormEvent) => {
+    e.preventDefault()
+    fetch(`${API_URL}/hypervisors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
+      body: JSON.stringify({ ...newHv, type: 'proxmox' }),
+    }).then(r => { if (r.ok) { fetchHypervisors(auth.token); setNewHv({ name: '', url: '', token_id: '', token_secret: '', tls_verify: false, snippets_storage: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
+      .catch(() => toast.error('Erreur création hyperviseur'))
+  }
+
+  const handleDeleteHv = (id: number) => {
+    fetch(`${API_URL}/hypervisors/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
+      .then(r => { if (r.ok) { fetchHypervisors(auth.token); toast.success('Hyperviseur supprimé') } })
+  }
+
+  const handleTestHv = (id: number) => {
+    setHvTesting(prev => ({ ...prev, [id]: true }))
+    setHvTestResult(prev => ({ ...prev, [id]: null }))
+    fetch(`${API_URL}/hypervisors/${id}/test`, { method: 'POST', headers: authHeader(auth.token) })
+      .then(async r => {
+        const data = await r.json()
+        if (r.ok) setHvTestResult(prev => ({ ...prev, [id]: { ok: true, ...data } }))
+        else setHvTestResult(prev => ({ ...prev, [id]: { ok: false, error: data.detail ?? 'Erreur inconnue' } }))
+      })
+      .catch(() => setHvTestResult(prev => ({ ...prev, [id]: { ok: false, error: 'Impossible de joindre OSIRIS' } })))
+      .finally(() => setHvTesting(prev => ({ ...prev, [id]: false })))
+  }
+
+  const loadVmResources = (hvId: number, node: string) => {
+    setVmStorages([]); setVmNetworks([])
+    const h = authHeader(auth.token)
+    fetch(`${API_URL}/hypervisors/${hvId}/nodes/${node}/storages`, { headers: h })
+      .then(r => r.json()).then(setVmStorages).catch(() => {})
+    fetch(`${API_URL}/hypervisors/${hvId}/nodes/${node}/networks`, { headers: h })
+      .then(r => r.json()).then(setVmNetworks).catch(() => {})
+  }
+
+  const handleVmHvChange = (hvId: number) => {
+    setVmHvId(hvId); setVmNode(''); setVmStorages([]); setVmNetworks([]); setVmNodes([])
+    setVmForm(f => ({ ...f, storage: '', bridge: '' }))
+    fetch(`${API_URL}/hypervisors/${hvId}/nodes`, { headers: authHeader(auth.token) })
+      .then(r => r.json()).then((nodes: ProxmoxNode[]) => {
+        setVmNodes(nodes)
+        if (nodes.length === 1) {
+          setVmNode(nodes[0].node)
+          loadVmResources(hvId, nodes[0].node)
+        }
+      }).catch(() => {})
+  }
+
+  const handleVmNodeChange = (node: string) => {
+    setVmNode(node)
+    setVmStorages([]); setVmNetworks([]); setVmTemplates([])
+    setVmForm(f => ({ ...f, storage: '', bridge: '', cloud_template_id: '' }))
+    if (vmHvId) {
+      loadVmResources(Number(vmHvId), node)
+      fetch(`${API_URL}/hypervisors/${vmHvId}/nodes/${node}/templates`, { headers: authHeader(auth.token) })
+        .then(r => r.json()).then(setVmTemplates).catch(() => {})
+    }
+  }
+
+  const handleCreateVm = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!vmHvId || !vmNode) return
+    setVmCreating(true)
+    fetch(`${API_URL}/hypervisors/${vmHvId}/create-vm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
+      body: JSON.stringify({
+        ...vmForm,
+        node: vmNode,
+        profile_id: vmForm.profile_id ? Number(vmForm.profile_id) : null,
+        cloud_template_id: vmForm.cloud_template_id ? Number(vmForm.cloud_template_id) : null,
+        organization_id: selectedOrg,
+      }),
+    }).then(async r => {
+      if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Erreur') }
+      return r.json()
+    }).then(data => {
+      toast.success(`VM "${data.hostname}" créée (VMID ${data.vm_id}) - en attente de boot PXE`)
+      setShowVmForm(false)
+      setVmForm({ hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, iso: '', boot_mode: 'pxe', cloud_template_id: '' })
+      fetchAll(auth.token, selectedOrg)
+    }).catch(err => toast.error(err.message))
+      .finally(() => setVmCreating(false))
+  }
+
   const handleSync = (vendor: string, delay: number) => {
     setSyncing(vendor)
     fetch(`${API_URL}/drivers/sync/${vendor}`, { method: 'POST', headers: authHeader(auth.token) })
@@ -1196,12 +1019,13 @@ export default function App() {
         {/* ── Onglets ──────────────────────────────────────────────────── */}
         <div className="max-w-7xl mx-auto px-6 flex items-center gap-0 border-t border-slate-800/40">
           {([
-            { id: 'machines'  as const, label: 'Machines',       adminOnly: false },
-            { id: 'dashboard' as const, label: 'Tableau de bord', adminOnly: false },
-            { id: 'admin'     as const, label: 'Administration', adminOnly: true  },
-            { id: 'drivers'   as const, label: 'Drivers',        adminOnly: true  },
-            { id: 'journal'   as const, label: 'Journal',        adminOnly: true  },
-            { id: 'capture'   as const, label: 'Capture',        adminOnly: true  },
+            { id: 'machines'       as const, label: 'Machines',        adminOnly: false },
+            { id: 'dashboard'      as const, label: 'Tableau de bord',  adminOnly: false },
+            { id: 'admin'          as const, label: 'Administration',   adminOnly: true  },
+            { id: 'infrastructure' as const, label: 'Infrastructure',   adminOnly: true  },
+            { id: 'drivers'        as const, label: 'Drivers',          adminOnly: true  },
+            { id: 'journal'        as const, label: 'Journal',          adminOnly: true  },
+            { id: 'capture'        as const, label: 'Capture',          adminOnly: true  },
           ]).filter(t => !t.adminOnly || auth.role === 'admin').map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)}
               className={`px-5 py-2.5 text-xs font-semibold tracking-wide border-b-2 transition-colors cursor-pointer ${
@@ -1572,14 +1396,218 @@ export default function App() {
           </div>
         )}
 
+        {/* ── Onglet Infrastructure ────────────────────────────────────────── */}
+        {activeTab === 'infrastructure' && auth.role === 'admin' && (
+          <div className="osiris-table-wrap p-5 space-y-6 max-w-4xl">
+            <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Hyperviseurs</h2>
+
+            {/* Liste */}
+            <div className="space-y-3">
+              {hypervisors.length === 0 && <p className="text-slate-700 text-xs font-mono">Aucun hyperviseur enregistré</p>}
+              {hypervisors.map(h => {
+                const result = hvTestResult[h.id]
+                return (
+                  <div key={h.id} className="border border-slate-800/60 rounded p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-white font-medium">{h.name}</span>
+                          <span className="inline-block border border-blue-800/60 text-blue-400 rounded px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider">{h.type}</span>
+                          {!h.tls_verify && <span className="inline-block border border-amber-800/60 text-amber-500 rounded px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider">TLS non verifie</span>}
+                        </div>
+                        <p className="text-[11px] font-mono text-slate-500 mt-0.5 truncate">{h.url}</p>
+                        <p className="text-[10px] font-mono text-slate-600">{h.token_id || '—'}</p>
+                      </div>
+                      <div className="flex gap-1.5 flex-shrink-0">
+                        <button onClick={() => handleTestHv(h.id)} disabled={hvTesting[h.id]}
+                          className="osiris-btn text-xs px-3 disabled:opacity-50">
+                          {hvTesting[h.id] ? '...' : 'Tester'}
+                        </button>
+                        <button onClick={() => handleDeleteHv(h.id)} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
+                      </div>
+                    </div>
+
+                    {/* Résultat du test */}
+                    {result && (
+                      <div className={`rounded p-3 text-xs font-mono space-y-2 ${result.ok ? 'bg-green-950/40 border border-green-800/40' : 'bg-red-950/40 border border-red-800/40'}`}>
+                        {result.ok ? (
+                          <>
+                            <p className="text-green-400">Connexion OK - Proxmox {result.proxmox_version}</p>
+                            {result.nodes && result.nodes.length > 0 && (
+                              <table className="w-full text-[10px]">
+                                <thead>
+                                  <tr className="text-slate-500">
+                                    <th className="text-left pr-4">Noeud</th>
+                                    <th className="text-left pr-4">Statut</th>
+                                    <th className="text-right pr-4">CPU</th>
+                                    <th className="text-right pr-4">vCPU</th>
+                                    <th className="text-right">RAM</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {result.nodes.map(n => (
+                                    <tr key={n.node} className="text-slate-300">
+                                      <td className="pr-4 font-semibold">{n.node}</td>
+                                      <td className={`pr-4 ${n.status === 'online' ? 'text-green-400' : 'text-red-400'}`}>{n.status}</td>
+                                      <td className="text-right pr-4">{n.cpu}%</td>
+                                      <td className="text-right pr-4">{n.maxcpu}</td>
+                                      <td className="text-right">{n.mem_gb} / {n.maxmem_gb} Go</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-red-400">{result.error}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Formulaire d'ajout */}
+            {/* Bouton + formulaire création VM */}
+            {hypervisors.length > 0 && (
+              <div className="pt-3 border-t border-slate-800/50">
+                {!showVmForm ? (
+                  <button onClick={() => setShowVmForm(true)} className="osiris-btn text-xs px-4">+ Créer une VM</button>
+                ) : (
+                  <form onSubmit={handleCreateVm} className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[9px] uppercase tracking-widest text-slate-600">Nouvelle VM</p>
+                      <button type="button" onClick={() => setShowVmForm(false)} className="text-slate-600 hover:text-slate-300 text-xs">Annuler</button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input required placeholder="Hostname" value={vmForm.hostname} onChange={e => setVmForm(f => ({...f, hostname: e.target.value}))} className="osiris-input text-xs font-mono" />
+                      <input required placeholder="Client / label" value={vmForm.client} onChange={e => setVmForm(f => ({...f, client: e.target.value}))} className="osiris-input text-xs" />
+                      <select value={vmForm.os} onChange={e => setVmForm(f => ({...f, os: e.target.value}))} className="osiris-input text-xs">
+                        <option value="ubuntu">Ubuntu</option>
+                        <option value="debian">Debian</option>
+                      </select>
+                      <select value={vmForm.profile_id} onChange={e => setVmForm(f => ({...f, profile_id: e.target.value}))} className="osiris-input text-xs">
+                        <option value="">Profil par défaut</option>
+                        {profiles.filter(p => p.os === vmForm.os).map(p => (
+                          <option key={p.id} value={p.id}>{p.name}{p.machine_type === 'server' ? ' [serveur]' : ''}</option>
+                        ))}
+                      </select>
+                      <input placeholder="OU (optionnel)" value={vmForm.ou} onChange={e => setVmForm(f => ({...f, ou: e.target.value}))} className="osiris-input text-xs font-mono col-span-2" />
+                    </div>
+
+                    {/* Sélection hyperviseur + noeud */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <select required value={vmHvId} onChange={e => handleVmHvChange(Number(e.target.value))} className="osiris-input text-xs">
+                        <option value="">Hyperviseur...</option>
+                        {hypervisors.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
+                      </select>
+                      <select required value={vmNode} onChange={e => handleVmNodeChange(e.target.value)} className="osiris-input text-xs" disabled={!vmHvId || vmNodes.length === 0}>
+                        <option value="">Noeud...</option>
+                        {vmNodes.map(n => (
+                          <option key={n.node} value={n.node}>{n.node} — {n.cpu}% CPU · {n.mem_gb}/{n.maxmem_gb} Go RAM</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Mode de boot */}
+                    <div className="flex gap-2">
+                      {(['pxe', 'cloudinit'] as const).map(mode => (
+                        <button key={mode} type="button"
+                          onClick={() => setVmForm(f => ({...f, boot_mode: mode, cloud_template_id: '', iso: ''}))}
+                          className={`flex-1 py-1.5 rounded text-xs border transition-colors ${vmForm.boot_mode === mode ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500'}`}>
+                          {mode === 'pxe' ? 'PXE (ISO / installation)' : 'Cloud-init (clone de template)'}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Ressources */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <select required value={vmForm.storage} onChange={e => setVmForm(f => ({...f, storage: e.target.value}))} className="osiris-input text-xs" disabled={vmStorages.length === 0}>
+                        <option value="">Stockage...</option>
+                        {vmStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type}) — {s.avail_gb} Go libres</option>)}
+                      </select>
+                      <select required value={vmForm.bridge} onChange={e => setVmForm(f => ({...f, bridge: e.target.value}))} className="osiris-input text-xs" disabled={vmNetworks.length === 0}>
+                        <option value="">Bridge réseau...</option>
+                        {vmNetworks.map(n => <option key={n.iface} value={n.iface}>{n.iface}{n.address ? ` (${n.address})` : ''}</option>)}
+                      </select>
+                      <div className="flex items-center gap-1">
+                        <label className="text-[10px] text-slate-500 shrink-0">vCPU</label>
+                        <input type="number" min={1} max={64} value={vmForm.vcpus} onChange={e => setVmForm(f => ({...f, vcpus: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <label className="text-[10px] text-slate-500 shrink-0">RAM Mo</label>
+                        <input type="number" min={512} step={512} value={vmForm.ram_mb} onChange={e => setVmForm(f => ({...f, ram_mb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+                      </div>
+                      <div className="flex items-center gap-1 col-span-2">
+                        <label className="text-[10px] text-slate-500 shrink-0">Disque Go</label>
+                        <input type="number" min={8} value={vmForm.disk_gb} onChange={e => setVmForm(f => ({...f, disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+                      </div>
+
+                      {vmForm.boot_mode === 'pxe' ? (
+                        <input placeholder="ISO Proxmox (ex: local:iso/ubuntu-24.04.iso) — optionnel" value={vmForm.iso} onChange={e => setVmForm(f => ({...f, iso: e.target.value}))} className="osiris-input text-xs font-mono col-span-2" />
+                      ) : (
+                        <select required value={vmForm.cloud_template_id} onChange={e => setVmForm(f => ({...f, cloud_template_id: e.target.value}))} className="osiris-input text-xs col-span-2" disabled={vmTemplates.length === 0}>
+                          <option value="">{vmTemplates.length === 0 ? (vmNode ? 'Aucun template trouvé sur ce noeud' : 'Choisir un noeud d\'abord') : 'Template Proxmox...'}</option>
+                          {vmTemplates.map(t => <option key={t.vmid} value={t.vmid}>{t.name} (VMID {t.vmid}) — {t.cores} vCPU · {t.maxmem_gb} Go</option>)}
+                        </select>
+                      )}
+                    </div>
+
+                    <div className="text-[10px] text-slate-600 bg-slate-900/60 rounded p-2 font-mono">
+                      {vmForm.boot_mode === 'pxe'
+                        ? 'Boot order : PXE → disque → ISO. La VM s\'enregistrera dans OSIRIS au premier boot réseau.'
+                        : 'Clone complet du template + cloud-init injecté via snippets Proxmox. Démarrage ~30s, pas de PXE requis.'}
+                    </div>
+                    <button type="submit" disabled={vmCreating || !vmNode || !vmForm.storage || !vmForm.bridge} className="osiris-btn text-xs px-4 w-full disabled:opacity-50">
+                      {vmCreating ? 'Création en cours...' : 'Créer et démarrer la VM'}
+                    </button>
+                  </form>
+                )}
+              </div>
+            )}
+
+            <form onSubmit={handleCreateHv} className="space-y-3 pt-3 border-t border-slate-800/50">
+              <p className="text-[9px] uppercase tracking-widest text-slate-600">Ajouter un hyperviseur</p>
+              <div className="grid grid-cols-2 gap-2">
+                <input required placeholder="Nom  (ex : Proxmox Lab)" value={newHv.name} onChange={e => setNewHv({ ...newHv, name: e.target.value })} className="osiris-input text-xs" />
+                <input required placeholder="URL  (https://proxmox.local:8006)" value={newHv.url} onChange={e => setNewHv({ ...newHv, url: e.target.value })} className="osiris-input text-xs font-mono" />
+                <input placeholder="Token ID  (osiris@pve!osiris-token)" value={newHv.token_id} onChange={e => setNewHv({ ...newHv, token_id: e.target.value })} className="osiris-input text-xs font-mono" />
+                <input type="password" placeholder="Token secret" value={newHv.token_secret} onChange={e => setNewHv({ ...newHv, token_secret: e.target.value })} className="osiris-input text-xs font-mono" />
+                <input placeholder="Stockage snippets cloud-init (ex: local) — optionnel" value={newHv.snippets_storage} onChange={e => setNewHv({ ...newHv, snippets_storage: e.target.value })} className="osiris-input text-xs font-mono col-span-2" title="Nom du stockage Proxmox avec content-type snippets, requis pour cloud-init complet" />
+              </div>
+              <div className="flex items-center justify-between">
+                <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                  <input type="checkbox" checked={newHv.tls_verify} onChange={e => setNewHv({ ...newHv, tls_verify: e.target.checked })} className="accent-blue-500" />
+                  Verifier le certificat TLS (decocher si cert self-signe)
+                </label>
+                <button type="submit" className="osiris-btn text-xs px-4">+ Ajouter</button>
+              </div>
+            </form>
+          </div>
+        )}
+
         {/* ── Onglet Journal ───────────────────────────────────────────────── */}
         {activeTab === 'journal' && auth.role === 'admin' && (
           <div className="osiris-table-wrap overflow-x-auto">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800/80">
-              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Journal d'activité</h2>
-              <button onClick={() => fetchAuditLogs(auth.token)}
+            <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-slate-800/80">
+              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500 mr-auto">Journal d'activité</h2>
+              <select value={auditFilterAction} onChange={e => setAuditFilterAction(e.target.value)}
+                className="osiris-input text-[10px] py-1 w-40">
+                <option value="">Toutes les actions</option>
+                {Object.entries(ACTION_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+              <input value={auditFilterEmail} onChange={e => setAuditFilterEmail(e.target.value)}
+                placeholder="Utilisateur…" className="osiris-input text-[10px] py-1 w-36" />
+              <input value={auditFilterMac} onChange={e => setAuditFilterMac(e.target.value)}
+                placeholder="MAC…" className="osiris-input text-[10px] py-1 w-32 font-mono" />
+              <button onClick={() => fetchAuditLogs(auth.token, auditFilterAction, auditFilterEmail, auditFilterMac)}
+                className="osiris-btn text-[10px]">
+                {auditLoading ? '…' : <><IcoSearch cls="w-3 h-3 inline" /> Filtrer</>}
+              </button>
+              <button onClick={() => { setAuditFilterAction(''); setAuditFilterEmail(''); setAuditFilterMac(''); fetchAuditLogs(auth.token, '', '', '') }}
                 className="osiris-btn-ghost text-[10px]">
-                {auditLoading ? 'Chargement…' : <><IcoRefresh cls="w-3 h-3 inline" /> Rafraîchir</>}
+                <IcoRefresh cls="w-3 h-3 inline" /> Reset
               </button>
             </div>
             {auditLoading ? (
@@ -2075,6 +2103,9 @@ export default function App() {
                       <span className={`osiris-os-badge osiris-os-badge--${machine.os}`}>
                         {machine.os === 'windows' ? 'Windows' : machine.os === 'ubuntu' ? 'Ubuntu' : machine.os === 'debian' ? 'Debian' : machine.os}
                       </span>
+                      {machine.proxmox_vm_id ? (
+                        <span className="ml-1 inline-block border border-purple-700/60 text-purple-400 rounded px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider" title={`VMID ${machine.proxmox_vm_id} · ${machine.proxmox_node}`}>VM</span>
+                      ) : null}
                     </td>
                     <td className="px-4 py-3">
                       <span className={`osiris-status-badge osiris-status--${machine.status ?? 'pending'}`}>
@@ -2157,8 +2188,39 @@ export default function App() {
                             ><IcoRefresh cls="w-3 h-3 inline" /><IcoPower cls="w-3 h-3 inline" /></button>
                           )}
                           <button onClick={() => openEdit(machine)} className="osiris-action-btn" title="Modifier"><IcoPencil /></button>
+                          {machine.proxmox_vm_id ? (() => {
+                            const ps = vmPowerState[machine.mac]
+                            const loading = vmPowerLoading[machine.mac]
+                            const hv = hypervisors.find(h => h.id === machine.hypervisor_id)
+                            const consoleUrl = hv ? `${hv.url}/?console=kvm&novnc=1&vmid=${machine.proxmox_vm_id}&node=${machine.proxmox_node}` : ''
+                            return (
+                              <>
+                                <button onClick={() => fetchVmStatus(machine.mac)} className="osiris-action-btn" title={ps ? `VM ${ps.status} · CPU ${ps.cpu}% · RAM ${ps.mem_mb} Mo` : 'Voir statut VM'}>
+                                  <span className={`inline-block w-2 h-2 rounded-full ${!ps ? 'bg-slate-600' : ps.status === 'running' ? 'bg-green-500' : 'bg-red-500'}`} />
+                                </button>
+                                {ps?.status === 'running' ? (<>
+                                  <button onClick={() => handleVmPower(machine.mac, 'shutdown')} disabled={loading} title="Arrêt propre" className="osiris-action-btn text-[10px]">⏻</button>
+                                  <button onClick={() => handleVmPower(machine.mac, 'reboot')} disabled={loading} title="Redémarrer" className="osiris-action-btn text-[10px]">↺</button>
+                                </>) : ps?.status === 'stopped' ? (
+                                  <button onClick={() => handleVmPower(machine.mac, 'start')} disabled={loading} title="Démarrer la VM" className="osiris-action-btn text-[10px]">▶</button>
+                                ) : null}
+                                {consoleUrl && (
+                                  <a href={consoleUrl} target="_blank" rel="noreferrer" className="osiris-action-btn" title="Console noVNC (ouvre Proxmox)">
+                                    <IcoTerminal />
+                                  </a>
+                                )}
+                                <button onClick={() => {
+                                  const next = snapshotsMac === machine.mac ? null : machine.mac
+                                  setSnapshotsMac(next)
+                                  if (next) fetchSnapshots(next)
+                                }} className="osiris-action-btn" title="Snapshots">
+                                  <IcoCamera />
+                                </button>
+                              </>
+                            )
+                          })() : null}
                           {auth.role === 'admin' && (
-                            <button onClick={() => setDeletingMac(machine.mac)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
+                            <button onClick={() => { setDeletingMac(machine.mac); setDeleteDestroyVm(false) }} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                           )}
                         </div>
                       </div>
@@ -2332,6 +2394,39 @@ export default function App() {
                               onClick={() => saveNotes(machine.mac, editingNotes[machine.mac] ?? machine.notes ?? '')}
                               className="osiris-btn text-[10px] px-3 self-start"
                             >Sauvegarder</button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  {snapshotsMac === machine.mac && (
+                    <tr className="bg-[#060912]">
+                      <td colSpan={7} className="px-5 py-4">
+                        <div className="space-y-3">
+                          <p className="text-[9px] uppercase tracking-widest text-slate-500">Snapshots Proxmox - VMID {machine.proxmox_vm_id}</p>
+                          {snapshotsLoading ? (
+                            <p className="text-[10px] font-mono text-slate-600">Chargement…</p>
+                          ) : snapshots.filter(s => s.name !== 'current').length === 0 ? (
+                            <p className="text-[10px] font-mono text-slate-700">Aucun snapshot</p>
+                          ) : (
+                            <div className="space-y-1">
+                              {snapshots.filter(s => s.name !== 'current').map(snap => (
+                                <div key={snap.name} className="flex items-center gap-3 text-[10px] font-mono py-1 border-b border-slate-800/40 last:border-0">
+                                  <span className="text-slate-400 font-semibold w-32 shrink-0 truncate" title={snap.name}>{snap.name}</span>
+                                  <span className="text-slate-600 flex-1 truncate">{snap.description || '—'}</span>
+                                  <span className="text-slate-700 shrink-0">{snap.snaptime ? new Date(snap.snaptime * 1000).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                                  <button onClick={() => handleRollback(machine.mac, snap.name)} className="osiris-btn text-[9px] px-2 py-0.5 shrink-0">Restaurer</button>
+                                  <button onClick={() => handleDeleteSnapshot(machine.mac, snap.name)} className="osiris-action-btn osiris-action-btn--danger shrink-0"><IcoX cls="w-3 h-3" /></button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 pt-1">
+                            <input value={newSnapName} onChange={e => setNewSnapName(e.target.value)} placeholder="Nom du snapshot" className="osiris-input text-[10px] w-36 shrink-0" maxLength={40} />
+                            <input value={newSnapDesc} onChange={e => setNewSnapDesc(e.target.value)} placeholder="Description (optionnel)" className="osiris-input text-[10px] flex-1" />
+                            <button onClick={() => handleCreateSnapshot(machine.mac)} disabled={snapshotCreating || !newSnapName.trim()} className="osiris-btn text-[10px] px-3 shrink-0">
+                              {snapshotCreating ? '…' : 'Créer'}
+                            </button>
                           </div>
                         </div>
                       </td>
@@ -2682,9 +2777,15 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                 La machine <span className="font-mono text-white">{machines.find(m => m.mac === deletingMac)?.hostname ?? deletingMac}</span> sera définitivement supprimée.
               </p>
               <p className="text-xs text-slate-600">Cette action est <span className="text-red-400 font-semibold">irréversible</span>.</p>
+              {machines.find(m => m.mac === deletingMac)?.proxmox_vm_id ? (
+                <label className="flex items-center gap-2 text-xs text-red-400 cursor-pointer">
+                  <input type="checkbox" checked={deleteDestroyVm} onChange={e => setDeleteDestroyVm(e.target.checked)} className="accent-red-500" />
+                  Supprimer aussi la VM dans Proxmox (VMID {machines.find(m => m.mac === deletingMac)?.proxmox_vm_id})
+                </label>
+              ) : null}
               <div className="flex gap-3 justify-end">
-                <button onClick={() => setDeletingMac(null)} className="osiris-btn-ghost">Annuler</button>
-                <button onClick={() => handleDelete(deletingMac)} className="osiris-btn osiris-btn--danger">Supprimer</button>
+                <button onClick={() => { setDeletingMac(null); setDeleteDestroyVm(false) }} className="osiris-btn-ghost">Annuler</button>
+                <button onClick={() => handleDelete(deletingMac!)} className="osiris-btn osiris-btn--danger">Supprimer</button>
               </div>
             </div>
           </div>

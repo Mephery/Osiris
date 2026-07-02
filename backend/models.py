@@ -85,6 +85,19 @@ class Profile(SQLModel, table=True):
     ssh_authorized_keys: str = Field(default="")           # clés SSH (une par ligne)
 
 
+class Hypervisor(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    organization_id: Optional[int] = Field(default=None, foreign_key="organization.id")
+    name: str                              # "Proxmox Production"
+    type: str = Field(default="proxmox")   # extensible : "proxmox" pour l'instant
+    url: str                               # "https://proxmox.local:8006"
+    token_id: str = Field(default="")     # "osiris@pve!osiris-token"
+    token_secret: str = Field(default="") # chiffré Fernet
+    tls_verify: bool = Field(default=False)       # False = ignorer cert self-signé (courant en lab)
+    snippets_storage: str = Field(default="")    # nom du stockage Proxmox avec content-type "snippets" (ex: "local")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class Application(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str                              # "Google Chrome"
@@ -124,6 +137,10 @@ class Machine(SQLModel, table=True):
     # Smoke tests post-deploiement
     smoke_status: str = Field(default="")   # "" | "ok" | "warnings"
     smoke_results: str = Field(default="")  # JSON : [{"name": "...", "ok": true, "detail": "..."}]
+    # VM (Proxmox) - vide pour les machines physiques
+    hypervisor_id: Optional[int] = Field(default=None, foreign_key="hypervisor.id")
+    proxmox_vm_id: int = Field(default=0)   # ID de la VM dans Proxmox (ex: 101), 0 = physique
+    proxmox_node: str = Field(default="")   # noeud Proxmox sur lequel tourne la VM
 
 
 class OsImage(SQLModel, table=True):

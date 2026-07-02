@@ -1,0 +1,41 @@
+#cloud-config
+# OSIRIS - Cloud-init user-data genere automatiquement pour {{ machine.hostname }}
+hostname: {{ machine.hostname }}
+manage_etc_hosts: true
+
+users:
+  - name: {{ profile.default_user }}
+    groups: [sudo, adm]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    passwd: '{{ machine.password_hash }}'
+{% if profile.ssh_authorized_keys %}
+    ssh_authorized_keys:
+{% for key in profile.ssh_authorized_keys.strip().splitlines() %}
+{% if key.strip() %}
+      - "{{ key.strip() }}"
+{% endif %}
+{% endfor %}
+{% endif %}
+
+chpasswd:
+  expire: false
+
+package_update: true
+package_upgrade: false
+
+{% if linux_apps %}
+packages:
+{% for app in linux_apps %}
+  - {{ app.apt_package }}
+{% endfor %}
+{% endif %}
+
+runcmd:
+  - curl -sf -X POST '{{ osiris_url }}/machines/{{ mac }}/status?status=deploying' || true
+  - curl -sf -o /usr/local/bin/osiris-firstboot.sh '{{ osiris_url }}/firstboot-ubuntu/{{ mac }}'
+  - chmod +x /usr/local/bin/osiris-firstboot.sh
+  - /usr/local/bin/osiris-firstboot.sh
+
+final_message: "OSIRIS cloud-init termine pour {{ machine.hostname }}"
