@@ -5,16 +5,20 @@ import { Toaster, toast } from 'sonner'
 import { QRCodeSVG } from 'qrcode.react'
 import './App.css'
 import type {
-  AuthState, Organization, WimFile, Machine, DriverPack, Profile, Application,
-  DeploymentEvent, Hypervisor, ProxmoxTemplate, ProxmoxNode, OsImage, SnapshotEntry, AuditLogEntry,
+  AuthState, Organization, WimFile, Machine, Profile, Application,
+  DeploymentEvent, Hypervisor, ProxmoxTemplate, ProxmoxNode, OsImage, SnapshotEntry,
 } from './types'
-import { ACTION_META, IMAGE_STATUS, formatDetails, formatMac, EMPTY_FORM, authHeader } from './types'
+import { IMAGE_STATUS, EMPTY_FORM, authHeader } from './types'
 import {
-  IcoOsiris, IcoDownload, IcoRefresh, IcoSearch, IcoPower, IcoPencil, IcoX, IcoCheck,
-  IcoChevDown, IcoChevUp, IcoChevRight, IcoGear, IcoTerminal, IcoCamera,
+  IcoOsiris, IcoRefresh, IcoSearch, IcoPower, IcoPencil, IcoX,
+  IcoChevDown, IcoChevUp, IcoGear, IcoTerminal, IcoCamera,
 } from './icons'
 import { LoginPage } from './LoginPage'
 import { IntegrationsTab } from './IntegrationsTab'
+import { DashboardTab } from './DashboardTab'
+import { JournalTab } from './JournalTab'
+import { CaptureTab } from './CaptureTab'
+import { DriversTab } from './DriversTab'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 // ── Composant principal ────────────────────────────────────────────────────────
@@ -71,10 +75,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'machines' | 'admin' | 'drivers' | 'journal' | 'capture' | 'dashboard' | 'infrastructure'>('machines')
 
   // ── Section admin : gestion des orgs et users ──────────────────────────────
-  const [captureJobs, setCaptureJobs]   = useState<{mac:string;wim_name:string;status:string;registered_at:string;finished_at?:string}[]>([])
-  const [captureMac, setCaptureMac]     = useState('')
-  const [captureWim, setCaptureWim]     = useState('')
-  const [captureStep, setCaptureStep]   = useState(1)
+  // Signal de rafraîchissement pour l'onglet Capture (incrémenté quand une capture se termine, cf. WebSocket)
+  const [captureRefresh, setCaptureRefresh] = useState(0)
   const [wims, setWims]                 = useState<WimFile[]>([])
   const [showWimPicker, setShowWimPicker] = useState<'new' | 'edit' | null>(null)
   const [csvImporting, setCsvImporting] = useState(false)
@@ -113,14 +115,6 @@ export default function App() {
   const [vmForm, setVmForm]             = useState({ hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, iso: '', boot_mode: 'pxe', cloud_template_id: '' })
   const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
   const [vmCreating, setVmCreating]     = useState(false)
-
-  // ── Drivers ────────────────────────────────────────────────────────────────
-  const [drivers, setDrivers]           = useState<DriverPack[]>([])
-  const [driversLoading, setDriversLoading] = useState(false)
-  const [syncing, setSyncing]           = useState<string | null>(null)
-  const [downloadingPack, setDownloadingPack] = useState<number | null>(null)
-  const [driverSearch, setDriverSearch]       = useState('')
-  const [expandedVendors, setExpandedVendors] = useState<Set<string>>(new Set())
 
   // ── Sélection en lot ──────────────────────────────────────────────────────
   const [selectedMacs, setSelectedMacs] = useState<Set<string>>(new Set())
@@ -202,17 +196,6 @@ export default function App() {
   const [pwSuccess, setPwSuccess] = useState(false)
   const [pwLoading, setPwLoading] = useState(false)
 
-  // ── Journal d'activité ──────────────────────────────────────────────────────
-  const [auditLogs, setAuditLogs]         = useState<AuditLogEntry[]>([])
-  const [auditLoading, setAuditLoading]   = useState(false)
-  const [auditFilterAction, setAuditFilterAction] = useState('')
-  const [auditFilterEmail, setAuditFilterEmail]   = useState('')
-  const [auditFilterMac, setAuditFilterMac]       = useState('')
-
-  // Dashboard
-  const [dashboard, setDashboard] = useState<any>(null)
-  const [dashboardLoading, setDashboardLoading] = useState(false)
-
   // Domaines AD par organisation
   const [domainConfigs, setDomainConfigs] = useState<any[]>([])
   const [newDomainConfig, setNewDomainConfig] = useState({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '' })
@@ -274,37 +257,6 @@ export default function App() {
       .catch(() => {})
   }
 
-  const fetchCaptures = (token: string) => {
-    fetch(`${API_URL}/capture`, { headers: authHeader(token) })
-      .then(r => r.json()).then(d => setCaptureJobs(d.jobs ?? []))
-      .catch(() => {})
-  }
-
-  const handleRegisterCapture = () => {
-    if (!captureMac || !captureWim) return
-    fetch(`${API_URL}/capture/register?mac=${encodeURIComponent(captureMac)}&wim_name=${encodeURIComponent(captureWim)}`,
-      { method: 'POST', headers: authHeader(auth!.token) })
-      .then(r => { if (!r.ok) throw new Error('Erreur'); return r.json() })
-      .then(() => {
-        fetchCaptures(auth!.token)
-        setCaptureStep(4)
-        toast.success('Machine enregistrée en mode capture — démarrez-la en PXE !')
-      })
-      .catch(() => toast.error('Erreur lors de l\'enregistrement'))
-  }
-
-  const handleDeleteCapture = (mac: string) => {
-    fetch(`${API_URL}/capture/${mac}`, { method: 'DELETE', headers: authHeader(auth!.token) })
-      .then(() => { fetchCaptures(auth!.token); toast.success('Job de capture supprimé') })
-  }
-
-  const fetchDashboard = (token: string) => {
-    setDashboardLoading(true)
-    fetch(`${API_URL}/dashboard`, { headers: authHeader(token) })
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(data => { setDashboard(data); setDashboardLoading(false) })
-      .catch(() => { setDashboard({}); setDashboardLoading(false) })
-  }
 
   const fetchDomainConfigs = (token: string, orgId?: number) => {
     const url = orgId ? `${API_URL}/domain-configs?org_id=${orgId}` : `${API_URL}/domain-configs`
@@ -438,17 +390,6 @@ export default function App() {
       .catch(() => toast.error('Erreur enregistrement webhook'))
   }
 
-  const fetchAuditLogs = (token: string, action = auditFilterAction, email = auditFilterEmail, mac = auditFilterMac) => {
-    setAuditLoading(true)
-    const params = new URLSearchParams({ limit: '100' })
-    if (action)  params.set('action', action)
-    if (email)   params.set('user_email', email)
-    if (mac)     params.set('mac', mac)
-    fetch(`${API_URL}/audit-logs?${params}`, { headers: authHeader(token) })
-      .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
-      .then((data) => { setAuditLogs(Array.isArray(data) ? data : []); setAuditLoading(false) })
-      .catch(() => setAuditLoading(false))
-  }
 
   useEffect(() => {
     if (!auth) return
@@ -460,12 +401,8 @@ export default function App() {
 
   useEffect(() => {
     if (!auth) return
-    if (activeTab === 'dashboard') { fetchDashboard(auth.token); return }
     if (auth.role !== 'admin') return
-    if (activeTab === 'drivers') fetchDrivers(auth.token)
-    else if (activeTab === 'journal') fetchAuditLogs(auth.token)
-    else if (activeTab === 'admin') { fetchDomainConfigs(auth.token); fetchTotpStatus(auth.token) }
-    else if (activeTab === 'capture') fetchCaptures(auth.token)
+    if (activeTab === 'admin') { fetchDomainConfigs(auth.token); fetchTotpStatus(auth.token) }
     else if (activeTab === 'infrastructure') fetchHypervisors(auth.token)
   }, [activeTab])
 
@@ -507,7 +444,7 @@ export default function App() {
           } else {
             toast.error(`Échec de la capture — ${msg.mac}`)
           }
-          if (auth) fetchCaptures(auth.token)
+          setCaptureRefresh(n => n + 1)
         } else {
           const { status, deployed_at } = msg
           if (status === 'pending') setDeployLogs((prev) => { const n = { ...prev }; delete n[mac]; return n })
@@ -819,18 +756,6 @@ export default function App() {
     setSelectedMacs(new Set())
   }
 
-  // ── Drivers ────────────────────────────────────────────────────────────────
-
-  const fetchDrivers = (token: string, vendor = 'all') => {
-    setDriversLoading(true)
-    const qs = vendor !== 'all' ? `?vendor=${vendor}` : ''
-    fetch(`${API_URL}/drivers${qs}`, { headers: authHeader(token) })
-      .then((r) => r.json())
-      .then((d) => setDrivers(Array.isArray(d) ? d : []))
-      .catch(() => {})
-      .finally(() => setDriversLoading(false))
-  }
-
   const fetchHypervisors = (token: string) => {
     fetch(`${API_URL}/hypervisors`, { headers: authHeader(token) })
       .then(r => { if (r.status === 401) setAuth(null); return r.ok ? r.json() : [] })
@@ -923,32 +848,6 @@ export default function App() {
       fetchAll(auth.token, selectedOrg)
     }).catch(err => toast.error(err.message))
       .finally(() => setVmCreating(false))
-  }
-
-  const handleSync = (vendor: string, delay: number) => {
-    setSyncing(vendor)
-    fetch(`${API_URL}/drivers/sync/${vendor}`, { method: 'POST', headers: authHeader(auth.token) })
-      .then(async (res) => {
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: res.status }))
-          toast.error(`Erreur sync ${vendor} : ${err.detail}`)
-          setSyncing(null)
-          return
-        }
-        setTimeout(() => { fetchDrivers(auth.token); setSyncing(null) }, delay)
-      })
-      .catch((err) => { toast.error(`Erreur réseau : ${err.message}`); setSyncing(null) })
-  }
-
-  const toggleVendor = (vendor: string) =>
-    setExpandedVendors(prev => { const s = new Set(prev); s.has(vendor) ? s.delete(vendor) : s.add(vendor); return s })
-
-  const handleDownloadPack = (id: number) => {
-    setDownloadingPack(id)
-    fetch(`${API_URL}/drivers/${id}/download`, { method: 'POST', headers: authHeader(auth.token) })
-      .then(() => {})
-      .catch(() => {})
-      .finally(() => setDownloadingPack(null))
   }
 
   const handlePasswordChange = (e: React.FormEvent<HTMLFormElement>) => {
@@ -1316,84 +1215,7 @@ export default function App() {
 
         {/* ── Onglet Tableau de bord ───────────────────────────────────────── */}
         {activeTab === 'dashboard' && (
-          <div className="max-w-7xl mx-auto px-6 py-6 space-y-6">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Tableau de bord</h2>
-              <button onClick={() => fetchDashboard(auth.token)} className="osiris-btn text-xs">
-                {dashboardLoading ? 'Chargement...' : <><IcoRefresh cls="w-3 h-3 inline" /> Rafraichir</>}
-              </button>
-            </div>
-            {dashboardLoading ? (
-              <p className="text-slate-700 font-mono text-xs">Chargement...</p>
-            ) : !dashboard || dashboard.total_machines === 0 ? (
-              <p className="text-slate-700 font-mono text-xs">Aucune machine enregistree pour l'instant.</p>
-            ) : (
-              <>
-                {/* Compteurs globaux */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  {(['deployed', 'pending', 'deploying', 'failed'] as const).map(s => {
-                    const colors: Record<string, string> = { deployed: 'text-green-400', pending: 'text-blue-400', deploying: 'text-yellow-400', failed: 'text-red-400' }
-                    const labels: Record<string, string> = { deployed: 'Deployes', pending: 'En attente', deploying: 'En cours', failed: 'Echoues' }
-                    return (
-                      <div key={s} className="bg-slate-900 border border-slate-800/60 rounded p-4 text-center">
-                        <p className={`text-3xl font-bold ${colors[s]}`}>{dashboard.status_counts[s] ?? 0}</p>
-                        <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest">{labels[s]}</p>
-                      </div>
-                    )
-                  })}
-                </div>
-
-                {/* Alertes */}
-                {dashboard.alerts.length > 0 && (
-                  <div className="space-y-1">
-                    <p className="text-[9px] uppercase tracking-widest text-slate-600">Alertes</p>
-                    {dashboard.alerts.map((a: any, i: number) => (
-                      <div key={i} className={`text-xs p-2 rounded border font-mono ${a.type === 'stuck_deploying' ? 'border-yellow-800/50 bg-yellow-950/30 text-yellow-400' : 'border-red-800/50 bg-red-950/30 text-red-400'}`}>
-                        {a.type === 'stuck_deploying' ? `En cours depuis plus de 30 min` : `Echec recent`} - <strong>{a.hostname}</strong> ({a.mac})
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Stats par org */}
-                {dashboard.org_stats.length > 0 && (
-                  <div className="space-y-2">
-                    <p className="text-[9px] uppercase tracking-widest text-slate-600">Par organisation</p>
-                    {dashboard.org_stats.sort((a: any, b: any) => b.total - a.total).map((o: any) => (
-                      <div key={o.org_id} className="bg-slate-900 border border-slate-800/60 rounded p-3 flex items-center gap-4">
-                        <span className="text-slate-300 text-sm font-medium w-40 truncate">{o.org_name}</span>
-                        <div className="flex-1 flex gap-1 h-2">
-                          {(['deployed', 'pending', 'deploying', 'failed'] as const).map(s => {
-                            const pct = o.total ? Math.round((o[s] ?? 0) / o.total * 100) : 0
-                            const colors = { deployed: 'bg-green-500', pending: 'bg-blue-500', deploying: 'bg-yellow-500', failed: 'bg-red-500' }
-                            return pct > 0 ? <div key={s} className={`${colors[s]} rounded`} style={{ width: `${pct}%` }} title={`${s}: ${o[s]}`} /> : null
-                          })}
-                        </div>
-                        <span className="text-slate-600 text-[10px] font-mono w-16 text-right">{o.total} machine{o.total > 1 ? 's' : ''}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* Derniers deploiements */}
-                {dashboard.recent_deployments.length > 0 && (
-                  <div className="space-y-1">
-                    <p className="text-[9px] uppercase tracking-widest text-slate-600">Deploiements recents</p>
-                    <div className="border border-slate-800/60 rounded overflow-hidden">
-                      {dashboard.recent_deployments.map((e: any, i: number) => (
-                        <div key={i} className={`flex items-center gap-3 px-3 py-2 text-xs font-mono ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
-                          <span className={`w-16 text-center rounded px-1 py-0.5 text-[9px] font-bold ${e.status === 'deployed' ? 'bg-green-900/60 text-green-400' : 'bg-red-900/60 text-red-400'}`}>{e.status}</span>
-                          <span className="text-slate-300 w-40 truncate">{e.hostname}</span>
-                          <span className="text-slate-600 flex-1 truncate">{e.profile_name}</span>
-                          <span className="text-slate-700">{new Date(e.timestamp).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
+          <DashboardTab token={auth.token} />
         )}
 
         {/* ── Onglet Infrastructure ────────────────────────────────────────── */}
@@ -1589,73 +1411,7 @@ export default function App() {
 
         {/* ── Onglet Journal ───────────────────────────────────────────────── */}
         {activeTab === 'journal' && auth.role === 'admin' && (
-          <div className="osiris-table-wrap overflow-x-auto">
-            <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-slate-800/80">
-              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500 mr-auto">Journal d'activité</h2>
-              <select value={auditFilterAction} onChange={e => setAuditFilterAction(e.target.value)}
-                className="osiris-input text-[10px] py-1 w-40">
-                <option value="">Toutes les actions</option>
-                {Object.entries(ACTION_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-              </select>
-              <input value={auditFilterEmail} onChange={e => setAuditFilterEmail(e.target.value)}
-                placeholder="Utilisateur…" className="osiris-input text-[10px] py-1 w-36" />
-              <input value={auditFilterMac} onChange={e => setAuditFilterMac(e.target.value)}
-                placeholder="MAC…" className="osiris-input text-[10px] py-1 w-32 font-mono" />
-              <button onClick={() => fetchAuditLogs(auth.token, auditFilterAction, auditFilterEmail, auditFilterMac)}
-                className="osiris-btn text-[10px]">
-                {auditLoading ? '…' : <><IcoSearch cls="w-3 h-3 inline" /> Filtrer</>}
-              </button>
-              <button onClick={() => { setAuditFilterAction(''); setAuditFilterEmail(''); setAuditFilterMac(''); fetchAuditLogs(auth.token, '', '', '') }}
-                className="osiris-btn-ghost text-[10px]">
-                <IcoRefresh cls="w-3 h-3 inline" /> Reset
-              </button>
-            </div>
-            {auditLoading ? (
-              <div className="flex items-center gap-2.5 text-slate-600 font-mono text-xs p-5">
-                <span className="inline-block w-1.5 h-1.5 bg-blue-600 rounded-full animate-ping" />
-                Chargement…
-              </div>
-            ) : auditLogs.length === 0 ? (
-              <p className="text-slate-700 font-mono text-xs p-5">Aucune entrée de journal</p>
-            ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-slate-800/80">
-                    {['Horodatage', 'Utilisateur', 'Action', 'Machine', 'Détails'].map(h => (
-                      <th key={h} className="text-left px-4 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-slate-600 whitespace-nowrap">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {auditLogs.map((entry) => {
-                    const meta = ACTION_META[entry.action] ?? { label: entry.action, cls: 'text-slate-500 border-slate-700' }
-                    return (
-                      <tr key={entry.id} className="osiris-row">
-                        <td className="px-4 py-2.5 font-mono text-xs text-slate-500 whitespace-nowrap">
-                          {new Date(entry.timestamp).toLocaleDateString('fr-FR', {
-                            day: '2-digit', month: '2-digit', year: '2-digit',
-                            hour: '2-digit', minute: '2-digit', second: '2-digit'
-                          })}
-                        </td>
-                        <td className="px-4 py-2.5 font-mono text-xs text-slate-400 whitespace-nowrap">{entry.user_email}</td>
-                        <td className="px-4 py-2.5 whitespace-nowrap">
-                          <span className={`inline-block border rounded px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider ${meta.cls}`}>
-                            {meta.label}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2.5 font-mono text-xs text-slate-600 whitespace-nowrap">
-                          {entry.target_mac ? formatMac(entry.target_mac) : '—'}
-                        </td>
-                        <td className="px-4 py-2.5 font-mono text-xs text-slate-600 max-w-xs truncate" title={formatDetails(entry.details)}>
-                          {formatDetails(entry.details)}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <JournalTab token={auth.token} onUnauthorized={() => setAuth(null)} />
         )}
 
         {/* ── Domaines AD (dans onglet Admin, section separee) ─────────────── */}
@@ -1700,260 +1456,12 @@ export default function App() {
 
         {/* ── Onglet Capture ───────────────────────────────────────────────── */}
         {activeTab === 'capture' && auth.role === 'admin' && (
-          <div className="osiris-table-wrap overflow-x-auto">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800/80">
-              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Capture d'une Golden Image</h2>
-              <button onClick={() => fetchCaptures(auth.token)} className="osiris-btn-ghost text-[10px]">
-                <IcoRefresh cls="w-3 h-3 inline" /> Rafraîchir
-              </button>
-            </div>
-
-            {/* ── Guide pas-à-pas ── */}
-            <div className="px-5 py-4 border-b border-slate-800/60 space-y-5">
-              <p className="text-xs text-slate-500 font-mono">
-                Suivez les étapes dans l'ordre. La machine de référence doit être sur le même réseau qu'OSIRIS.
-              </p>
-
-              {/* Étapes */}
-              {[
-                { n: 1, titre: 'Préparer la machine de référence', desc: 'Déployez un Windows via OSIRIS (ou installez-le manuellement), installez toutes vos applications (TeamViewer Host, antivirus, Office…). Ne joignez pas de domaine.' },
-                { n: 2, titre: 'Lancer Sysprep', desc: 'Sur la machine de référence, ouvrez une invite de commandes en administrateur et lancez :', cmd: 'C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown', note: 'La machine s\'éteint toute seule. Ne la redémarrez pas avant la capture !' },
-                { n: 3, titre: 'Enregistrer la machine dans OSIRIS', desc: 'Renseignez l\'adresse MAC de la machine de référence et le nom du fichier WIM à créer, puis cliquez sur Enregistrer.' },
-                { n: 4, titre: 'Démarrer la machine en PXE', desc: 'Démarrez la machine de référence sur le réseau (PXE). OSIRIS détecte automatiquement qu\'elle est en mode capture et lance le script. Attendez la fin (15–40 min).' },
-              ].map(step => (
-                <div key={step.n} className={`flex gap-4 ${captureStep >= step.n ? '' : 'opacity-40'}`}>
-                  <div className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border
-                    ${captureStep > step.n ? 'bg-emerald-900 border-emerald-700 text-emerald-400' :
-                      captureStep === step.n ? 'bg-blue-900 border-blue-600 text-blue-300' :
-                      'border-slate-700 text-slate-600'}`}>
-                    {captureStep > step.n ? <IcoCheck cls="w-3 h-3" /> : step.n}
-                  </div>
-                  <div className="flex-1 space-y-1">
-                    <p className="text-xs font-semibold text-white">{step.titre}</p>
-                    <p className="text-[11px] text-slate-500">{step.desc}</p>
-                    {'cmd' in step && (
-                      <pre className="text-[10px] bg-slate-950 border border-slate-800 rounded px-3 py-2 text-emerald-400 font-mono overflow-x-auto">{step.cmd}</pre>
-                    )}
-                    {'note' in step && (
-                      <p className="text-[10px] text-amber-600 font-mono">{step.note}</p>
-                    )}
-                    {/* Étape 3 : formulaire */}
-                    {step.n === 3 && (
-                      <div className="flex gap-2 mt-2 flex-wrap">
-                        <select
-                          value={captureMac}
-                          onChange={e => { setCaptureMac(e.target.value); setCaptureStep(3) }}
-                          className="osiris-input text-xs font-mono w-64"
-                        >
-                          <option value="">— Choisir une machine Windows —</option>
-                          {machines
-                            .filter(m => m.os === 'windows')
-                            .map(m => (
-                              <option key={m.mac} value={m.mac}>
-                                {m.hostname} ({m.mac})
-                              </option>
-                            ))}
-                        </select>
-                        <input
-                          placeholder="Nom du fichier  (ex: golden_clientA.wim)"
-                          value={captureWim}
-                          onChange={e => setCaptureWim(e.target.value)}
-                          className="osiris-input text-xs font-mono w-60"
-                        />
-                        <button
-                          onClick={handleRegisterCapture}
-                          disabled={!captureMac || !captureWim}
-                          className="osiris-btn text-xs disabled:opacity-40"
-                        >
-                          Enregistrer
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* ── Liste des jobs ── */}
-            {captureJobs.length > 0 && (
-              <table className="w-full text-sm">
-                <thead><tr className="border-b border-slate-800/60">
-                  {['MAC', 'Fichier WIM', 'Statut', 'Enregistré le', 'Action'].map(h => (
-                    <th key={h} className="text-left px-4 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-slate-600">{h}</th>
-                  ))}
-                </tr></thead>
-                <tbody>
-                  {captureJobs.map(job => (
-                    <tr key={job.mac} className="osiris-row">
-                      <td className="px-4 py-2 font-mono text-xs text-slate-400">{job.mac}</td>
-                      <td className="px-4 py-2 font-mono text-xs text-white">{job.wim_name}</td>
-                      <td className="px-4 py-2">
-                        <span className={`osiris-status-badge ${
-                          job.status === 'done'      ? 'osiris-status--deployed' :
-                          job.status === 'capturing' ? 'osiris-status--deploying' :
-                          job.status === 'failed'    ? 'osiris-status--failed' :
-                                                       'osiris-status--pending'}`}>
-                          {job.status === 'waiting' ? 'En attente de boot PXE' :
-                           job.status === 'capturing' ? 'Capture en cours…' :
-                           job.status === 'done' ? 'Terminé' : 'Échec'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2 font-mono text-xs text-slate-600">
-                        {new Date(job.registered_at).toLocaleString('fr-FR')}
-                      </td>
-                      <td className="px-4 py-2">
-                        {(job.status === 'done' || job.status === 'failed') && (
-                          <button onClick={() => handleDeleteCapture(job.mac)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <CaptureTab token={auth.token} machines={machines} refreshSignal={captureRefresh} />
         )}
 
         {/* ── Onglet Drivers ───────────────────────────────────────────────── */}
         {activeTab === 'drivers' && auth.role === 'admin' && (
-          <div className="osiris-table-wrap overflow-x-auto">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800/80">
-              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Catalogue Drivers</h2>
-              <div className="flex gap-2 flex-wrap">
-                <button onClick={() => fetchDrivers(auth.token)} className="osiris-btn-ghost text-[10px]">
-                  {driversLoading ? 'Chargement…' : <><IcoRefresh cls="w-3 h-3 inline" /> Rafraîchir</>}
-                </button>
-                <button onClick={() => handleSync('dell', 15000)} disabled={syncing !== null} className="osiris-btn text-xs">
-                  {syncing === 'dell' ? 'Dell en cours…' : <><IcoRefresh cls="w-3 h-3 inline" /> Dell</>}
-                </button>
-                <button onClick={() => handleSync('hp', 30000)} disabled={syncing !== null} className="osiris-btn text-xs">
-                  {syncing === 'hp' ? 'HP en cours…' : <><IcoRefresh cls="w-3 h-3 inline" /> HP</>}
-                </button>
-                <button onClick={() => handleSync('lenovo', 20000)} disabled={syncing !== null} className="osiris-btn text-xs">
-                  {syncing === 'lenovo' ? 'Lenovo en cours…' : <><IcoRefresh cls="w-3 h-3 inline" /> Lenovo</>}
-                </button>
-              </div>
-            </div>
-            {driversLoading ? (
-              <div className="flex items-center gap-2.5 text-slate-600 font-mono text-xs p-5">
-                <span className="inline-block w-1.5 h-1.5 bg-blue-600 rounded-full animate-ping" />
-                Chargement…
-              </div>
-            ) : drivers.length === 0 ? (
-              <p className="text-slate-700 font-mono text-xs p-5">Aucun driver : lancez une synchronisation pour remplir le catalogue.</p>
-            ) : (() => {
-              const q = driverSearch.toLowerCase()
-              const isSearching = q.length > 0
-
-              // Groupement par vendor
-              const groups: Record<string, DriverPack[]> = {}
-              for (const d of drivers) {
-                if (!groups[d.vendor]) groups[d.vendor] = []
-                if (!isSearching || d.model.toLowerCase().includes(q)) groups[d.vendor].push(d)
-              }
-              const vendorOrder = ['dell', 'hp', 'lenovo']
-              const vendorLabel: Record<string, string> = { dell: 'Dell', hp: 'HP', lenovo: 'Lenovo' }
-
-              const DriverRow = ({ d }: { d: DriverPack }) => (
-                <tr className="osiris-row">
-                  <td className="px-4 py-2 font-mono text-xs text-white">{d.model}</td>
-                  <td className="px-4 py-2 font-mono text-xs text-slate-500">{d.os_code}</td>
-                  <td className="px-4 py-2 font-mono text-xs text-slate-600 whitespace-nowrap">{d.size_mb ? `${d.size_mb} MB` : '—'}</td>
-                  <td className="px-4 py-2">
-                    <span className={`osiris-status-badge ${
-                      d.status === 'ready'       ? 'osiris-status--deployed' :
-                      d.status === 'downloading' ? 'osiris-status--deploying' :
-                      d.status === 'failed'      ? 'osiris-status--failed' :
-                                                   'osiris-status--pending'
-                    }`}>{d.status}</span>
-                  </td>
-                  <td className="px-4 py-2">
-                    {d.status !== 'ready' && d.status !== 'downloading' && (
-                      <button onClick={() => handleDownloadPack(d.id)} disabled={downloadingPack === d.id} className="osiris-action-btn text-[10px]">
-                        {downloadingPack === d.id ? '…' : <IcoDownload />}
-                      </button>
-                    )}
-                    {d.status === 'ready' && <span className="text-emerald-600 font-mono text-[10px] flex items-center gap-1"><IcoCheck cls="w-3 h-3" /> Prêt</span>}
-                    {d.status === 'downloading' && <span className="text-blue-500 font-mono text-[10px] animate-pulse">En cours…</span>}
-                  </td>
-                </tr>
-              )
-
-              return (
-                <>
-                  {/* Barre de recherche */}
-                  <div className="px-5 py-3 border-b border-slate-800/80 flex items-center gap-3">
-                    <span className="text-slate-600 flex-shrink-0"><IcoSearch /></span>
-                    <input type="text" placeholder="Rechercher un modèle…"
-                      value={driverSearch} onChange={e => setDriverSearch(e.target.value)}
-                      className="osiris-input text-xs flex-1 max-w-sm" />
-                    {isSearching && (
-                      <span className="text-[10px] font-mono text-slate-600">
-                        {Object.values(groups).flat().length} résultat{Object.values(groups).flat().length !== 1 ? 's' : ''}
-                      </span>
-                    )}
-                  </div>
-
-                  {isSearching ? (
-                    /* ── Mode recherche : tableau plat ── */
-                    <table className="w-full text-sm">
-                      <thead><tr className="border-b border-slate-800/80">
-                        {['Modèle', 'OS', 'Taille', 'Statut', 'Action'].map(h => (
-                          <th key={h} className="text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-widest text-slate-600 whitespace-nowrap">{h}</th>
-                        ))}
-                      </tr></thead>
-                      <tbody>
-                        {Object.values(groups).flat().slice(0, 100).map(d => <DriverRow key={d.id} d={d} />)}
-                      </tbody>
-                    </table>
-                  ) : (
-                    /* ── Mode accordéon : dossiers par vendor ── */
-                    <div className="divide-y divide-slate-800/60">
-                      {vendorOrder.filter(v => (groups[v]?.length ?? 0) > 0 || drivers.some(d => d.vendor === v)).map(vendor => {
-                        const items = groups[vendor] ?? []
-                        const total = drivers.filter(d => d.vendor === vendor).length
-                        const open  = expandedVendors.has(vendor)
-                        const ready = items.filter(d => d.status === 'ready').length
-                        return (
-                          <div key={vendor}>
-                            {/* En-tête du dossier */}
-                            <button onClick={() => toggleVendor(vendor)}
-                              className="w-full flex items-center gap-3 px-5 py-3.5 hover:bg-slate-800/30 transition-colors text-left">
-                              <span className="text-slate-500 w-3 flex-shrink-0">{open ? <IcoChevDown /> : <IcoChevRight />}</span>
-                              <span className="font-bold text-sm text-white tracking-wide">{vendorLabel[vendor]}</span>
-                              <span className="text-[10px] font-mono text-slate-600">{total} modèle{total !== 1 ? 's' : ''}</span>
-                              {ready > 0 && <span className="text-[10px] font-mono text-emerald-600">{ready} prêt{ready !== 1 ? 's' : ''}</span>}
-                              <span className="ml-auto text-[10px] text-slate-700">{open ? 'Fermer' : 'Ouvrir'}</span>
-                            </button>
-                            {/* Contenu du dossier */}
-                            {open && (
-                              <div className="border-t border-slate-800/60 bg-slate-950/40">
-                                <table className="w-full text-sm">
-                                  <thead><tr className="border-b border-slate-800/60">
-                                    {['Modèle', 'OS', 'Taille', 'Statut', 'Action'].map(h => (
-                                      <th key={h} className="text-left px-4 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-slate-700 whitespace-nowrap">{h}</th>
-                                    ))}
-                                  </tr></thead>
-                                  <tbody>
-                                    {items.slice(0, 200).map(d => <DriverRow key={d.id} d={d} />)}
-                                    {items.length > 200 && (
-                                      <tr><td colSpan={5} className="px-4 py-3 text-center text-[10px] font-mono text-slate-700">
-                                        … {items.length - 200} modèles masqués — utilisez la recherche pour les trouver
-                                      </td></tr>
-                                    )}
-                                  </tbody>
-                                </table>
-                              </div>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </>
-              )
-            })()}
-          </div>
+          <DriversTab token={auth.token} />
         )}
 
         {/* ── Onglet Machines ──────────────────────────────────────────────── */}
