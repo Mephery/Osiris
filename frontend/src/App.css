@@ -1,12 +1,62 @@
+/* ─── Design tokens ──────────────────────────────────────────────────────────
+   Couleurs réutilisées dans toute l'app. Modifier ici change l'ambiance globale.
+   Les couleurs "one-shot" (statuts, badges OS) restent littérales plus bas :
+   un token n'a d'intérêt que pour une valeur répétée.                          */
+:root {
+  /* Surfaces */
+  --bg-deep:   #070b14;                 /* fond global le plus profond */
+  --bg-panel:  rgba(7, 11, 20, 0.96);   /* cartes / tableaux */
+  --bg-modal:  #090e1c;                 /* modales */
+  --bg-input:  rgba(0, 0, 0, 0.45);     /* champs de formulaire */
+
+  /* Bordures */
+  --border:       rgb(22, 34, 56);          /* bordure principale */
+  --border-soft:  rgba(22, 34, 56, 0.7);    /* séparateurs de lignes */
+  --border-input: rgb(30, 41, 59);          /* bordure des champs */
+
+  /* Accent (bleu OSIRIS) */
+  --accent:       rgb(37, 99, 235);
+  --accent-hover: rgb(59, 130, 246);
+  --accent-soft:  rgba(37, 99, 235, 0.04);  /* fond de ligne au survol */
+
+  /* Texte */
+  --text:        rgb(241, 245, 249);
+  --text-bright: rgb(226, 232, 240);
+  --text-muted:  rgb(100, 116, 139);
+  --text-dim:    rgb(71, 85, 105);
+
+  /* Scrollbar */
+  --scrollbar:       rgb(30, 41, 59);
+  --scrollbar-hover: rgb(51, 65, 85);
+
+  /* Danger */
+  --danger:       rgb(185, 28, 28);
+  --danger-hover: rgb(220, 38, 38);
+}
+
 /* ─── Fond : navy profond + grille de points ─────────────────────────────── */
 body {
-  background-color: #070b14;
+  background-color: var(--bg-deep);
   background-image:
     radial-gradient(ellipse 65% 45% at 8% 0%, rgba(37, 99, 235, 0.09) 0%, transparent 70%),
     radial-gradient(rgba(30, 50, 80, 0.55) 1px, transparent 1px);
   background-size: 100% 100%, 24px 24px;
   background-attachment: fixed;
 }
+
+/* ─── Scrollbars (fines, grises, cohérentes avec les bordures) ───────────────
+   Règle globale : s'applique à toute zone scrollable (page, listes, modales).  */
+* {
+  scrollbar-width: thin;                          /* Firefox */
+  scrollbar-color: var(--scrollbar) transparent;  /* pouce / piste */
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
 /* ─── Logo ───────────────────────────────────────────────────────────────── */
 .osiris-icon {
@@ -21,21 +71,21 @@ body {
 
 /* ─── Tableau ────────────────────────────────────────────────────────────── */
 .osiris-table-wrap {
-  background: rgba(7, 11, 20, 0.96);
-  border: 1px solid rgb(22, 34, 56);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
 }
 
 .osiris-row {
-  border-bottom: 1px solid rgba(22, 34, 56, 0.7);
+  border-bottom: 1px solid var(--border-soft);
   border-left: 3px solid transparent;
   transition: border-left-color 0.12s ease, background-color 0.12s ease;
 }
 .osiris-row:last-child { border-bottom: none; }
 .osiris-row:hover {
-  border-left-color: rgb(37, 99, 235);
-  background-color: rgba(37, 99, 235, 0.04);
+  border-left-color: var(--accent);
+  background-color: var(--accent-soft);
 }
 
 /* ─── Badges statut déploiement ─────────────────────────────────────────── */
@@ -74,20 +124,20 @@ body {
   width: 24px;
   height: 24px;
   font-size: 0.75rem;
-  color: rgb(71, 85, 105);
+  color: var(--text-dim);
   border-radius: 3px;
   cursor: pointer;
   transition: color 0.12s, background-color 0.12s;
   border: none;
   background: transparent;
 }
-.osiris-action-btn:hover { color: rgb(226, 232, 240); background: rgba(255,255,255,0.05); }
+.osiris-action-btn:hover { color: var(--text-bright); background: rgba(255,255,255,0.05); }
 .osiris-action-btn--danger:hover { color: rgb(252, 165, 165); background: rgba(239, 68, 68, 0.1); }
 
 /* ─── Variante danger pour la modale ────────────────────────────────────── */
 .osiris-modal--danger { border-color: rgba(185, 28, 28, 0.3); }
-.osiris-btn--danger   { background: rgb(185, 28, 28); }
-.osiris-btn--danger:hover { background: rgb(220, 38, 38); }
+.osiris-btn--danger   { background: var(--danger); }
+.osiris-btn--danger:hover { background: var(--danger-hover); }
 
 /* ─── Badges OS ──────────────────────────────────────────────────────────── */
 .osiris-os-badge {
@@ -123,7 +173,7 @@ body {
   align-items: center;
   gap: 6px;
   padding: 7px 16px;
-  background: rgb(37, 99, 235);
+  background: var(--accent);
   color: #fff;
   font-size: 0.8125rem;
   font-weight: 600;
@@ -133,14 +183,14 @@ body {
   transition: background-color 0.13s;
   letter-spacing: 0.025em;
 }
-.osiris-btn:hover { background: rgb(59, 130, 246); }
+.osiris-btn:hover { background: var(--accent-hover); }
 
 .osiris-btn-ghost {
   display: inline-flex;
   align-items: center;
   padding: 7px 14px;
   background: transparent;
-  color: rgb(100, 116, 139);
+  color: var(--text-muted);
   font-size: 0.8125rem;
   font-weight: 500;
   border-radius: 4px;
@@ -148,21 +198,21 @@ body {
   cursor: pointer;
   transition: color 0.13s;
 }
-.osiris-btn-ghost:hover { color: rgb(226, 232, 240); }
+.osiris-btn-ghost:hover { color: var(--text-bright); }
 
 /* ─── Champs de formulaire ───────────────────────────────────────────────── */
 .osiris-input {
   width: 100%;
-  background: rgba(0, 0, 0, 0.45);
-  border: 1px solid rgb(30, 41, 59);
+  background: var(--bg-input);
+  border: 1px solid var(--border-input);
   border-radius: 4px;
   padding: 8px 12px;
   font-size: 0.875rem;
-  color: rgb(241, 245, 249);
+  color: var(--text);
   transition: border-color 0.13s;
   outline: none;
 }
-.osiris-input:focus { border-color: rgb(37, 99, 235); }
+.osiris-input:focus { border-color: var(--accent); }
 .osiris-input::placeholder { color: rgb(45, 58, 78); }
 
 /* ─── Overlay ────────────────────────────────────────────────────────────── */
@@ -179,12 +229,14 @@ body {
 
 /* ─── Modales ────────────────────────────────────────────────────────────── */
 .osiris-modal {
-  background: #090e1c;
-  border: 1px solid rgb(22, 34, 56);
+  background: var(--bg-modal);
+  border: 1px solid var(--border);
   border-radius: 6px;
   width: 100%;
   max-width: 460px;
-  overflow: hidden;
+  max-height: 90vh;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .osiris-modal--amber { border-color: rgba(217, 119, 6, 0.35); }
 
@@ -193,7 +245,7 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 14px 24px;
-  border-bottom: 1px solid rgb(22, 34, 56);
+  border-bottom: 1px solid var(--border);
 }
 
 /* ─── Affichage mot de passe ─────────────────────────────────────────────── */

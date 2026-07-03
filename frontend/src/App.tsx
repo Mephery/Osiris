@@ -2,10 +2,9 @@
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import React, { useEffect, useRef, useState } from 'react'
 import { Toaster, toast } from 'sonner'
-import { QRCodeSVG } from 'qrcode.react'
 import './App.css'
 import type {
-  AuthState, Organization, WimFile, Machine, Profile, Application,
+  AuthState, Organization, Machine, Profile, Application,
   DeploymentEvent, Hypervisor, OsImage, SnapshotEntry,
 } from './types'
 import { IMAGE_STATUS, EMPTY_FORM, authHeader } from './types'
@@ -14,12 +13,13 @@ import {
   IcoChevDown, IcoChevUp, IcoGear, IcoTerminal, IcoCamera,
 } from './icons'
 import { LoginPage } from './LoginPage'
-import { IntegrationsTab } from './IntegrationsTab'
 import { DashboardTab } from './DashboardTab'
 import { JournalTab } from './JournalTab'
 import { CaptureTab } from './CaptureTab'
 import { DriversTab } from './DriversTab'
 import { InfrastructureTab } from './InfrastructureTab'
+import { SettingsModal } from './SettingsModal'
+import { ProfilesSection } from './ProfilesSection'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 // ── Composant principal ────────────────────────────────────────────────────────
@@ -78,8 +78,6 @@ export default function App() {
   // ── Section admin : gestion des orgs et users ──────────────────────────────
   // Signal de rafraîchissement pour l'onglet Capture (incrémenté quand une capture se termine, cf. WebSocket)
   const [captureRefresh, setCaptureRefresh] = useState(0)
-  const [wims, setWims]                 = useState<WimFile[]>([])
-  const [showWimPicker, setShowWimPicker] = useState<'new' | 'edit' | null>(null)
   const [csvImporting, setCsvImporting] = useState(false)
   const [showCsvHint, setShowCsvHint]   = useState(false)
   const [csvHintDismiss, setCsvHintDismiss] = useState(false)
@@ -91,15 +89,13 @@ export default function App() {
   const [newUserPass, setNewUserPass]   = useState('')
   const [newUserRole, setNewUserRole]   = useState('technician')
 
-  // ── Profils ────────────────────────────────────────────────────────────────
+  // ── Profils (liste partagée ; le state d'édition vit dans ProfilesSection) ──
   const [profiles, setProfiles] = useState<Profile[]>([])
-  const [editingProfile, setEditingProfile] = useState<Profile | null>(null)
   const [apps, setApps] = useState<Application[]>([])
 
   // ── Images OS ──────────────────────────────────────────────────────────────
   const [images, setImages] = useState<OsImage[]>([])
   const [newImage, setNewImage] = useState({ name: '', version: '', os: 'ubuntu', iso_url: '' })
-  const [newProfile, setNewProfile] = useState<Partial<Profile>>({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '' })
 
   // ── Infrastructure (Hyperviseurs) ──────────────────────────────────────────
   // hypervisors reste ici car l'onglet Machines l'utilise aussi (statut/console VM).
@@ -172,29 +168,12 @@ export default function App() {
   const resetFilters = () => { setSearch(''); setStatusFilter(''); setOsFilter(''); setSmokeFilter(false) }
   const hasActiveFilter = !!(search || statusFilter || osFilter || smokeFilter)
 
-  // ── Changement de mot de passe ─────────────────────────────────────────────
+  // ── Modale paramètres du compte (mot de passe, 2FA, clés API) ──────────────
   const [showSettingsModal, setShowSettingsModal] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'password' | 'totp' | 'apikeys' | 'integrations'>('password')
-  const [apiKeys, setApiKeys] = useState<any[]>([])
-  const [newKeyName, setNewKeyName] = useState('')
-  const [createdKey, setCreatedKey] = useState<string | null>(null)
-  const [pwCurrent, setPwCurrent] = useState('')
-  const [pwNew, setPwNew]         = useState('')
-  const [pwConfirm, setPwConfirm] = useState('')
-  const [pwError, setPwError]     = useState<string | null>(null)
-  const [pwSuccess, setPwSuccess] = useState(false)
-  const [pwLoading, setPwLoading] = useState(false)
 
   // Domaines AD par organisation
   const [domainConfigs, setDomainConfigs] = useState<any[]>([])
   const [newDomainConfig, setNewDomainConfig] = useState({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '' })
-
-  // 2FA
-  const [totpSetup, setTotpSetup] = useState<{secret: string, uri: string} | null>(null)
-  const [totpCode, setTotpCode] = useState('')
-  const [totpEnabled, setTotpEnabled] = useState(false)
-  const [totpDisablePassword, setTotpDisablePassword] = useState('')
-  const [totpStep, setTotpStep] = useState<null | 'setup' | 'confirm_disable'>(null)
 
   // Login 2FA
   const [pendingTotp, setPendingTotp] = useState<{temp_token: string} | null>(null)
@@ -255,45 +234,6 @@ export default function App() {
       .catch(() => {})
   }
 
-  const fetchTotpStatus = (token: string) => {
-    fetch(`${API_URL}/auth/totp/status`, { headers: authHeader(token) })
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data) setTotpEnabled(data.totp_enabled) })
-      .catch(() => {})
-  }
-
-  const startTotpSetup = () => {
-    if (!auth) return
-    fetch(`${API_URL}/auth/totp/setup`, { headers: authHeader(auth.token) })
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(data => { setTotpSetup({ secret: data.secret, uri: data.uri }); setTotpStep('setup'); setTotpCode('') })
-      .catch(() => toast.error('Impossible de demarrer la configuration 2FA'))
-  }
-
-  const confirmTotpEnable = () => {
-    if (!auth || !totpSetup) return
-    fetch(`${API_URL}/auth/totp/enable`, {
-      method: 'POST',
-      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ secret: totpSetup.secret, code: totpCode }),
-    })
-      .then(r => r.ok ? r.json() : Promise.reject(r))
-      .then(() => { setTotpEnabled(true); setTotpStep(null); setTotpSetup(null); toast.success('Double authentification activee') })
-      .catch(() => toast.error('Code incorrect ou expire'))
-  }
-
-  const disableTotp = () => {
-    if (!auth) return
-    fetch(`${API_URL}/auth/totp/disable`, {
-      method: 'POST',
-      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: totpDisablePassword }),
-    })
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(() => { setTotpEnabled(false); setTotpStep(null); setTotpDisablePassword(''); toast.success('Double authentification desactivee') })
-      .catch(() => toast.error('Mot de passe incorrect'))
-  }
-
   const submitTotpLogin = () => {
     if (!pendingTotp) return
     fetch(`${API_URL}/auth/totp/verify`, {
@@ -310,40 +250,6 @@ export default function App() {
         setTotpLoginCode('')
       })
       .catch(() => toast.error('Code incorrect'))
-  }
-
-  const fetchApiKeys = (token: string) => {
-    fetch(`${API_URL}/auth/api-keys`, { headers: authHeader(token) })
-      .then(r => r.ok ? r.json() : [])
-      .then(setApiKeys)
-      .catch(() => {})
-  }
-
-  const createApiKey = () => {
-    if (!auth || !newKeyName.trim()) return
-    fetch(`${API_URL}/auth/api-keys`, {
-      method: 'POST',
-      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newKeyName.trim() }),
-    })
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(data => { setCreatedKey(data.key); setNewKeyName(''); fetchApiKeys(auth.token); toast.success('Cle creee') })
-      .catch(() => toast.error('Erreur creation cle'))
-  }
-
-  const revokeApiKey = (id: number) => {
-    if (!auth) return
-    fetch(`${API_URL}/auth/api-keys/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
-      .then(r => { if (r.ok) { fetchApiKeys(auth.token); toast.success('Cle revoquee') } else throw new Error() })
-      .catch(() => toast.error('Erreur revocation'))
-  }
-
-  const fetchWims = () => {
-    if (!auth) return
-    fetch(`${API_URL}/wims`, { headers: authHeader(auth.token) })
-      .then(r => r.ok ? r.json() : [])
-      .then(data => setWims(Array.isArray(data) ? data : []))
-      .catch(() => {})
   }
 
   const handleCsvImport = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -391,7 +297,7 @@ export default function App() {
   useEffect(() => {
     if (!auth) return
     if (auth.role !== 'admin') return
-    if (activeTab === 'admin') { fetchDomainConfigs(auth.token); fetchTotpStatus(auth.token) }
+    if (activeTab === 'admin') fetchDomainConfigs(auth.token)
     else if (activeTab === 'infrastructure') fetchHypervisors(auth.token)
   }, [activeTab])
 
@@ -663,22 +569,6 @@ export default function App() {
       .catch((err) => toast.error(err.message))
   }
 
-  const handleCreateProfile = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    fetch(`${API_URL}/profiles`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
-      body: JSON.stringify(newProfile),
-    })
-      .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
-      .then(() => {
-        setNewProfile({ os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '' })
-        fetchProfiles(auth.token)
-        toast.success('Profil créé')
-      })
-      .catch((err) => toast.error(err.message))
-  }
-
   const handleCreateImage = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     fetch(`${API_URL}/images`, {
@@ -695,28 +585,6 @@ export default function App() {
     fetch(`${API_URL}/images/${id}`, { method: 'DELETE', headers: authHeader(auth!.token) })
       .then(() => { fetchImages(auth!.token); toast.success('Image supprimée') })
       .catch(() => toast.error('Erreur suppression image'))
-  }
-
-  const handleDeleteProfile = (id: number) => {
-    fetch(`${API_URL}/profiles/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
-      .then(r => { if (r.ok) { fetchProfiles(auth.token); toast.success('Profil supprimé') } })
-      .catch(() => toast.error('Erreur suppression profil'))
-  }
-
-  const handleCloneProfile = (id: number) => {
-    fetch(`${API_URL}/profiles/${id}/clone`, { method: 'POST', headers: authHeader(auth.token) })
-      .then(r => { if (r.ok) { fetchProfiles(auth.token); toast.success('Profil duplique') } else throw new Error() })
-      .catch(() => toast.error('Erreur duplication profil'))
-  }
-
-  const handlePatchProfile = (id: number, patch: Partial<Profile>) => {
-    fetch(`${API_URL}/profiles/${id}`, {
-      method: 'PATCH',
-      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    })
-      .then(r => { if (r.ok) { fetchProfiles(auth.token); toast.success('Profil mis à jour') } })
-      .catch(() => toast.error('Erreur mise à jour profil'))
   }
 
   // ── Sélection en lot ──────────────────────────────────────────────────────
@@ -750,25 +618,6 @@ export default function App() {
       .then(r => { if (r.status === 401) setAuth(null); return r.ok ? r.json() : [] })
       .then((data) => setHypervisors(Array.isArray(data) ? data : []))
       .catch(() => {})
-  }
-
-  const handlePasswordChange = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    setPwError(null)
-    if (pwNew !== pwConfirm) { setPwError('Les deux nouveaux mots de passe ne correspondent pas.'); return }
-    if (pwNew.length < 8) { setPwError('Le nouveau mot de passe doit faire au moins 8 caractères.'); return }
-    setPwLoading(true)
-    fetch(`${API_URL}/auth/me/password`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
-      body: JSON.stringify({ current_password: pwCurrent, new_password: pwNew }),
-    })
-      .then(async (res) => {
-        if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Erreur') }
-        setPwSuccess(true)
-        setPwLoading(false)
-      })
-      .catch((err) => { setPwError(err.message); setPwLoading(false) })
   }
 
   const orgName     = (id: number | null | undefined) => orgs.find(o => o.id === id)?.name ?? '—'
@@ -813,7 +662,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs font-mono text-slate-700 hidden sm:block">{auth.email}</span>
-            <button onClick={() => { setShowSettingsModal(true); fetchTotpStatus(auth.token); fetchApiKeys(auth.token); setPwCurrent(''); setPwNew(''); setPwConfirm(''); setPwError(null); setPwSuccess(false); setSettingsTab('password'); setCreatedKey(null) }} className="osiris-action-btn" title="Parametres du compte"><IcoGear /></button>
+            <button onClick={() => setShowSettingsModal(true)} className="osiris-action-btn" title="Parametres du compte"><IcoGear /></button>
             <button onClick={() => setAuth(null)} className="osiris-btn-ghost text-xs">Deconnexion</button>
           </div>
         </div>
@@ -909,157 +758,13 @@ export default function App() {
               </form>
             </div>
 
-            {/* Profils de déploiement — col-span-2 pour occuper toute la largeur du grid */}
-            <div className="osiris-table-wrap p-5 space-y-4 md:col-span-2">
-              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Profils de déploiement</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {profiles.map(p => (
-                  <div key={p.id} className="flex items-center justify-between py-1.5 px-3 border border-slate-800/60 rounded">
-                    <div className="min-w-0">
-                      <span className="text-white text-sm font-medium">{p.name}</span>
-                      <span className={`ml-2 osiris-os-badge osiris-os-badge--${p.os}`}>{p.os}</span>
-                      {p.machine_type === 'server' && <span className="ml-1 inline-block border border-amber-700/60 text-amber-500 rounded px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider">serveur</span>}
-                      <p className="text-[10px] font-mono text-slate-600 mt-0.5">{p.locale} · {p.keyboard} · {p.timezone}</p>
-                      {p.os === 'windows' && <p className="text-[10px] font-mono text-slate-500">WIM index: <strong className="text-slate-300">{p.win_index}</strong>{p.domain ? ` · ${p.domain}` : ''}</p>}
-                    </div>
-                    <div className="flex gap-1 ml-3 flex-shrink-0">
-                      <button onClick={() => setEditingProfile(p)} className="osiris-action-btn" title="Editer"><IcoPencil /></button>
-                      <button onClick={() => handleCloneProfile(p.id)} className="osiris-action-btn" title="Dupliquer">⎘</button>
-                      <button onClick={() => handleDeleteProfile(p.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <form onSubmit={handleCreateProfile} className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-2 border-t border-slate-800/50">
-                <input required placeholder="Nom du profil" value={newProfile.name ?? ''} onChange={e => setNewProfile({ ...newProfile, name: e.target.value })} className="osiris-input text-xs col-span-2 sm:col-span-1" />
-                <select value={newProfile.os} onChange={e => setNewProfile({ ...newProfile, os: e.target.value })} className="osiris-input text-xs">
-                  <option value="ubuntu">Ubuntu</option>
-                  <option value="debian">Debian</option>
-                  <option value="windows">Windows</option>
-                </select>
-                <input placeholder="Locale" value={newProfile.locale ?? ''} onChange={e => setNewProfile({ ...newProfile, locale: e.target.value })} className="osiris-input text-xs font-mono" />
-                <input placeholder="Clavier" value={newProfile.keyboard ?? ''} onChange={e => setNewProfile({ ...newProfile, keyboard: e.target.value })} className="osiris-input text-xs font-mono" />
-                <input placeholder="Fuseau horaire" value={newProfile.timezone ?? ''} onChange={e => setNewProfile({ ...newProfile, timezone: e.target.value })} className="osiris-input text-xs font-mono" />
-                {(newProfile.os === 'ubuntu' || newProfile.os === 'debian') && (
-                  <>
-                    <select value={newProfile.machine_type ?? 'workstation'} onChange={e => setNewProfile({ ...newProfile, machine_type: e.target.value })} className="osiris-input text-xs">
-                      <option value="workstation">Poste de travail</option>
-                      <option value="server">Serveur</option>
-                    </select>
-                    <input placeholder="Utilisateur local" value={newProfile.default_user ?? ''} onChange={e => setNewProfile({ ...newProfile, default_user: e.target.value })} className="osiris-input text-xs font-mono" />
-                    <input placeholder="Paquets supplémentaires (htop,vim,...)" value={newProfile.extra_packages ?? ''} onChange={e => setNewProfile({ ...newProfile, extra_packages: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
-                    {newProfile.machine_type === 'server' && (
-                      <div className="col-span-2 sm:col-span-3 space-y-1">
-                        <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
-                        <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" value={newProfile.ssh_authorized_keys ?? ''} onChange={e => setNewProfile({ ...newProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
-                      </div>
-                    )}
-                  </>
-                )}
-                {newProfile.os === 'windows' && (
-                  <>
-                    <div className="col-span-2 sm:col-span-1 space-y-1">
-                      <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-                        <input type="checkbox" checked={newProfile.enable_bitlocker ?? true} onChange={e => setNewProfile({ ...newProfile, enable_bitlocker: e.target.checked })} className="accent-blue-500" />
-                        Activer BitLocker (cle de recuperation dans OSIRIS)
-                      </label>
-                      {newProfile.enable_bitlocker && (
-                        <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer pl-5">
-                          <input type="checkbox" checked={newProfile.bitlocker_pin ?? false} onChange={e => setNewProfile({ ...newProfile, bitlocker_pin: e.target.checked })} className="accent-amber-500" />
-                          PIN a 6 chiffres (TPM+PIN - redemarrage manuel requis)
-                        </label>
-                      )}
-                      <div className="flex items-center gap-2 pt-1">
-                        <label className="text-xs text-slate-400 shrink-0">Rotation LAPS</label>
-                        <select value={newProfile.laps_rotation_days ?? 0} onChange={e => setNewProfile({ ...newProfile, laps_rotation_days: parseInt(e.target.value) })} className="osiris-input text-xs flex-1">
-                          <option value={0}>Desactivee</option>
-                          <option value={30}>Tous les 30 jours</option>
-                          <option value={60}>Tous les 60 jours</option>
-                          <option value={90}>Tous les 90 jours</option>
-                          <option value={180}>Tous les 180 jours</option>
-                        </select>
-                      </div>
-                    </div>
-                    <div className="flex gap-1 col-span-2 sm:col-span-1">
-                      <input placeholder="Golden image (vide = install.wim auto)" title="Laissez vide pour utiliser install.wim de l'ISO" value={newProfile.win_image ?? ''} onChange={e => setNewProfile({ ...newProfile, win_image: e.target.value })} className="osiris-input text-xs font-mono flex-1 min-w-0" />
-                      <button type="button" title="Parcourir les WIM disponibles" onClick={() => { fetchWims(); setShowWimPicker('new') }} className="osiris-btn text-xs px-2 flex-shrink-0">📂</button>
-                    </div>
-                    <input type="number" min={1} max={20} placeholder="Index WIM (6=Pro)" title="Index de l'édition dans install.wim (1=Home, 6=Pro)" value={newProfile.win_index ?? 6} onChange={e => setNewProfile({ ...newProfile, win_index: parseInt(e.target.value) || 6 })} className="osiris-input text-xs font-mono" />
-                  </>
-                )}
-                <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer col-span-2 sm:col-span-1">
-                  <input type="checkbox" checked={newProfile.join_domain ?? true} onChange={e => setNewProfile({ ...newProfile, join_domain: e.target.checked })} className="accent-blue-500" />
-                  Joindre l'AD
-                </label>
-                {newProfile.join_domain && (
-                  <>
-                    <input placeholder="Domaine AD" value={newProfile.domain ?? ''} onChange={e => setNewProfile({ ...newProfile, domain: e.target.value })} className="osiris-input text-xs font-mono" />
-                    <input placeholder="Compte jonction AD (ex: svc-joinpc)" value={newProfile.domain_join_user ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_user: e.target.value })} className="osiris-input text-xs font-mono" />
-                    <input type="password" placeholder="Mot de passe jonction AD" value={newProfile.domain_join_password ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_password: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
-                  </>
-                )}
-                <input placeholder="Suffixe TeamViewer (optionnel)" title="Mot de passe TV = NOMPC_MAJUSCULES + ce suffixe" value={newProfile.tv_suffix ?? ''} onChange={e => setNewProfile({ ...newProfile, tv_suffix: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
-                {newProfile.os === 'windows' && (() => {
-                  const drives: {letter:string,path:string}[] = (() => { try { return JSON.parse(newProfile.network_drives || '[]') } catch { return [] } })()
-                  const printers: string[] = (() => { try { return JSON.parse(newProfile.printers || '[]') } catch { return [] } })()
-                  return (
-                    <div className="col-span-2 sm:col-span-3 space-y-2 pt-1 border-t border-slate-800/40">
-                      <p className="text-[9px] uppercase tracking-widest text-slate-600">Lecteurs reseau</p>
-                      {drives.map((d, i) => (
-                        <div key={i} className="flex gap-1">
-                          <input maxLength={1} placeholder="Z" value={d.letter} onChange={e => { const a=[...drives]; a[i]={...a[i],letter:e.target.value.toUpperCase()}; setNewProfile({...newProfile,network_drives:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono w-12 text-center" />
-                          <input placeholder="\\\\serveur\\partage" value={d.path} onChange={e => { const a=[...drives]; a[i]={...a[i],path:e.target.value}; setNewProfile({...newProfile,network_drives:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono flex-1" />
-                          <button type="button" onClick={() => { const a=drives.filter((_,j)=>j!==i); setNewProfile({...newProfile,network_drives:JSON.stringify(a)}) }} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
-                        </div>
-                      ))}
-                      <button type="button" onClick={() => setNewProfile({...newProfile,network_drives:JSON.stringify([...drives,{letter:'',path:''}])})} className="osiris-btn-ghost text-xs">+ Ajouter un lecteur</button>
-                      <p className="text-[9px] uppercase tracking-widest text-slate-600 pt-1">Imprimantes reseau</p>
-                      {printers.map((pr, i) => (
-                        <div key={i} className="flex gap-1">
-                          <input placeholder="\\\\serveur\\imprimante" value={pr} onChange={e => { const a=[...printers]; a[i]=e.target.value; setNewProfile({...newProfile,printers:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono flex-1" />
-                          <button type="button" onClick={() => { const a=printers.filter((_,j)=>j!==i); setNewProfile({...newProfile,printers:JSON.stringify(a)}) }} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
-                        </div>
-                      ))}
-                      <button type="button" onClick={() => setNewProfile({...newProfile,printers:JSON.stringify([...printers,''])})} className="osiris-btn-ghost text-xs">+ Ajouter une imprimante</button>
-                    </div>
-                  )
-                })()}
-                <div className="col-span-2 sm:col-span-3 space-y-1 pt-1 border-t border-slate-800/40">
-                  <p className="text-[9px] uppercase tracking-widest text-slate-600">Script post-install ({newProfile.os === 'windows' ? 'PowerShell' : 'Bash'})</p>
-                  <textarea rows={3} placeholder={newProfile.os === 'windows' ? '# PowerShell — ex: Set-ItemProperty -Path ... ' : '# Bash — ex: apt-get install -y ...'} value={newProfile.post_script ?? ''} onChange={e => setNewProfile({...newProfile, post_script: e.target.value})} className="osiris-input text-[10px] font-mono w-full resize-y col-span-2 sm:col-span-3" />
-                </div>
-                {/* Sélecteur d'applications */}
-                {(() => {
-                  const os = newProfile.os ?? 'ubuntu'
-                  const eligible = apps.filter(a => os === 'windows' ? a.winget_id : a.apt_package)
-
-                  if (eligible.length === 0) return null
-                  const selected = new Set((newProfile.app_ids ?? '').split(',').filter(Boolean))
-                  const toggle = (id: number) => {
-                    const s = new Set(selected)
-                    s.has(String(id)) ? s.delete(String(id)) : s.add(String(id))
-                    setNewProfile({ ...newProfile, app_ids: Array.from(s).join(',') })
-                  }
-                  return (
-                    <div className="col-span-2 sm:col-span-3 pt-1">
-                      <p className="text-[10px] uppercase tracking-widest text-slate-600 mb-1.5">Applications à installer</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {eligible.map(a => {
-                          const on = selected.has(String(a.id))
-                          return (
-                            <button key={a.id} type="button" onClick={() => toggle(a.id)}
-                              className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] border transition-colors cursor-pointer ${on ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'}`}>
-                              <span>{a.icon}</span><span>{a.name}</span>
-                            </button>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )
-                })()}
-                <button type="submit" className="osiris-btn text-xs px-3 sm:col-start-3">+ Créer</button>
-              </form>
-            </div>
+            {/* Profils de déploiement (liste + création + modales) */}
+            <ProfilesSection
+              token={auth.token}
+              profiles={profiles}
+              apps={apps}
+              onProfilesChanged={() => fetchProfiles(auth.token)}
+            />
             {/* Images OS ── col-span-2 */}
             <div className="osiris-table-wrap p-5 space-y-4 md:col-span-2">
               <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Images OS</h2>
@@ -1674,164 +1379,7 @@ export default function App() {
 
       {/* ── Modale : changement de mot de passe ──────────────────────────── */}
       {showSettingsModal && (
-        <div className="osiris-overlay" onClick={(e) => { if (e.target === e.currentTarget) { setShowSettingsModal(false); setTotpStep(null); setTotpSetup(null) } }}>
-          <div className="osiris-modal" style={{ maxWidth: '480px' }}>
-            <div className="osiris-modal-header">
-              <h2 className="text-xs font-bold uppercase tracking-widest text-white">Parametres du compte</h2>
-              <button onClick={() => { setShowSettingsModal(false); setTotpStep(null); setTotpSetup(null) }} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1"><IcoX cls="w-4 h-4" /></button>
-            </div>
-            {/* Sous-onglets */}
-            <div className="flex border-b border-slate-800">
-              {([
-                { id: 'password', label: 'Mot de passe' },
-                { id: 'totp', label: '2FA' },
-                { id: 'apikeys', label: 'Cles API' },
-                { id: 'integrations', label: 'Integrations' },
-              ] as const).map(t => (
-                <button key={t.id} onClick={() => { setSettingsTab(t.id as any); if (t.id === 'apikeys') fetchApiKeys(auth.token) }}
-                  className={`px-5 py-2.5 text-xs font-semibold tracking-wide border-b-2 transition-colors cursor-pointer ${settingsTab === t.id ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-600 hover:text-slate-400'}`}>
-                  {t.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Onglet mot de passe */}
-            {settingsTab === 'password' && (
-              pwSuccess ? (
-                <div className="p-6 space-y-5">
-                  <div className="border-l-2 border-emerald-700 pl-3 py-1">
-                    <p className="text-emerald-400 text-sm font-mono">Mot de passe mis a jour avec succes.</p>
-                  </div>
-                  <button onClick={() => setShowSettingsModal(false)} className="osiris-btn w-full justify-center">Fermer</button>
-                </div>
-              ) : (
-                <form onSubmit={handlePasswordChange} className="p-6 space-y-4">
-                  {pwError && <div className="border-l-2 border-red-700 pl-3 py-1"><p className="text-red-400 text-xs font-mono">{pwError}</p></div>}
-                  <div className="space-y-1.5">
-                    <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Mot de passe actuel</label>
-                    <input required type="password" placeholder="..." value={pwCurrent} onChange={e => setPwCurrent(e.target.value)} className="osiris-input" autoFocus />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Nouveau mot de passe</label>
-                    <input required type="password" placeholder="8 caracteres minimum" value={pwNew} onChange={e => setPwNew(e.target.value)} className="osiris-input" />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Confirmer</label>
-                    <input required type="password" placeholder="..." value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} className="osiris-input" />
-                  </div>
-                  <div className="flex justify-end gap-3 pt-2">
-                    <button type="button" onClick={() => setShowSettingsModal(false)} className="osiris-btn-ghost">Annuler</button>
-                    <button type="submit" disabled={pwLoading} className="osiris-btn">{pwLoading ? 'Mise a jour...' : 'Changer le mot de passe'}</button>
-                  </div>
-                </form>
-              )
-            )}
-
-            {/* Onglet 2FA */}
-            {/* Onglet cles API */}
-            {settingsTab === 'apikeys' && (
-              <div className="p-6 space-y-4">
-                {/* Cle nouvellement creee - a copier maintenant */}
-                {createdKey && (
-                  <div className="border border-amber-800/60 bg-amber-950/30 rounded p-3 space-y-2">
-                    <p className="text-amber-400 text-xs font-semibold">Copiez cette cle maintenant - elle ne sera plus affichee.</p>
-                    <div className="flex gap-2 items-center">
-                      <code className="text-amber-300 text-[11px] font-mono break-all flex-1">{createdKey}</code>
-                      <button onClick={() => { navigator.clipboard.writeText(createdKey); toast.success('Cle copiee') }} className="osiris-btn text-xs shrink-0">Copier</button>
-                    </div>
-                    <button onClick={() => setCreatedKey(null)} className="osiris-btn-ghost text-[10px]">J'ai copie ma cle</button>
-                  </div>
-                )}
-
-                {/* Liste des cles */}
-                {apiKeys.length > 0 ? (
-                  <div className="space-y-1">
-                    {apiKeys.map((k: any) => (
-                      <div key={k.id} className="flex items-center justify-between py-2 px-3 border border-slate-800/60 rounded">
-                        <div>
-                          <span className="text-white text-xs font-medium">{k.name}</span>
-                          <span className="text-slate-700 text-[10px] font-mono ml-2">{k.prefix}...</span>
-                          <p className="text-[10px] text-slate-700 mt-0.5">
-                            Creee le {new Date(k.created_at).toLocaleDateString('fr-FR')}
-                            {k.last_used_at ? ` - utilisee le ${new Date(k.last_used_at).toLocaleDateString('fr-FR')}` : ' - jamais utilisee'}
-                          </p>
-                        </div>
-                        <button onClick={() => revokeApiKey(k.id)} className="osiris-action-btn osiris-action-btn--danger shrink-0" title="Revoquer"><IcoX /></button>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-slate-700 text-xs">Aucune cle API pour l'instant.</p>
-                )}
-
-                {/* Creer une nouvelle cle */}
-                <div className="pt-2 border-t border-slate-800/40 space-y-2">
-                  <p className="text-[9px] uppercase tracking-widest text-slate-600">Nouvelle cle</p>
-                  <div className="flex gap-2">
-                    <input placeholder="Nom (ex: ConnectWise, Grafana, Script backup)" value={newKeyName} onChange={e => setNewKeyName(e.target.value)} onKeyDown={e => e.key === 'Enter' && createApiKey()} className="osiris-input text-xs flex-1" autoFocus />
-                    <button onClick={createApiKey} disabled={!newKeyName.trim()} className="osiris-btn text-xs shrink-0">Generer</button>
-                  </div>
-                  <p className="text-[10px] text-slate-700">Utilisez la cle dans l'en-tete HTTP : <code className="text-slate-500">Authorization: Bearer osiris_sk_...</code></p>
-                </div>
-              </div>
-            )}
-
-            {settingsTab === 'integrations' && (
-              <IntegrationsTab apiUrl={API_URL} />
-            )}
-
-            {settingsTab === 'totp' && (
-              <div className="p-6 space-y-4">
-                {totpEnabled ? (
-                  totpStep === 'confirm_disable' ? (
-                    <div className="space-y-3">
-                      <p className="text-xs text-slate-400">Saisissez votre mot de passe pour desactiver le 2FA :</p>
-                      <div className="flex gap-2">
-                        <input type="password" placeholder="Mot de passe" value={totpDisablePassword} onChange={e => setTotpDisablePassword(e.target.value)} className="osiris-input text-xs flex-1" autoFocus />
-                        <button onClick={disableTotp} className="osiris-btn text-xs">Confirmer</button>
-                        <button onClick={() => setTotpStep(null)} className="osiris-btn-ghost text-xs">Annuler</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-3">
-                        <span className="w-2 h-2 rounded-full bg-green-500 inline-block" />
-                        <span className="text-green-400 text-sm">Double authentification active</span>
-                      </div>
-                      <p className="text-xs text-slate-600">Votre compte est protege par un code TOTP a chaque connexion.</p>
-                      <button onClick={() => setTotpStep('confirm_disable')} className="osiris-btn-ghost text-xs text-red-400 border-red-900">Desactiver le 2FA</button>
-                    </div>
-                  )
-                ) : totpStep === 'setup' && totpSetup ? (
-                  <div className="space-y-4">
-                    <p className="text-xs text-slate-400">Scannez ce QR code avec Google Authenticator, Authy ou une app compatible :</p>
-                    <div className="flex justify-center p-4 bg-slate-950 rounded border border-slate-800">
-                      <QRCodeSVG value={totpSetup.uri} size={180} bgColor="#020817" fgColor="#e2e8f0" />
-                    </div>
-                    <p className="text-[10px] text-slate-700 font-mono break-all">Secret manuel : {totpSetup.secret}</p>
-                    <div className="space-y-1.5">
-                      <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Code de confirmation</label>
-                      <div className="flex gap-2">
-                        <input maxLength={6} placeholder="000000" value={totpCode} onChange={e => setTotpCode(e.target.value.replace(/\D/g, ''))} onKeyDown={e => e.key === 'Enter' && confirmTotpEnable()} className="osiris-input text-center text-lg tracking-widest font-mono flex-1" autoFocus />
-                        <button onClick={confirmTotpEnable} className="osiris-btn">Activer</button>
-                      </div>
-                    </div>
-                    <button onClick={() => { setTotpStep(null); setTotpSetup(null) }} className="osiris-btn-ghost text-xs">Annuler</button>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-3">
-                      <span className="w-2 h-2 rounded-full bg-slate-700 inline-block" />
-                      <span className="text-slate-400 text-sm">Double authentification inactive</span>
-                    </div>
-                    <p className="text-xs text-slate-600">Activez le 2FA pour proteger votre compte avec un code genere par une application d'authentification.</p>
-                    <button onClick={startTotpSetup} className="osiris-btn text-xs">Configurer le 2FA</button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
+        <SettingsModal token={auth.token} onClose={() => setShowSettingsModal(false)} />
       )}
 
       {/* ── Modale : aide import CSV ─────────────────────────────────────── */}
@@ -1883,40 +1431,6 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
         </div>
       )}
 
-      {/* ── Modale : navigateur WIM ──────────────────────────────────────── */}
-      {showWimPicker && (
-        <div className="osiris-overlay" onClick={e => { if (e.target === e.currentTarget) setShowWimPicker(null) }}>
-          <div className="osiris-modal w-full max-w-md">
-            <div className="osiris-modal-header">
-              <span className="text-sm font-semibold">Fichiers WIM disponibles</span>
-              <button onClick={() => setShowWimPicker(null)} className="osiris-action-btn"><IcoX /></button>
-            </div>
-            <div className="p-4 space-y-1 max-h-80 overflow-y-auto">
-              {wims.length === 0 && <p className="text-xs text-slate-600 font-mono">Aucun fichier WIM trouvé dans {"/srv/data/windows/"}</p>}
-              {wims.map(w => (
-                <button key={w.name} type="button"
-                  onClick={() => {
-                    if (showWimPicker === 'new') setNewProfile(p => ({ ...p, win_image: w.is_golden ? w.name : '' }))
-                    else if (editingProfile) setEditingProfile({ ...editingProfile, win_image: w.is_golden ? w.name : '' })
-                    setShowWimPicker(null)
-                  }}
-                  className="w-full flex items-center justify-between px-3 py-2 rounded text-xs hover:bg-slate-800 transition-colors text-left"
-                >
-                  <div className="flex items-center gap-2">
-                    <span>{w.is_golden ? '🪙' : '💿'}</span>
-                    <span className="font-mono text-white">{w.name}</span>
-                    {!w.is_golden && <span className="text-[9px] text-slate-600 uppercase">image de base</span>}
-                  </div>
-                  <span className="text-slate-500 shrink-0">{w.size_mb.toLocaleString('fr-FR')} Mo</span>
-                </button>
-              ))}
-            </div>
-            <div className="px-4 pb-4">
-              <p className="text-[10px] text-slate-700 font-mono">Cliquer sur un fichier pour le sélectionner. 🪙 = golden image · 💿 = image Windows de base</p>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── Modale : enregistrement / édition ─────────────────────────────── */}
       {isModalOpen && (
@@ -2017,142 +1531,6 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
               <div className="flex gap-3 justify-end">
                 <button onClick={() => { setDeletingMac(null); setDeleteDestroyVm(false) }} className="osiris-btn-ghost">Annuler</button>
                 <button onClick={() => handleDelete(deletingMac!)} className="osiris-btn osiris-btn--danger">Supprimer</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Modale : édition profil ───────────────────────────────────────── */}
-      {editingProfile && (
-        <div className="osiris-overlay" onClick={e => { if (e.target === e.currentTarget) setEditingProfile(null) }}>
-          <div className="osiris-modal">
-            <div className="osiris-modal-header">
-              <span className="font-semibold text-white">Éditer — {editingProfile.name}</span>
-              <button onClick={() => setEditingProfile(null)} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1"><IcoX cls="w-4 h-4" /></button>
-            </div>
-            <div className="p-5 space-y-3">
-              <div className="grid grid-cols-2 gap-2">
-                <label className="text-xs text-slate-400 self-center col-span-2">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" checked={editingProfile.join_domain ?? true} onChange={e => setEditingProfile({ ...editingProfile, join_domain: e.target.checked })} className="accent-blue-500" />
-                    <span>Joindre l'AD</span>
-                  </label>
-                </label>
-                {editingProfile.join_domain && (<>
-                  <label className="text-xs text-slate-400 self-center">Domaine AD</label>
-                  <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain} onChange={e => setEditingProfile({ ...editingProfile, domain: e.target.value })} />
-                  <label className="text-xs text-slate-400 self-center">Compte jonction</label>
-                  <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain_join_user} onChange={e => setEditingProfile({ ...editingProfile, domain_join_user: e.target.value })} />
-                  <label className="text-xs text-slate-400 self-center">Mot de passe jonction</label>
-                  <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, domain_join_password: e.target.value })} />
-                </>)}
-                {editingProfile.os === 'windows' && (<>
-                  <div className="col-span-2 space-y-1">
-                    <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-                      <input type="checkbox" checked={editingProfile.enable_bitlocker ?? true} onChange={e => setEditingProfile({ ...editingProfile, enable_bitlocker: e.target.checked })} className="accent-blue-500" />
-                      Activer BitLocker (cle de recuperation dans OSIRIS)
-                    </label>
-                    {editingProfile.enable_bitlocker && (
-                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer pl-5">
-                        <input type="checkbox" checked={editingProfile.bitlocker_pin ?? false} onChange={e => setEditingProfile({ ...editingProfile, bitlocker_pin: e.target.checked })} className="accent-amber-500" />
-                        PIN a 6 chiffres (TPM+PIN - redemarrage manuel requis)
-                      </label>
-                    )}
-                    <div className="flex items-center gap-2 pt-1">
-                      <label className="text-xs text-slate-400 shrink-0">Rotation LAPS</label>
-                      <select value={editingProfile.laps_rotation_days ?? 0} onChange={e => setEditingProfile({ ...editingProfile, laps_rotation_days: parseInt(e.target.value) })} className="osiris-input text-xs flex-1">
-                        <option value={0}>Desactivee</option>
-                        <option value={30}>Tous les 30 jours</option>
-                        <option value={60}>Tous les 60 jours</option>
-                        <option value={90}>Tous les 90 jours</option>
-                        <option value={180}>Tous les 180 jours</option>
-                      </select>
-                    </div>
-                  </div>
-                  <label className="text-xs text-slate-400 self-center">Index WIM</label>
-                  <input type="number" min={1} max={20} className="osiris-input text-xs font-mono" defaultValue={editingProfile.win_index} onChange={e => setEditingProfile({ ...editingProfile, win_index: parseInt(e.target.value) || 1 })} />
-                  <label className="text-xs text-slate-400 self-center">Golden image</label>
-                  <div className="flex gap-1">
-                    <input className="osiris-input text-xs font-mono flex-1 min-w-0" placeholder="vide = install.wim auto" defaultValue={editingProfile.win_image} onChange={e => setEditingProfile({ ...editingProfile, win_image: e.target.value })} />
-                    <button type="button" title="Parcourir les WIM disponibles" onClick={() => { fetchWims(); setShowWimPicker('edit') }} className="osiris-btn text-xs px-2 flex-shrink-0">📂</button>
-                  </div>
-                </>)}
-                <label className="text-xs text-slate-400 self-center">Suffixe TeamViewer</label>
-                <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, tv_suffix: e.target.value })} />
-                {(editingProfile.os === 'ubuntu' || editingProfile.os === 'debian') && (<>
-                  <label className="text-xs text-slate-400 self-center">Type de machine</label>
-                  <select value={editingProfile.machine_type ?? 'workstation'} onChange={e => setEditingProfile({ ...editingProfile, machine_type: e.target.value })} className="osiris-input text-xs">
-                    <option value="workstation">Poste de travail</option>
-                    <option value="server">Serveur</option>
-                  </select>
-                </>)}
-              </div>
-              {(editingProfile.os === 'ubuntu' || editingProfile.os === 'debian') && editingProfile.machine_type === 'server' && (
-                <div className="pt-2 border-t border-slate-800/40 space-y-1">
-                  <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
-                  <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" defaultValue={editingProfile.ssh_authorized_keys} onChange={e => setEditingProfile({ ...editingProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
-                </div>
-              )}
-              {editingProfile.os === 'windows' && (() => {
-                const drives: {letter:string,path:string}[] = (() => { try { return JSON.parse(editingProfile.network_drives || '[]') } catch { return [] } })()
-                const printers: string[] = (() => { try { return JSON.parse(editingProfile.printers || '[]') } catch { return [] } })()
-                return (
-                  <div className="space-y-2 pt-2 border-t border-slate-800/40">
-                    <p className="text-[9px] uppercase tracking-widest text-slate-600">Lecteurs reseau</p>
-                    {drives.map((d, i) => (
-                      <div key={i} className="flex gap-1">
-                        <input maxLength={1} placeholder="Z" value={d.letter} onChange={e => { const a=[...drives]; a[i]={...a[i],letter:e.target.value.toUpperCase()}; setEditingProfile({...editingProfile,network_drives:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono w-12 text-center" />
-                        <input placeholder="\\\\serveur\\partage" value={d.path} onChange={e => { const a=[...drives]; a[i]={...a[i],path:e.target.value}; setEditingProfile({...editingProfile,network_drives:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono flex-1" />
-                        <button type="button" onClick={() => { const a=drives.filter((_,j)=>j!==i); setEditingProfile({...editingProfile,network_drives:JSON.stringify(a)}) }} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
-                      </div>
-                    ))}
-                    <button type="button" onClick={() => setEditingProfile({...editingProfile,network_drives:JSON.stringify([...drives,{letter:'',path:''}])})} className="osiris-btn-ghost text-xs">+ Ajouter un lecteur</button>
-                    <p className="text-[9px] uppercase tracking-widest text-slate-600 pt-1">Imprimantes reseau</p>
-                    {printers.map((pr, i) => (
-                      <div key={i} className="flex gap-1">
-                        <input placeholder="\\\\serveur\\imprimante" value={pr} onChange={e => { const a=[...printers]; a[i]=e.target.value; setEditingProfile({...editingProfile,printers:JSON.stringify(a)}) }} className="osiris-input text-xs font-mono flex-1" />
-                        <button type="button" onClick={() => { const a=printers.filter((_,j)=>j!==i); setEditingProfile({...editingProfile,printers:JSON.stringify(a)}) }} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
-                      </div>
-                    ))}
-                    <button type="button" onClick={() => setEditingProfile({...editingProfile,printers:JSON.stringify([...printers,''])})} className="osiris-btn-ghost text-xs">+ Ajouter une imprimante</button>
-                  </div>
-                )
-              })()}
-              <div className="pt-2 border-t border-slate-800/40 space-y-1">
-                <p className="text-[9px] uppercase tracking-widest text-slate-600">Script post-install ({editingProfile.os === 'windows' ? 'PowerShell' : 'Bash'})</p>
-                <textarea rows={3} placeholder={editingProfile.os === 'windows' ? '# PowerShell' : '# Bash'} defaultValue={editingProfile.post_script} onChange={e => setEditingProfile({...editingProfile, post_script: e.target.value})} className="osiris-input text-[10px] font-mono w-full resize-y" />
-              </div>
-              {/* Sélecteur d'applications */}
-              {(() => {
-                const eligible = apps.filter(a => editingProfile.os === 'windows' ? a.winget_id : a.apt_package)
-                if (eligible.length === 0) return null
-                const selected = new Set((editingProfile.app_ids ?? '').split(',').filter(Boolean))
-                const toggle = (id: number) => {
-                  const s = new Set(selected)
-                  s.has(String(id)) ? s.delete(String(id)) : s.add(String(id))
-                  setEditingProfile({ ...editingProfile, app_ids: Array.from(s).join(',') })
-                }
-                return (
-                  <div>
-                    <p className="text-[10px] uppercase tracking-widest text-slate-600 mb-1.5">Applications à installer</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {eligible.map(a => {
-                        const on = selected.has(String(a.id))
-                        return (
-                          <button key={a.id} type="button" onClick={() => toggle(a.id)}
-                            className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] border transition-colors cursor-pointer ${on ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'}`}>
-                            <span>{a.icon}</span><span>{a.name}</span>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )
-              })()}
-              <div className="flex gap-2 justify-end pt-2">
-                <button onClick={() => setEditingProfile(null)} className="osiris-btn-ghost text-xs">Annuler</button>
-                <button onClick={() => { handlePatchProfile(editingProfile.id!, editingProfile); setEditingProfile(null) }} className="osiris-btn text-xs">Enregistrer</button>
               </div>
             </div>
           </div>
