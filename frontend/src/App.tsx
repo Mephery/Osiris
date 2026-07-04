@@ -5,12 +5,11 @@ import { Toaster, toast } from 'sonner'
 import './App.css'
 import type {
   AuthState, Organization, Machine, Profile, Application,
-  DeploymentEvent, Hypervisor, OsImage, SnapshotEntry,
+  DeploymentEvent, Hypervisor, OsImage, SnapshotEntry, LiveEvent,
 } from './types'
 import { IMAGE_STATUS, EMPTY_FORM, authHeader } from './types'
 import {
-  IcoOsiris, IcoRefresh, IcoSearch, IcoPower, IcoPencil, IcoX,
-  IcoChevDown, IcoChevUp, IcoGear, IcoTerminal, IcoCamera,
+  IcoOsiris, IcoRefresh, IcoSearch, IcoPower, IcoPencil, IcoX, IcoChevRight, IcoGear,
 } from './icons'
 import { LoginPage } from './LoginPage'
 import { DashboardTab } from './DashboardTab'
@@ -20,6 +19,8 @@ import { DriversTab } from './DriversTab'
 import { InfrastructureTab } from './InfrastructureTab'
 import { SettingsModal } from './SettingsModal'
 import { ProfilesSection } from './ProfilesSection'
+import { SkeletonRows } from './Skeleton'
+import { MachineDetailPanel } from './MachineDetailPanel'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 // ── Composant principal ────────────────────────────────────────────────────────
@@ -43,6 +44,9 @@ export default function App() {
   const setAuth = (a: AuthState | null) => { saveAuth(a); setAuthState(a) }
 
   const [machines, setMachines]     = useState<Machine[]>([])
+  // Toujours à jour, pour lire le hostname courant depuis le handler WebSocket (fermeture figée sur [auth]).
+  const machinesRef = useRef<Machine[]>([])
+  useEffect(() => { machinesRef.current = machines }, [machines])
   const [orgs, setOrgs]             = useState<Organization[]>([])
   const [selectedOrg, setSelectedOrg] = useState<number | null>(null)
   const [loading, setLoading]       = useState(true)
@@ -59,7 +63,6 @@ export default function App() {
   const [deleteDestroyVm, setDeleteDestroyVm] = useState(false)
   const [vmPowerState, setVmPowerState]       = useState<Record<string, { status: string; cpu: number; mem_mb: number } | null>>({})
   const [vmPowerLoading, setVmPowerLoading]   = useState<Record<string, boolean>>({})
-  const [snapshotsMac, setSnapshotsMac]       = useState<string | null>(null)
   const [snapshots, setSnapshots]             = useState<SnapshotEntry[]>([])
   const [snapshotsLoading, setSnapshotsLoading] = useState(false)
   const [snapshotCreating, setSnapshotCreating] = useState(false)
@@ -78,6 +81,8 @@ export default function App() {
   // ── Section admin : gestion des orgs et users ──────────────────────────────
   // Signal de rafraîchissement pour l'onglet Capture (incrémenté quand une capture se termine, cf. WebSocket)
   const [captureRefresh, setCaptureRefresh] = useState(0)
+  // Flux d'activité temps réel du dashboard (alimenté par le WebSocket ci-dessous), les 30 derniers événements.
+  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([])
   const [csvImporting, setCsvImporting] = useState(false)
   const [showCsvHint, setShowCsvHint]   = useState(false)
   const [csvHintDismiss, setCsvHintDismiss] = useState(false)
@@ -106,12 +111,11 @@ export default function App() {
 
   // ── Logs déploiement + historique ─────────────────────────────────────────
   const [deployLogs, setDeployLogs]         = useState<Record<string, string[]>>({})
-  const [expandedLogs, setExpandedLogs]     = useState<Set<string>>(new Set())
+  // Panneau latéral de détails machine : mac de la machine actuellement affichée, ou null si fermé.
+  const [detailMac, setDetailMac]           = useState<string | null>(null)
   const [machineHistory, setMachineHistory] = useState<Record<string, DeploymentEvent[]>>({})
-  const logEndRefs = useRef<Record<string, HTMLPreElement | null>>({})
   const [bitlockerData, setBitlockerData] = useState<Record<string, { key: string | null, pin: string | null }>>({})
   const [lapsData, setLapsData] = useState<Record<string, string>>({})
-  const [editingNotes, setEditingNotes] = useState<Record<string, string>>({})
 
   const fetchHistory = (mac: string) => {
     if (!auth) return
@@ -340,12 +344,16 @@ export default function App() {
             toast.error(`Échec de la capture — ${msg.mac}`)
           }
           setCaptureRefresh(n => n + 1)
+          const hostname = machinesRef.current.find(m => m.mac === mac)?.hostname ?? mac
+          setLiveEvents(prev => [{ id: `${Date.now()}-${mac}`, timestamp: Date.now(), mac, hostname, kind: 'capture' as const, success: msg.success }, ...prev].slice(0, 30))
         } else {
           const { status, deployed_at } = msg
           if (status === 'pending') setDeployLogs((prev) => { const n = { ...prev }; delete n[mac]; return n })
           setMachines((prev) =>
             prev.map((m: Machine) => m.mac === mac ? { ...m, status, deployed_at: deployed_at ?? m.deployed_at, dism_progress: status === 'deployed' ? 100 : m.dism_progress } : m)
           )
+          const hostname = machinesRef.current.find(m => m.mac === mac)?.hostname ?? mac
+          setLiveEvents(prev => [{ id: `${Date.now()}-${mac}`, timestamp: Date.now(), mac, hostname, kind: 'status' as const, status }, ...prev].slice(0, 30))
         }
       }
 
@@ -359,13 +367,6 @@ export default function App() {
     connect()
     return () => { clearTimeout(reconnectTimer); ws?.close() }
   }, [auth])
-
-  useEffect(() => {
-    for (const mac of Array.from(expandedLogs)) {
-      const el = logEndRefs.current[mac]
-      if (el) el.scrollTop = el.scrollHeight
-    }
-  }, [deployLogs, expandedLogs])
 
   if (pendingTotp) return (
     <div className="min-h-screen flex items-center justify-center p-4">
@@ -465,6 +466,17 @@ export default function App() {
       .then((data: SnapshotEntry[]) => setSnapshots(data))
       .catch(() => toast.error('Impossible de charger les snapshots'))
       .finally(() => setSnapshotsLoading(false))
+  }
+
+  // Ouvre le panneau latéral de détails pour une machine (logs, historique, BitLocker/LAPS, VM+snapshots).
+  const openDetail = (mac: string) => {
+    setDetailMac(mac)
+    fetchHistory(mac)
+    const m = machines.find(x => x.mac === mac)
+    if (m?.proxmox_vm_id) {
+      fetchVmStatus(mac)
+      fetchSnapshots(mac)
+    }
   }
 
   const handleCreateSnapshot = (mac: string) => {
@@ -651,12 +663,12 @@ export default function App() {
         {/* ── Barre supérieure ─────────────────────────────────────────── */}
         <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2.5">
+            <div className="osiris-logo-shine flex items-center gap-2.5">
               <IcoOsiris cls="w-5 h-5 text-blue-500" />
               <span className="text-lg font-black tracking-[0.22em] text-white uppercase select-none">Osiris</span>
             </div>
             <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono text-slate-600 border-l border-slate-800 pl-5">
-              <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${error ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`} />
+              <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${error ? 'bg-red-500' : 'bg-emerald-500 animate-pulse osiris-live-dot'}`} />
               {error ? 'API hors ligne' : loading ? 'Connexion…' : 'Connecté'}
             </div>
           </div>
@@ -667,7 +679,7 @@ export default function App() {
           </div>
         </div>
         {/* ── Onglets ──────────────────────────────────────────────────── */}
-        <div className="max-w-7xl mx-auto px-6 flex items-center gap-0 border-t border-slate-800/40">
+        <div className="max-w-7xl mx-auto px-6 flex items-center gap-0 border-t border-slate-800/40 overflow-x-auto">
           {([
             { id: 'machines'       as const, label: 'Machines',        adminOnly: false },
             { id: 'dashboard'      as const, label: 'Tableau de bord',  adminOnly: false },
@@ -678,7 +690,7 @@ export default function App() {
             { id: 'capture'        as const, label: 'Capture',          adminOnly: true  },
           ]).filter(t => !t.adminOnly || auth.role === 'admin').map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-              className={`px-5 py-2.5 text-xs font-semibold tracking-wide border-b-2 transition-colors cursor-pointer ${
+              className={`flex-shrink-0 whitespace-nowrap px-5 py-2.5 text-xs font-semibold tracking-wide border-b-2 transition-colors cursor-pointer ${
                 activeTab === tab.id
                   ? 'border-blue-500 text-blue-400'
                   : 'border-transparent text-slate-600 hover:text-slate-300 hover:border-slate-600'
@@ -822,7 +834,7 @@ export default function App() {
 
         {/* ── Onglet Tableau de bord ───────────────────────────────────────── */}
         {activeTab === 'dashboard' && (
-          <DashboardTab token={auth.token} />
+          <DashboardTab token={auth.token} liveEvents={liveEvents} />
         )}
 
         {/* ── Onglet Infrastructure ────────────────────────────────────────── */}
@@ -976,9 +988,8 @@ export default function App() {
 
         {/* ── Tableau des machines ─────────────────────────────────────────── */}
         {loading && (
-          <div className="flex items-center gap-2.5 text-slate-600 font-mono text-xs py-6">
-            <span className="inline-block w-1.5 h-1.5 bg-blue-600 rounded-full animate-ping" />
-            Chargement…
+          <div className="osiris-table-wrap">
+            <SkeletonRows count={8} cols={6} />
           </div>
         )}
         {error && <div className="border-l-2 border-red-700 pl-4 py-2"><p className="text-red-400 text-sm font-mono">{error}</p></div>}
@@ -993,11 +1004,11 @@ export default function App() {
         )}
 
         {!loading && !error && (
-          <div className="osiris-table-wrap overflow-x-auto">
+          <div className="osiris-table-wrap osiris-table-scroll overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-800/80">
-                  <th className="px-4 py-3 w-8">
+                  <th className="osiris-table-sticky-th px-4 py-3 w-8">
                     <input type="checkbox"
                       checked={selectedMacs.size === filteredMachines.length && filteredMachines.length > 0}
                       ref={el => { if (el) el.indeterminate = selectedMacs.size > 0 && selectedMacs.size < filteredMachines.length }}
@@ -1005,7 +1016,7 @@ export default function App() {
                       className="accent-blue-500 cursor-pointer" />
                   </th>
                   {["Nom d'hôte", "Adresse MAC", "Client / Org", "OS", "Statut", "OU / Actions"].map(h => (
-                    <th key={h} className="text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-widest text-slate-600 whitespace-nowrap">{h}</th>
+                    <th key={h} className="osiris-table-sticky-th text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-widest text-slate-600 whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -1014,9 +1025,9 @@ export default function App() {
                   <tr><td colSpan={7} className="px-4 py-16 text-center text-slate-700 font-mono text-xs">
                     {machines.length === 0 ? 'Aucune machine enregistrée' : 'Aucun résultat pour cette recherche'}
                   </td></tr>
-                ) : filteredMachines.map((machine) => (
+                ) : filteredMachines.map((machine, i) => (
                   <React.Fragment key={machine.id}>
-                  <tr className={`osiris-row transition-colors ${selectedMacs.has(machine.mac) ? 'bg-blue-950/20' : ''}`}>
+                  <tr className={`osiris-row osiris-row-in transition-colors ${selectedMacs.has(machine.mac) ? 'bg-blue-950/20' : ''}`} style={{ animationDelay: `${Math.min(i, 18) * 40}ms` }}>
                     <td className="px-4 py-3 w-8">
                       <input type="checkbox" checked={selectedMacs.has(machine.mac)} onChange={() => toggleSelect(machine.mac)} className="accent-blue-500 cursor-pointer" />
                     </td>
@@ -1073,34 +1084,20 @@ export default function App() {
                       {machine.smoke_status === 'warnings' && (
                         <span className="inline-block mt-1 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-700 text-amber-400 cursor-pointer"
                           title="Cliquer pour voir les details"
-                          onClick={() => {
-                            const isOpen = expandedLogs.has(machine.mac)
-                            setExpandedLogs(prev => { const s = new Set(prev); isOpen ? s.delete(machine.mac) : s.add(machine.mac); return s })
-                            if (!expandedLogs.has(machine.mac)) fetchHistory(machine.mac)
-                          }}>
+                          onClick={() => openDetail(machine.mac)}>
                           {(() => { try { const t = JSON.parse(machine.smoke_results ?? '[]'); const n = t.filter((x: any) => !x.ok).length; return `${n} alerte${n > 1 ? 's' : ''}` } catch { return 'Alertes' } })()}
                         </span>
                       )}
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
-                        <span className="font-mono text-xs text-slate-600 truncate max-w-[140px]" title={machine.ou}>{machine.ou || '—'}</span>
-                        <div className="flex items-center gap-1 ml-auto flex-shrink-0">
-                          {(deployLogs[machine.mac]?.length ?? 0) > 0 && (
-                            <button
-                              onClick={() => {
-                                const isOpen = expandedLogs.has(machine.mac)
-                                setExpandedLogs(prev => {
-                                  const s = new Set(prev)
-                                  isOpen ? s.delete(machine.mac) : s.add(machine.mac)
-                                  return s
-                                })
-                                if (!isOpen) fetchHistory(machine.mac)
-                              }}
-                              className="osiris-action-btn"
-                              title="Logs / Historique"
-                            >{expandedLogs.has(machine.mac) ? <IcoChevUp /> : <IcoChevDown />}</button>
-                          )}
+                        <span className="font-mono text-xs text-slate-600 truncate max-w-[100px]" title={machine.ou}>{machine.ou || '—'}</span>
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          <button
+                            onClick={() => openDetail(machine.mac)}
+                            className="osiris-action-btn"
+                            title="Détails (logs, historique, LAPS/BitLocker, VM...)"
+                          ><IcoChevRight /></button>
                           <button
                             onClick={() => handleWol(machine.mac, machine.hostname)}
                             className="osiris-action-btn"
@@ -1124,37 +1121,6 @@ export default function App() {
                             ><IcoRefresh cls="w-3 h-3 inline" /><IcoPower cls="w-3 h-3 inline" /></button>
                           )}
                           <button onClick={() => openEdit(machine)} className="osiris-action-btn" title="Modifier"><IcoPencil /></button>
-                          {machine.proxmox_vm_id ? (() => {
-                            const ps = vmPowerState[machine.mac]
-                            const loading = vmPowerLoading[machine.mac]
-                            const hv = hypervisors.find(h => h.id === machine.hypervisor_id)
-                            const consoleUrl = hv ? `${hv.url}/?console=kvm&novnc=1&vmid=${machine.proxmox_vm_id}&node=${machine.proxmox_node}` : ''
-                            return (
-                              <>
-                                <button onClick={() => fetchVmStatus(machine.mac)} className="osiris-action-btn" title={ps ? `VM ${ps.status} · CPU ${ps.cpu}% · RAM ${ps.mem_mb} Mo` : 'Voir statut VM'}>
-                                  <span className={`inline-block w-2 h-2 rounded-full ${!ps ? 'bg-slate-600' : ps.status === 'running' ? 'bg-green-500' : 'bg-red-500'}`} />
-                                </button>
-                                {ps?.status === 'running' ? (<>
-                                  <button onClick={() => handleVmPower(machine.mac, 'shutdown')} disabled={loading} title="Arrêt propre" className="osiris-action-btn text-[10px]">⏻</button>
-                                  <button onClick={() => handleVmPower(machine.mac, 'reboot')} disabled={loading} title="Redémarrer" className="osiris-action-btn text-[10px]">↺</button>
-                                </>) : ps?.status === 'stopped' ? (
-                                  <button onClick={() => handleVmPower(machine.mac, 'start')} disabled={loading} title="Démarrer la VM" className="osiris-action-btn text-[10px]">▶</button>
-                                ) : null}
-                                {consoleUrl && (
-                                  <a href={consoleUrl} target="_blank" rel="noreferrer" className="osiris-action-btn" title="Console noVNC (ouvre Proxmox)">
-                                    <IcoTerminal />
-                                  </a>
-                                )}
-                                <button onClick={() => {
-                                  const next = snapshotsMac === machine.mac ? null : machine.mac
-                                  setSnapshotsMac(next)
-                                  if (next) fetchSnapshots(next)
-                                }} className="osiris-action-btn" title="Snapshots">
-                                  <IcoCamera />
-                                </button>
-                              </>
-                            )
-                          })() : null}
                           {auth.role === 'admin' && (
                             <button onClick={() => { setDeletingMac(machine.mac); setDeleteDestroyVm(false) }} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                           )}
@@ -1162,212 +1128,6 @@ export default function App() {
                       </div>
                     </td>
                   </tr>
-                  {expandedLogs.has(machine.mac) && (
-                    <tr className="bg-[#060912]">
-                      <td colSpan={7} className="px-4 pt-3 pb-4 space-y-3">
-                        {/* ── Logs live ── */}
-                        {(deployLogs[machine.mac]?.length ?? 0) > 0 && (
-                          <div>
-                            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1">Logs en direct</p>
-                            <pre ref={el => { logEndRefs.current[machine.mac] = el }} className="text-[10px] font-mono text-slate-400 max-h-40 overflow-y-auto leading-relaxed whitespace-pre-wrap">
-                              {deployLogs[machine.mac].join('\n')}
-                            </pre>
-                          </div>
-                        )}
-                        {/* ── Historique ── */}
-                        <div>
-                          <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Historique des déploiements</p>
-                          {(machineHistory[machine.mac]?.length ?? 0) === 0 ? (
-                            <p className="text-[10px] font-mono text-slate-700">Aucun événement enregistré</p>
-                          ) : (
-                            <div className="space-y-px">
-                              {machineHistory[machine.mac].map(ev => {
-                                const colors: Record<string, string> = {
-                                  deployed: 'text-green-400', deploying: 'text-blue-400',
-                                  pending: 'text-slate-400', failed: 'text-red-400',
-                                }
-                                const d = new Date(ev.timestamp)
-                                const fmt = d.toLocaleString('fr-FR', { day:'2-digit', month:'2-digit', year:'2-digit', hour:'2-digit', minute:'2-digit' })
-                                return (
-                                  <div key={ev.id} className="flex items-center gap-3 text-[10px] font-mono py-0.5">
-                                    <span className="text-slate-600 shrink-0">{fmt}</span>
-                                    <span className={`font-bold uppercase w-16 shrink-0 ${colors[ev.status] ?? 'text-slate-400'}`}>{ev.status}</span>
-                                    <span className="text-slate-500 shrink-0">{ev.os || '-'}</span>
-                                    <span className="text-slate-600 truncate">{ev.profile_name || '-'}</span>
-                                  </div>
-                                )
-                              })}
-                            </div>
-                          )}
-                        </div>
-                        {/* ── Smoke tests ── */}
-                        {machine.smoke_status && (
-                          <div>
-                            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">
-                              Smoke tests
-                              <span className={`ml-2 font-bold ${machine.smoke_status === 'ok' ? 'text-emerald-500' : 'text-amber-400'}`}>
-                                {machine.smoke_status === 'ok' ? 'Tous OK' : 'Alertes detectees'}
-                              </span>
-                            </p>
-                            <div className="space-y-px">
-                              {(() => {
-                                try {
-                                  const tests: {name: string; ok: boolean; detail?: string}[] = JSON.parse(machine.smoke_results ?? '[]')
-                                  return tests.map((t, i) => (
-                                    <div key={i} className="flex items-center gap-2 text-[10px] font-mono py-0.5">
-                                      <span className={`w-3 h-3 rounded-full shrink-0 ${t.ok ? 'bg-emerald-600' : 'bg-amber-500'}`} />
-                                      <span className={t.ok ? 'text-slate-400' : 'text-amber-300'}>{t.name}</span>
-                                      {t.detail && !t.ok && <span className="text-slate-600">- {t.detail}</span>}
-                                    </div>
-                                  ))
-                                } catch { return null }
-                              })()}
-                            </div>
-                          </div>
-                        )}
-                        {/* ── Inventaire materiel ── */}
-                        {(machine.hw_model || machine.hw_serial) && (
-                          <div>
-                            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Inventaire materiel</p>
-                            <div className="flex flex-wrap gap-4 text-[10px] font-mono">
-                              {machine.hw_model  && <span className="text-slate-400">{machine.hw_model}</span>}
-                              {machine.hw_ram_gb  ? <span className="text-slate-500">{machine.hw_ram_gb} Go RAM</span> : null}
-                              {machine.hw_serial && <span className="text-slate-600">S/N : {machine.hw_serial}</span>}
-                            </div>
-                          </div>
-                        )}
-                        {/* ── BitLocker (admins uniquement) ── */}
-                        {auth?.role === 'admin' && machine.os === 'windows' && (
-                          <div>
-                            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">BitLocker</p>
-                            {machine.has_bitlocker ? (
-                              bitlockerData[machine.mac] ? (
-                                <div className="space-y-1.5">
-                                  {bitlockerData[machine.mac].pin && (
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-[9px] text-slate-600 w-24 shrink-0">PIN (6 chiffres)</span>
-                                      <span className="font-mono text-[12px] text-amber-400 tracking-[0.2em]">{bitlockerData[machine.mac].pin}</span>
-                                      <button onClick={() => { navigator.clipboard.writeText(bitlockerData[machine.mac].pin!); toast.success('PIN copie') }} className="osiris-btn text-[10px] px-2 py-0.5">Copier</button>
-                                    </div>
-                                  )}
-                                  {bitlockerData[machine.mac].key && (
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-[9px] text-slate-600 w-24 shrink-0">Cle 48 chiffres</span>
-                                      <span className="font-mono text-[10px] text-slate-300 tracking-wider">{bitlockerData[machine.mac].key}</span>
-                                      <button onClick={() => { navigator.clipboard.writeText(bitlockerData[machine.mac].key!); toast.success('Cle copiee') }} className="osiris-btn text-[10px] px-2 py-0.5">Copier</button>
-                                    </div>
-                                  )}
-                                </div>
-                              ) : (
-                                <button onClick={() => fetchBitlockerKey(machine.mac)} className="osiris-btn text-[10px] px-2 py-1">Afficher les cles</button>
-                              )
-                            ) : (
-                              <span className="text-[10px] font-mono text-slate-700">Aucune cle enregistree</span>
-                            )}
-                          </div>
-                        )}
-                        {/* ── LAPS ── */}
-                        {auth.role === 'admin' && machine.os === 'windows' && (
-                          <div>
-                            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Mot de passe admin local (LAPS)</p>
-                            {machine.has_laps ? (
-                              <div className="space-y-1.5">
-                                {lapsData[machine.mac] ? (
-                                  <div className="flex items-center gap-2">
-                                    <span className="font-mono text-sm text-green-400 tracking-wider">{lapsData[machine.mac]}</span>
-                                    <button onClick={() => { navigator.clipboard.writeText(lapsData[machine.mac]); toast.success('Mot de passe copie') }} className="osiris-btn text-[10px] px-2 py-0.5">Copier</button>
-                                  </div>
-                                ) : (
-                                  <button onClick={() => fetchLapsPassword(machine.mac)} className="osiris-btn text-[10px] px-2 py-1">Afficher le mot de passe</button>
-                                )}
-                                {machine.laps_rotated_at && (
-                                  <p className="text-[10px] font-mono text-slate-600">
-                                    Derniere rotation : {new Date(machine.laps_rotated_at).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                                  </p>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="text-[10px] font-mono text-slate-700">Aucun mot de passe LAPS enregistre</span>
-                            )}
-                          </div>
-                        )}
-                        {/* ── Utilisateur affecte ── */}
-                        <div>
-                          <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Utilisateur affecte (optionnel)</p>
-                          <div className="flex gap-2">
-                            <input
-                              placeholder="Nom"
-                              defaultValue={machine.user_name ?? ''}
-                              onBlur={e => {
-                                if (e.target.value !== (machine.user_name ?? ''))
-                                  fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_name: e.target.value }) }).then(r => { if (r.ok) fetchAll(auth.token) })
-                              }}
-                              className="osiris-input text-xs flex-1"
-                            />
-                            <input
-                              placeholder="Email"
-                              defaultValue={machine.user_email ?? ''}
-                              onBlur={e => {
-                                if (e.target.value !== (machine.user_email ?? ''))
-                                  fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_email: e.target.value }) }).then(r => { if (r.ok) fetchAll(auth.token) })
-                              }}
-                              className="osiris-input text-xs flex-1"
-                            />
-                          </div>
-                        </div>
-                        {/* ── Notes ── */}
-                        <div>
-                          <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Notes</p>
-                          <div className="flex gap-2">
-                            <textarea
-                              rows={2}
-                              placeholder="Notes libres sur cette machine..."
-                              defaultValue={machine.notes ?? ''}
-                              onChange={e => setEditingNotes(prev => ({ ...prev, [machine.mac]: e.target.value }))}
-                              className="osiris-input text-[10px] font-mono flex-1 resize-none"
-                            />
-                            <button
-                              onClick={() => saveNotes(machine.mac, editingNotes[machine.mac] ?? machine.notes ?? '')}
-                              className="osiris-btn text-[10px] px-3 self-start"
-                            >Sauvegarder</button>
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                  {snapshotsMac === machine.mac && (
-                    <tr className="bg-[#060912]">
-                      <td colSpan={7} className="px-5 py-4">
-                        <div className="space-y-3">
-                          <p className="text-[9px] uppercase tracking-widest text-slate-500">Snapshots Proxmox - VMID {machine.proxmox_vm_id}</p>
-                          {snapshotsLoading ? (
-                            <p className="text-[10px] font-mono text-slate-600">Chargement…</p>
-                          ) : snapshots.filter(s => s.name !== 'current').length === 0 ? (
-                            <p className="text-[10px] font-mono text-slate-700">Aucun snapshot</p>
-                          ) : (
-                            <div className="space-y-1">
-                              {snapshots.filter(s => s.name !== 'current').map(snap => (
-                                <div key={snap.name} className="flex items-center gap-3 text-[10px] font-mono py-1 border-b border-slate-800/40 last:border-0">
-                                  <span className="text-slate-400 font-semibold w-32 shrink-0 truncate" title={snap.name}>{snap.name}</span>
-                                  <span className="text-slate-600 flex-1 truncate">{snap.description || '—'}</span>
-                                  <span className="text-slate-700 shrink-0">{snap.snaptime ? new Date(snap.snaptime * 1000).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
-                                  <button onClick={() => handleRollback(machine.mac, snap.name)} className="osiris-btn text-[9px] px-2 py-0.5 shrink-0">Restaurer</button>
-                                  <button onClick={() => handleDeleteSnapshot(machine.mac, snap.name)} className="osiris-action-btn osiris-action-btn--danger shrink-0"><IcoX cls="w-3 h-3" /></button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                          <div className="flex items-center gap-2 pt-1">
-                            <input value={newSnapName} onChange={e => setNewSnapName(e.target.value)} placeholder="Nom du snapshot" className="osiris-input text-[10px] w-36 shrink-0" maxLength={40} />
-                            <input value={newSnapDesc} onChange={e => setNewSnapDesc(e.target.value)} placeholder="Description (optionnel)" className="osiris-input text-[10px] flex-1" />
-                            <button onClick={() => handleCreateSnapshot(machine.mac)} disabled={snapshotCreating || !newSnapName.trim()} className="osiris-btn text-[10px] px-3 shrink-0">
-                              {snapshotCreating ? '…' : 'Créer'}
-                            </button>
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
                   </React.Fragment>
                 ))}
               </tbody>
@@ -1376,6 +1136,49 @@ export default function App() {
         )}
         </>}
       </div>
+
+      {/* ── Panneau latéral : détails machine ─────────────────────────────── */}
+      {detailMac && (() => {
+        const machine = machines.find(m => m.mac === detailMac)
+        if (!machine) return null
+        const hv = machine.hypervisor_id ? hypervisors.find(h => h.id === machine.hypervisor_id) : undefined
+        const consoleUrl = hv && machine.proxmox_vm_id ? `${hv.url}/?console=kvm&novnc=1&vmid=${machine.proxmox_vm_id}&node=${machine.proxmox_node}` : ''
+        return (
+          <MachineDetailPanel
+            key={detailMac}
+            machine={machine}
+            isAdmin={auth.role === 'admin'}
+            profileName={profileName(machine.profile_id)}
+            deployLog={deployLogs[machine.mac] ?? []}
+            history={machineHistory[machine.mac] ?? []}
+            bitlocker={bitlockerData[machine.mac]}
+            onFetchBitlockerKey={() => fetchBitlockerKey(machine.mac)}
+            lapsPassword={lapsData[machine.mac]}
+            onFetchLapsPassword={() => fetchLapsPassword(machine.mac)}
+            onSaveUserName={(name) => fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_name: name }) }).then(r => { if (r.ok) fetchAll(auth.token) })}
+            onSaveUserEmail={(email) => fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_email: email }) }).then(r => { if (r.ok) fetchAll(auth.token) })}
+            onSaveNotes={(notes) => saveNotes(machine.mac, notes)}
+            onClose={() => setDetailMac(null)}
+            vm={machine.proxmox_vm_id ? {
+              consoleUrl,
+              powerState: vmPowerState[machine.mac] ?? null,
+              powerLoading: !!vmPowerLoading[machine.mac],
+              onRefreshStatus: () => fetchVmStatus(machine.mac),
+              onPower: (action: string) => handleVmPower(machine.mac, action),
+              snapshots,
+              snapshotsLoading,
+              snapshotCreating,
+              newSnapName,
+              newSnapDesc,
+              onNewSnapNameChange: setNewSnapName,
+              onNewSnapDescChange: setNewSnapDesc,
+              onCreateSnapshot: () => handleCreateSnapshot(machine.mac),
+              onDeleteSnapshot: (name: string) => handleDeleteSnapshot(machine.mac, name),
+              onRollback: (name: string) => handleRollback(machine.mac, name),
+            } : undefined}
+          />
+        )
+      })()}
 
       {/* ── Modale : changement de mot de passe ──────────────────────────── */}
       {showSettingsModal && (

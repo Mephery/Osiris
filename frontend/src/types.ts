@@ -165,6 +165,17 @@ export interface AuditLogEntry {
   details: Record<string, unknown> | null;
 }
 
+// Événement du flux d'activité temps réel du dashboard (alimenté par le WebSocket dans App.tsx).
+export interface LiveEvent {
+  id: string;
+  timestamp: number;
+  mac: string;
+  hostname: string;
+  kind: 'status' | 'capture';
+  status?: string;
+  success?: boolean;
+}
+
 export const ACTION_META: Record<string, { label: string; cls: string }> = {
   login:            { label: 'Connexion',            cls: 'text-slate-400 border-slate-700' },
   create_machine:   { label: 'Machine créée',         cls: 'text-emerald-400 border-emerald-800' },

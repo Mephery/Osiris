@@ -32,6 +32,11 @@
   /* Danger */
   --danger:       rgb(185, 28, 28);
   --danger-hover: rgb(220, 38, 38);
+
+  /* Attention / alerte (BitLocker, smoke tests, TLS non vérifié...) —
+     même teinte que les utilitaires Tailwind amber-6xx/7xx déjà utilisés en JSX. */
+  --warning:      rgb(217, 119, 6);
+  --warning-soft: rgba(217, 119, 6, 0.35);
 }
 
 /* ─── Fond : navy profond + grille de points ─────────────────────────────── */
@@ -58,200 +63,362 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
-/* ─── Logo ───────────────────────────────────────────────────────────────── */
-.osiris-icon {
-  font-size: 1.2rem;
-  line-height: 1;
-  animation: osiris-breathe 5s ease-in-out infinite;
-}
-@keyframes osiris-breathe {
-  0%, 100% { opacity: 0.55; }
-  50%       { opacity: 1;    }
-}
+/*
+ * Toutes les classes .osiris-* ci-dessous vivent dans @layer components.
+ * Tailwind v4 place ses utilitaires (w-44, pl-7, etc.) dans @layer utilities,
+ * qui gagne TOUJOURS face à du CSS non "layered" — peu importe l'ordre dans le
+ * fichier ou la spécificité. Sans ce @layer, nos classes (ex: .osiris-input
+ * avec width:100%) écrasaient silencieusement les utilitaires Tailwind
+ * (ex: w-44) appliqués juste à côté dans le JSX.
+ */
+@layer components {
+  /* ─── Flux d'activité temps réel (dashboard) ────────────────────────────── */
+  @keyframes osiris-slide-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .osiris-feed-item { animation: osiris-slide-in 0.35s ease-out; }
 
-/* ─── Tableau ────────────────────────────────────────────────────────────── */
-.osiris-table-wrap {
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-}
+  /* ─── Logo ───────────────────────────────────────────────────────────────── */
+  .osiris-icon {
+    font-size: 1.2rem;
+    line-height: 1;
+    animation: osiris-breathe 5s ease-in-out infinite;
+  }
+  @keyframes osiris-breathe {
+    0%, 100% { opacity: 0.55; }
+    50%       { opacity: 1;    }
+  }
 
-.osiris-row {
-  border-bottom: 1px solid var(--border-soft);
-  border-left: 3px solid transparent;
-  transition: border-left-color 0.12s ease, background-color 0.12s ease;
-}
-.osiris-row:last-child { border-bottom: none; }
-.osiris-row:hover {
-  border-left-color: var(--accent);
-  background-color: var(--accent-soft);
-}
+  /* Reflet lumineux discret, une seule fois au chargement (pas de boucle). */
+  .osiris-logo-shine { position: relative; overflow: hidden; }
+  .osiris-logo-shine::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    left: -60%;
+    width: 40%;
+    background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.5) 50%, transparent 80%);
+    transform: skewX(-20deg);
+    animation: osiris-shine-sweep 1.3s ease-in-out 0.5s 1 both;
+    pointer-events: none;
+  }
+  @keyframes osiris-shine-sweep {
+    0%   { left: -60%; opacity: 0; }
+    15%  { opacity: 1; }
+    100% { left: 130%; opacity: 0; }
+  }
 
-/* ─── Badges statut déploiement ─────────────────────────────────────────── */
-.osiris-status-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.65rem;
-  font-family: monospace;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.osiris-status-badge::before {
-  content: '';
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.osiris-status--pending    { color: rgb(100, 116, 139); }
-.osiris-status--pending::before    { background: rgb(71, 85, 105); }
-.osiris-status--deploying  { color: rgb(147, 197, 253); animation: osiris-breathe 1.5s ease-in-out infinite; }
-.osiris-status--deploying::before  { background: rgb(59, 130, 246); animation: osiris-breathe 1.5s ease-in-out infinite; }
-.osiris-status--deployed   { color: rgb(134, 239, 172); }
-.osiris-status--deployed::before   { background: rgb(34, 197, 94); }
-.osiris-status--failed     { color: rgb(252, 165, 165); }
-.osiris-status--failed::before     { background: rgb(239, 68, 68); }
+  /* ─── Tableau ────────────────────────────────────────────────────────────── */
+  .osiris-table-wrap {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow-x: hidden;
+  }
 
-/* ─── Boutons d'action dans le tableau ───────────────────────────────────── */
-.osiris-action-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  border-radius: 3px;
-  cursor: pointer;
-  transition: color 0.12s, background-color 0.12s;
-  border: none;
-  background: transparent;
-}
-.osiris-action-btn:hover { color: var(--text-bright); background: rgba(255,255,255,0.05); }
-.osiris-action-btn--danger:hover { color: rgb(252, 165, 165); background: rgba(239, 68, 68, 0.1); }
+  /* Variante auto-scrollable (tableau des machines) : le tableau devient sa
+     propre boîte de défilement, avec le header collé en haut de CETTE boîte
+     (top:0) plutôt que de la page. On évite ainsi de dépendre du scroll de la
+     page pour le sticky — ce qui, combiné à overflow-x-auto sur le même
+     élément, ne fonctionne pas de façon fiable : dès que overflow-x n'est pas
+     "visible", le navigateur force le calcul de overflow-y en "auto" aussi
+     (règle du spec CSS Overflow), ce qui recrée malgré tout une boîte de
+     scroll qui capture le sticky à un décalage figé. Autant l'assumer. */
+  .osiris-table-scroll {
+    max-height: 65vh;
+    overflow-y: auto;
+  }
+  .osiris-table-sticky-th {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg-panel);
+  }
 
-/* ─── Variante danger pour la modale ────────────────────────────────────── */
-.osiris-modal--danger { border-color: rgba(185, 28, 28, 0.3); }
-.osiris-btn--danger   { background: var(--danger); }
-.osiris-btn--danger:hover { background: var(--danger-hover); }
+  .osiris-row {
+    border-bottom: 1px solid var(--border-soft);
+    border-left: 3px solid transparent;
+    transition: border-left-color 0.12s ease, background-color 0.12s ease;
+  }
+  .osiris-row:last-child { border-bottom: none; }
+  .osiris-row:hover {
+    border-left-color: var(--accent);
+    background-color: var(--accent-soft);
+  }
 
-/* ─── Badges OS ──────────────────────────────────────────────────────────── */
-.osiris-os-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 0.7rem;
-  font-family: monospace;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.osiris-os-badge::before {
-  content: '';
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.osiris-os-badge--windows { color: rgb(147, 197, 253); }
-.osiris-os-badge--windows::before { background: rgb(59, 130, 246); }
-.osiris-os-badge--ubuntu  { color: rgb(253, 186, 116); }
-.osiris-os-badge--ubuntu::before  { background: rgb(249, 115, 22); }
-.osiris-os-badge--debian  { color: rgb(167, 139, 250); }
-.osiris-os-badge--debian::before  { background: rgb(124, 58, 237); }
-.osiris-os-badge--unknown { color: rgb(148, 163, 184); }
-.osiris-os-badge--unknown::before { background: rgb(71, 85, 105); }
+  /* Cascade d'apparition des lignes au chargement/changement d'onglet.
+     Ne se rejoue PAS sur les mises à jour WebSocket (changement de statut...)
+     car React réutilise le même nœud DOM pour une ligne déjà montée (clé
+     stable = machine.id) — l'animation ne joue qu'à l'insertion réelle du
+     nœud, jamais sur une simple mise à jour de contenu.                      */
+  @keyframes osiris-row-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .osiris-row-in { animation: osiris-row-in 0.3s ease-out both; }
 
-/* ─── Boutons ────────────────────────────────────────────────────────────── */
-.osiris-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 16px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  border-radius: 4px;
-  border: none;
-  cursor: pointer;
-  transition: background-color 0.13s;
-  letter-spacing: 0.025em;
-}
-.osiris-btn:hover { background: var(--accent-hover); }
+  /* ─── Badges statut déploiement ─────────────────────────────────────────── */
+  .osiris-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.65rem;
+    font-family: monospace;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .osiris-status-badge::before {
+    content: '';
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .osiris-status--pending    { color: rgb(100, 116, 139); }
+  .osiris-status--pending::before    { background: rgb(71, 85, 105); }
+  .osiris-status--deploying  { color: rgb(147, 197, 253); animation: osiris-breathe 1.5s ease-in-out infinite; }
+  .osiris-status--deploying::before  {
+    background: rgb(59, 130, 246);
+    animation: osiris-breathe 1.5s ease-in-out infinite;
+    box-shadow: 0 0 6px 1px rgba(59, 130, 246, 0.55);
+  }
 
-.osiris-btn-ghost {
-  display: inline-flex;
-  align-items: center;
-  padding: 7px 14px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 0.8125rem;
-  font-weight: 500;
-  border-radius: 4px;
-  border: none;
-  cursor: pointer;
-  transition: color 0.13s;
-}
-.osiris-btn-ghost:hover { color: var(--text-bright); }
+  /* Petit halo lumineux pour les indicateurs "en direct" (connecté, flux d'activité).
+     Volontairement discret et réservé à 2-3 endroits clés — pas sur chaque point de couleur. */
+  .osiris-live-dot { box-shadow: 0 0 5px 1px rgba(16, 185, 129, 0.55); }
+  .osiris-status--deployed   { color: rgb(134, 239, 172); }
+  .osiris-status--deployed::before   { background: rgb(34, 197, 94); }
+  .osiris-status--failed     { color: rgb(252, 165, 165); }
+  .osiris-status--failed::before     { background: rgb(239, 68, 68); }
 
-/* ─── Champs de formulaire ───────────────────────────────────────────────── */
-.osiris-input {
-  width: 100%;
-  background: var(--bg-input);
-  border: 1px solid var(--border-input);
-  border-radius: 4px;
-  padding: 8px 12px;
-  font-size: 0.875rem;
-  color: var(--text);
-  transition: border-color 0.13s;
-  outline: none;
-}
-.osiris-input:focus { border-color: var(--accent); }
-.osiris-input::placeholder { color: rgb(45, 58, 78); }
+  /* ─── Boutons d'action dans le tableau ───────────────────────────────────── */
+  .osiris-action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color 0.12s, background-color 0.12s;
+    border: none;
+    background: transparent;
+  }
+  .osiris-action-btn:hover { color: var(--text-bright); background: rgba(255,255,255,0.05); }
+  .osiris-action-btn--danger:hover { color: rgb(252, 165, 165); background: rgba(239, 68, 68, 0.1); }
 
-/* ─── Overlay ────────────────────────────────────────────────────────────── */
-.osiris-overlay {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-  z-index: 50;
-  background: rgba(3, 6, 14, 0.88);
-}
+  /* ─── Variante danger pour la modale ────────────────────────────────────── */
+  .osiris-modal--danger { border-color: rgba(185, 28, 28, 0.3); }
+  .osiris-btn--danger   { background: var(--danger); }
+  .osiris-btn--danger:hover { background: var(--danger-hover); }
 
-/* ─── Modales ────────────────────────────────────────────────────────────── */
-.osiris-modal {
-  background: var(--bg-modal);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  width: 100%;
-  max-width: 460px;
-  max-height: 90vh;
-  overflow-x: hidden;
-  overflow-y: auto;
-}
-.osiris-modal--amber { border-color: rgba(217, 119, 6, 0.35); }
+  /* ─── Badges OS ──────────────────────────────────────────────────────────── */
+  .osiris-os-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.7rem;
+    font-family: monospace;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .osiris-os-badge::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .osiris-os-badge--windows { color: rgb(147, 197, 253); }
+  .osiris-os-badge--windows::before { background: rgb(59, 130, 246); }
+  .osiris-os-badge--ubuntu  { color: rgb(253, 186, 116); }
+  .osiris-os-badge--ubuntu::before  { background: rgb(249, 115, 22); }
+  .osiris-os-badge--debian  { color: rgb(167, 139, 250); }
+  .osiris-os-badge--debian::before  { background: rgb(124, 58, 237); }
+  .osiris-os-badge--unknown { color: rgb(148, 163, 184); }
+  .osiris-os-badge--unknown::before { background: rgb(71, 85, 105); }
 
-.osiris-modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 24px;
-  border-bottom: 1px solid var(--border);
-}
+  /* ─── Boutons ────────────────────────────────────────────────────────────── */
+  .osiris-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 16px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    transition: background-color 0.13s;
+    letter-spacing: 0.025em;
+  }
+  .osiris-btn:hover { background: var(--accent-hover); }
 
-/* ─── Affichage mot de passe ─────────────────────────────────────────────── */
-.osiris-password-box {
-  background: rgba(0, 0, 0, 0.55);
-  border: 1px solid rgba(180, 100, 0, 0.2);
-  border-radius: 4px;
-  padding: 16px;
+  .osiris-btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    padding: 7px 14px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    transition: color 0.13s;
+  }
+  .osiris-btn-ghost:hover { color: var(--text-bright); }
+
+  /* ─── Champs de formulaire ───────────────────────────────────────────────── */
+  .osiris-input {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border-input);
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 0.875rem;
+    color: var(--text);
+    transition: border-color 0.13s;
+    outline: none;
+  }
+  .osiris-input:focus { border-color: var(--accent); }
+  .osiris-input::placeholder { color: rgb(45, 58, 78); }
+
+  /* ─── Overlay ────────────────────────────────────────────────────────────── */
+  .osiris-overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    z-index: 50;
+    background: rgba(3, 6, 14, 0.88);
+  }
+
+  /* ─── Modales ────────────────────────────────────────────────────────────── */
+  .osiris-modal {
+    background: var(--bg-modal);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    width: 100%;
+    max-width: 460px;
+    max-height: 90vh;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  .osiris-modal--amber { border-color: var(--warning-soft); }
+
+  .osiris-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ─── Affichage mot de passe ─────────────────────────────────────────────── */
+  .osiris-password-box {
+    background: rgba(0, 0, 0, 0.55);
+    border: 1px solid rgba(180, 100, 0, 0.2);
+    border-radius: 4px;
+    padding: 16px;
+  }
+
+  /* ─── Catalogue d'applications (sélecteur de profil) ─────────────────────── */
+  .osiris-app-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 6px;
+    border-radius: 6px;
+    border: 1px solid var(--border-input);
+    background: var(--bg-input);
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+    text-align: center;
+  }
+  .osiris-app-card:hover { border-color: var(--text-dim); }
+  .osiris-app-card--selected {
+    border-color: var(--accent);
+    background: rgba(37, 99, 235, 0.1);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 10px rgba(37, 99, 235, 0.4);
+  }
+  .osiris-app-card-icon { font-size: 1.25rem; line-height: 1; }
+  .osiris-app-card-name {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    line-height: 1.2;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .osiris-app-card--selected .osiris-app-card-name { color: var(--text-bright); }
+
+  /* ─── Panneau latéral coulissant (détails machine) ────────────────────────── */
+  @keyframes osiris-sheet-in {
+    from { transform: translateX(100%); }
+    to   { transform: translateX(0); }
+  }
+  .osiris-sheet-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: rgba(3, 6, 14, 0.65);
+    backdrop-filter: blur(2px);
+  }
+  .osiris-sheet {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 41;
+    width: min(480px, 100vw);
+    background: var(--bg-modal);
+    border-left: 1px solid var(--border);
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    animation: osiris-sheet-in 0.28s ease-out;
+  }
+  .osiris-sheet-body {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  /* ─── Terminal de logs de déploiement ─────────────────────────────────────── */
+  .osiris-terminal {
+    background: #05070c;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    max-height: 260px;
+    overflow-y: auto;
+    color: rgb(74, 222, 128);
+  }
+  @keyframes osiris-cursor-blink {
+    0%, 49%  { opacity: 1; }
+    50%, 100% { opacity: 0; }
+  }
+  .osiris-terminal-cursor {
+    display: inline-block;
+    width: 6px;
+    height: 12px;
+    background: rgb(74, 222, 128);
+    margin-left: 2px;
+    animation: osiris-cursor-blink 1s step-end infinite;
+    vertical-align: text-bottom;
+  }
 }

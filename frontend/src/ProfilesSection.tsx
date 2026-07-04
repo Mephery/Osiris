@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import type { Profile, Application, WimFile } from './types'
 import { authHeader } from './types'
 import { IcoX, IcoPencil } from './icons'
+import { APP_LOGOS } from './appIconMap'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
@@ -15,6 +16,25 @@ interface ProfilesSectionProps {
   profiles: Profile[]
   apps: Application[]
   onProfilesChanged: () => void
+}
+
+// Grille de cartes pour le sélecteur d'applications, réutilisée pour la création et l'édition de profil.
+function AppGrid({ apps, selected, onToggle }: { apps: Application[]; selected: Set<string>; onToggle: (id: number) => void }) {
+  return (
+    <div className="grid grid-cols-4 sm:grid-cols-5 gap-2">
+      {apps.map(a => {
+        const on = selected.has(String(a.id))
+        const Logo = APP_LOGOS[a.name]
+        return (
+          <button key={a.id} type="button" onClick={() => onToggle(a.id)} title={a.name}
+            className={`osiris-app-card ${on ? 'osiris-app-card--selected' : ''}`}>
+            {Logo ? <Logo cls="w-6 h-6" /> : <span className="osiris-app-card-icon">{a.icon}</span>}
+            <span className="osiris-app-card-name">{a.name}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: ProfilesSectionProps) {
@@ -205,17 +225,7 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
             return (
               <div className="col-span-2 sm:col-span-3 pt-1">
                 <p className="text-[10px] uppercase tracking-widest text-slate-600 mb-1.5">Applications à installer</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {eligible.map(a => {
-                    const on = selected.has(String(a.id))
-                    return (
-                      <button key={a.id} type="button" onClick={() => toggle(a.id)}
-                        className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] border transition-colors cursor-pointer ${on ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'}`}>
-                        <span>{a.icon}</span><span>{a.name}</span>
-                      </button>
-                    )
-                  })}
-                </div>
+                <AppGrid apps={eligible} selected={selected} onToggle={toggle} />
               </div>
             )
           })()}
@@ -371,17 +381,7 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                 return (
                   <div>
                     <p className="text-[10px] uppercase tracking-widest text-slate-600 mb-1.5">Applications à installer</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {eligible.map(a => {
-                        const on = selected.has(String(a.id))
-                        return (
-                          <button key={a.id} type="button" onClick={() => toggle(a.id)}
-                            className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] border transition-colors cursor-pointer ${on ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'}`}>
-                            <span>{a.icon}</span><span>{a.name}</span>
-                          </button>
-                        )
-                      })}
-                    </div>
+                    <AppGrid apps={eligible} selected={selected} onToggle={toggle} />
                   </div>
                 )
               })()}

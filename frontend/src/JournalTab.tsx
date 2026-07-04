@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import type { AuditLogEntry } from './types'
 import { ACTION_META, authHeader, formatMac, formatDetails } from './types'
 import { IcoSearch, IcoRefresh } from './icons'
+import { SkeletonRows } from './Skeleton'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
@@ -51,10 +52,7 @@ export function JournalTab({ token, onUnauthorized }: { token: string; onUnautho
         </button>
       </div>
       {auditLoading ? (
-        <div className="flex items-center gap-2.5 text-slate-600 font-mono text-xs p-5">
-          <span className="inline-block w-1.5 h-1.5 bg-blue-600 rounded-full animate-ping" />
-          Chargement…
-        </div>
+        <SkeletonRows count={6} cols={5} />
       ) : auditLogs.length === 0 ? (
         <p className="text-slate-700 font-mono text-xs p-5">Aucune entrée de journal</p>
       ) : (
