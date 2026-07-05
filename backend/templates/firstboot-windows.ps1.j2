@@ -29,6 +29,12 @@ function Write-Log($msg) {
     Add-Content -Path $logFile -Value $line
 }
 
+# Ecrit le detail dans le fichier de log seulement (pas la console) - utilise pour
+# la sortie verbeuse de winget, qui pollue sinon la console avec son propre spinner.
+function Write-LogFile($msg) {
+    Add-Content -Path $logFile -Value "$(Get-Date -Format 'HH:mm:ss') $msg"
+}
+
 Write-Log "=========================================="
 Write-Log "OSIRIS First Boot - {{ machine.hostname }}"
 Write-Log "=========================================="
@@ -62,8 +68,12 @@ Write-Log "Collecte des informations materiel..."
 try {
     $cs   = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
     $bios = Get-CimInstance -ClassName Win32_BIOS           -ErrorAction Stop
-    $hwSerial = $bios.SerialNumber.Trim()
-    $hwModel  = "$($cs.Manufacturer.Trim()) $($cs.Model.Trim())"
+    # Certaines VM (Proxmox/OVMF) renvoient un SerialNumber/Manufacturer/Model vide (null) -
+    # .Trim() sur null plante le script, donc on retombe sur une chaine vide dans ce cas.
+    $hwSerial     = if ($bios.SerialNumber) { $bios.SerialNumber.Trim() } else { '' }
+    $hwManufact   = if ($cs.Manufacturer)   { $cs.Manufacturer.Trim()   } else { '' }
+    $hwModelName  = if ($cs.Model)          { $cs.Model.Trim()         } else { '' }
+    $hwModel  = "$hwManufact $hwModelName".Trim()
     $hwRamGb  = [math]::Round($cs.TotalPhysicalMemory / 1GB)
     Write-Log "Materiel : $hwModel | S/N : $hwSerial | RAM : ${hwRamGb} Go"
 
@@ -95,9 +105,13 @@ try {
     $chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789!@#$%'.ToCharArray()
     $lapsPassword = -join ((1..16) | ForEach-Object { $chars | Get-Random })
     $secLaps = ConvertTo-SecureString $lapsPassword -AsPlainText -Force
-    Set-LocalUser -Name "Administrator" -Password $secLaps -ErrorAction Stop
-    Enable-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
-    Write-Log "Mot de passe administrateur local defini"
+    # Compte administrateur integre retrouve par son SID (RID 500) - le nom "Administrator"
+    # peut differer selon la langue/renommage, mais le RID 500 est toujours l'administrateur integre.
+    $adminAccount = Get-LocalUser | Where-Object { $_.SID -like "*-500" } | Select-Object -First 1
+    if (-not $adminAccount) { throw "Compte administrateur integre (RID 500) introuvable" }
+    Set-LocalUser -Name $adminAccount.Name -Password $secLaps -ErrorAction Stop
+    Enable-LocalUser -Name $adminAccount.Name -ErrorAction SilentlyContinue
+    Write-Log "Mot de passe administrateur local defini ($($adminAccount.Name))"
 
     if ($mac) {
         $lapsBody = @{ password = $lapsPassword } | ConvertTo-Json
@@ -137,12 +151,34 @@ try {
         $pin = (Get-Random -Minimum 100000 -Maximum 999999).ToString()
         $securePin = ConvertTo-SecureString $pin -AsPlainText -Force
 
+        # Windows bloque le PIN au demarrage par defaut (strategie de groupe locale non
+        # configuree) - on active la strategie equivalente via registre pour l'autoriser.
+        $fvePath = "HKLM:\SOFTWARE\Policies\Microsoft\FVE"
+        if (-not (Test-Path $fvePath)) { New-Item -Path $fvePath -Force | Out-Null }
+        Set-ItemProperty -Path $fvePath -Name "UseAdvancedStartup" -Value 1 -Type DWord
+        Set-ItemProperty -Path $fvePath -Name "UseTPMPIN" -Value 2 -Type DWord
+        Set-ItemProperty -Path $fvePath -Name "UseTPM" -Value 2 -Type DWord
+
         $hasTpmPin = ($blVol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "TpmPin" }).Count -gt 0
-        if (-not $hasTpmPin) {
-            Add-BitLockerKeyProtector -MountPoint "C:" -TpmAndPinProtector -Pin $securePin -ErrorAction Stop | Out-Null
-        }
-        if ($blVol.ProtectionStatus -ne "On") {
-            Enable-BitLocker -MountPoint "C:" -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop | Out-Null
+
+        if ($blVol.ProtectionStatus -eq "On") {
+            # Chiffrement deja actif (execution precedente reussie) : juste s'assurer que le
+            # protecteur PIN existe, sans repasser par Enable-BitLocker.
+            if (-not $hasTpmPin) {
+                Add-BitLockerKeyProtector -MountPoint "C:" -TpmAndPinProtector -Pin $securePin -ErrorAction Stop | Out-Null
+            }
+        } else {
+            # Chiffrement pas encore actif. Le PIN est regenere aleatoirement a chaque execution
+            # (voir $pin ci-dessus) : si un protecteur TpmPin existe deja (execution precedente
+            # interrompue, avec un PIN different), on le retire d'abord - Windows n'autorise
+            # qu'un seul protecteur de ce type par volume. Puis Enable-BitLocker ajoute le
+            # protecteur ET demarre le chiffrement en un seul appel (obligatoire : Enable-BitLocker
+            # exige un switch de type de protecteur pour resoudre son jeu de parametres).
+            if ($hasTpmPin) {
+                $oldProtectorId = ($blVol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "TpmPin" } | Select-Object -First 1).KeyProtectorId
+                Remove-BitLockerKeyProtector -MountPoint "C:" -KeyProtectorId $oldProtectorId -ErrorAction SilentlyContinue
+            }
+            Enable-BitLocker -MountPoint "C:" -EncryptionMethod XtsAes256 -TpmAndPinProtector -Pin $securePin -SkipHardwareTest -ErrorAction Stop | Out-Null
         }
         Write-Log "BitLocker TPM+PIN active - PIN : $pin"
 
@@ -177,8 +213,66 @@ try {
 Write-Log "BitLocker desactive sur ce profil."
 {% endif %}
 
+{% if win_apps %}
+# ── Applications winget ───────────────────────────────────────────────────────
+# winget est un alias d'execution lie au profil utilisateur interactif : il n'est
+# pas resolu dans le PATH a ce stade (FirstLogonCommands tourne avant que le
+# profil complet soit charge). On resout donc le chemin complet de l'exe.
+function Get-WingetPath {
+    $pkg = Get-AppxPackage -Name "Microsoft.DesktopAppInstaller" -AllUsers -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pkg) {
+        $exe = Join-Path $pkg.InstallLocation "winget.exe"
+        if (Test-Path $exe) { return $exe }
+    }
+    return $null
+}
+$wingetExe = Get-WingetPath
+
+Write-Log "Installation des applications via winget..."
+$apps = @(
+{% for app in win_apps %}
+    "{{ app.winget_id }}"{{ "," if not loop.last else "" }}
+{% endfor %}
+)
+if (-not $wingetExe) {
+    Write-Log "AVERTISSEMENT : winget introuvable sur ce systeme - applications non installees."
+} else {
+    # Certains installeurs (Firefox, OpenVPN...) declenchent une invite UAC malgre
+    # le --silent, meme en contexte deja admin - invisible et bloquante sur console
+    # noVNC (bascule Secure Desktop qui ne s'affiche pas). On la desactive le temps
+    # des installs, puis on restaure la valeur d'origine.
+    $uacPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    $uacOriginal = (Get-ItemProperty -Path $uacPath -Name ConsentPromptBehaviorAdmin -EA SilentlyContinue).ConsentPromptBehaviorAdmin
+    Set-ItemProperty -Path $uacPath -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord -EA SilentlyContinue
+
+    $total = $apps.Count
+    $i = 0
+    foreach ($appId in $apps) {
+        $i++
+        Write-Progress -Activity "Installation des applications" `
+            -Status "$appId ($i/$total)" -PercentComplete (($i - 1) / $total * 100)
+        & $wingetExe install --id $appId -e `
+            --accept-source-agreements `
+            --accept-package-agreements `
+            --silent 2>&1 | ForEach-Object { Write-LogFile "  $_" }
+        Write-Log "winget : $appId $(if ($LASTEXITCODE -eq 0) { 'OK' } else { "ECHEC (code $LASTEXITCODE)" })"
+    }
+    Write-Progress -Activity "Installation des applications" -Completed
+
+    if ($null -ne $uacOriginal) {
+        Set-ItemProperty -Path $uacPath -Name ConsentPromptBehaviorAdmin -Value $uacOriginal -Type DWord -EA SilentlyContinue
+    } else {
+        Remove-ItemProperty -Path $uacPath -Name ConsentPromptBehaviorAdmin -EA SilentlyContinue
+    }
+}
+Write-Log "Applications installees."
+{% endif %}
+
 {% if tv_password %}
 # ── TeamViewer ───────────────────────────────────────────────────────────────
+# Placé après l'installation des apps winget : si TeamViewer est sélectionné comme
+# app du profil (plutôt que pré-installé dans une golden image), il vient d'être
+# installé juste au-dessus - le chercher avant ce point le manquait toujours.
 $tvPassword = "{{ tv_password }}"
 $tvExe = if (Test-Path "C:\Program Files\TeamViewer\TeamViewer.exe") {
     "C:\Program Files\TeamViewer\TeamViewer.exe"
@@ -193,26 +287,8 @@ if ($tvExe) {
     & $tvExe --passwd $tvPassword | Out-Null
     Write-Log "TeamViewer : mot de passe defini"
 } else {
-    Write-Log "AVERTISSEMENT : TeamViewer introuvable (a installer dans la golden image)"
+    Write-Log "AVERTISSEMENT : TeamViewer introuvable (ni golden image, ni installe via winget)"
 }
-{% endif %}
-
-{% if win_apps %}
-# ── Applications winget ───────────────────────────────────────────────────────
-Write-Log "Installation des applications via winget..."
-$apps = @(
-{% for app in win_apps %}
-    "{{ app.winget_id }}"{{ "," if not loop.last else "" }}
-{% endfor %}
-)
-foreach ($appId in $apps) {
-    Write-Log "winget : $appId"
-    winget install --id $appId -e `
-        --accept-source-agreements `
-        --accept-package-agreements `
-        --silent 2>&1 | ForEach-Object { Write-Log "  $_" }
-}
-Write-Log "Applications installees."
 {% endif %}
 
 {% if profile.network_drives %}
@@ -273,14 +349,17 @@ try {
     $newPassword = -join ((1..16) | ForEach-Object { $chars | Get-Random })
     $securePassword = ConvertTo-SecureString $newPassword -AsPlainText -Force
 
-    Set-LocalUser -Name "Administrator" -Password $securePassword -ErrorAction Stop
+    # Meme logique que le firstboot : retrouver l'administrateur integre par SID (RID 500).
+    $adminAccount = Get-LocalUser | Where-Object { $_.SID -like "*-500" } | Select-Object -First 1
+    if (-not $adminAccount) { throw "Compte administrateur integre (RID 500) introuvable" }
+    Set-LocalUser -Name $adminAccount.Name -Password $securePassword -ErrorAction Stop
 
     $body = @{ password = $newPassword } | ConvertTo-Json
     Invoke-RestMethod -Uri "$osirisUrl/machines/$mac/laps-password" -Method POST `
         -ContentType "application/json" -Body $body -TimeoutSec 10 | Out-Null
 
     Write-EventLog -LogName Application -Source "OSIRIS" -EventId 1042 `
-        -EntryType Information -Message "LAPS : mot de passe Administrator renouvele." `
+        -EntryType Information -Message "LAPS : mot de passe $($adminAccount.Name) renouvele." `
         -ErrorAction SilentlyContinue
 } catch {
     Write-EventLog -LogName Application -Source "OSIRIS" -EventId 1043 `
@@ -343,7 +422,7 @@ try {
 # Jonction domaine AD
 try {
     $inDomain = (Get-WmiObject Win32_ComputerSystem).PartOfDomain
-    Add-SmokeTest "Jonction domaine AD" $inDomain (if ($inDomain) { (Get-WmiObject Win32_ComputerSystem).Domain } else { "Non joint" })
+    Add-SmokeTest "Jonction domaine AD" $inDomain $(if ($inDomain) { (Get-WmiObject Win32_ComputerSystem).Domain } else { "Non joint" })
 } catch {
     Add-SmokeTest "Jonction domaine AD" $false "Erreur : $_"
 }
@@ -362,9 +441,10 @@ try {
 # Presence des applications installees
 {% for app in win_apps %}
 try {
-    $appOut = winget list --id "{{ app.winget_id }}" -e --accept-source-agreements 2>&1
+    if (-not $wingetExe) { throw "winget introuvable" }
+    $appOut = & $wingetExe list --id "{{ app.winget_id }}" -e --accept-source-agreements 2>&1
     $appOk = $LASTEXITCODE -eq 0
-    Add-SmokeTest "App : {{ app.name }}" $appOk (if ($appOk) { "Installe" } else { "Non trouve dans winget" })
+    Add-SmokeTest "App : {{ app.name }}" $appOk $(if ($appOk) { "Installe" } else { "Non trouve dans winget" })
 } catch {
     Add-SmokeTest "App : {{ app.name }}" $false "Erreur winget"
 }
@@ -373,9 +453,12 @@ try {
 
 # Envoi du rapport a OSIRIS
 try {
-    $body = @{ tests = $smokeTests } | ConvertTo-Json -Depth 5 -Compress
+    $body = @{ tests = @($smokeTests) } | ConvertTo-Json -Depth 5 -Compress
+    # Invoke-WebRequest encode -Body (string) avec l'encodage par defaut du systeme,
+    # qui peut differer de l'UTF-8 attendu par le serveur - on force les octets UTF-8.
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
     Invoke-WebRequest -Uri "$osirisUrl/machines/$($script:_mac)/smoke-tests" `
-        -Method POST -Body $body -ContentType "application/json" `
+        -Method POST -Body $bodyBytes -ContentType "application/json; charset=utf-8" `
         -UseBasicParsing -TimeoutSec 15 | Out-Null
     Write-Log "Rapport smoke tests envoye."
 } catch {

@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal enabledelayedexpansion
 
 set MAC={{ mac }}
 set OSIRIS_IP={{ osiris_ip }}
@@ -28,17 +28,125 @@ if errorlevel 1 (
 echo [OSIRIS] Partage SMB connecte.
 X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=SMB+connecte" >nul 2>&1
 
-REM ── Verification que C:\Windows existe (sysprep fait ?) ──────────────────
-if not exist C:\Windows (
+REM ── Detection de la lettre de la partition Windows ───────────────────────
+REM WinPE ne garantit pas la meme lettre de lecteur d'un demarrage a l'autre
+REM (contrairement au deploiement initial ou diskpart l'assigne explicitement),
+REM donc on ne peut pas supposer C: en dur. Le sous-systeme disque de WinPE peut
+REM aussi mettre quelques secondes a finir de monter les volumes locaux : on
+REM retente plusieurs fois avant de declarer forfait, comme pour le SMB.
+echo [OSIRIS] Detection de la partition Windows...
+
+REM Diagnostic complet envoye a OSIRIS avant toute tentative - pour voir la
+REM vraie situation des disques/volumes telle que WinPE la voit, plutot que
+REM de continuer a deviner a l'aveugle.
+(
+    echo list disk
+    echo list volume
+) > X:\diag_query.txt
+diskpart /s X:\diag_query.txt > X:\diag_result.txt 2>&1
+X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=--+Diagnostic+diskpart+--" >nul 2>&1
+for /f "delims=" %%L in (X:\diag_result.txt) do (
+    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=DP:+%%L" >nul 2>&1
+)
+
+REM Le sous-systeme disque de WinPE peut mettre bien plus que quelques secondes
+REM a etre pret quand la machine hote est sous tension (vecu : le SMB
+REM avait mis plus d'une minute lui aussi). On retente donc tout le bloc de
+REM detection en boucle (SAN policy + automount + lettres + fallback partition)
+REM pendant plusieurs minutes avant de basculer sur l'invite de secours, pour
+REM rester 100% automatique dans le cas (frequent) ou c'est juste lent, et ne
+REM demander une intervention manuelle que si c'est un vrai probleme.
+set DETECT_RETRY=0
+:retry_detect
+set /a DETECT_RETRY+=1
+
+(
+    echo san policy=onlineall
+    echo select disk 0
+    echo online disk noerr
+    echo attributes disk clear readonly noerr
+    echo automount enable
+    echo rescan
+) | diskpart >nul 2>&1
+ping -n 3 127.0.0.1 >nul
+
+set WIN_DRIVE=
+if exist C:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=C
+if not defined WIN_DRIVE if exist D:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=D
+if not defined WIN_DRIVE if exist E:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=E
+if not defined WIN_DRIVE if exist F:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=F
+if not defined WIN_DRIVE if exist G:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=G
+if not defined WIN_DRIVE if exist H:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=H
+
+REM Filet de secours si l'automount ne suffit pas : assignation manuelle par
+REM numero de partition, une lettre differente par tentative pour eviter les
+REM conflits. Jamais de faux positif possible (seule la vraie partition NTFS
+REM Windows contient ntoskrnl.exe, jamais la petite partition EFI en FAT32).
+if not defined WIN_DRIVE (
+    (echo select disk 0
+     echo select partition 1
+     echo assign letter=W) > X:\assignwin.txt
+    diskpart /s X:\assignwin.txt >nul 2>&1
+    if exist W:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=W
+)
+if not defined WIN_DRIVE (
+    (echo select disk 0
+     echo select partition 2
+     echo assign letter=V) > X:\assignwin.txt
+    diskpart /s X:\assignwin.txt >nul 2>&1
+    if exist V:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=V
+)
+if not defined WIN_DRIVE (
+    (echo select disk 0
+     echo select partition 3
+     echo assign letter=U) > X:\assignwin.txt
+    diskpart /s X:\assignwin.txt >nul 2>&1
+    if exist U:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=U
+)
+if not defined WIN_DRIVE (
+    (echo select disk 0
+     echo select partition 4
+     echo assign letter=T) > X:\assignwin.txt
+    diskpart /s X:\assignwin.txt >nul 2>&1
+    if exist T:\Windows\System32\ntoskrnl.exe set WIN_DRIVE=T
+)
+
+if not defined WIN_DRIVE (
+    if !DETECT_RETRY! lss 30 (
+        echo [OSIRIS] Partition pas encore prete, nouvelle tentative dans 10s... (!DETECT_RETRY!/30)
+        ping -n 11 127.0.0.1 >nul
+        goto retry_detect
+    )
+)
+
+if not defined WIN_DRIVE (
     echo.
-    echo  ERREUR : C:\Windows introuvable !
+    echo  ERREUR : partition Windows introuvable !
     echo  La machine de reference a-t-elle bien ete syspreepee ?
     echo  (sysprep /generalize /oobe /shutdown)
     echo.
+    echo [OSIRIS] Diagnostic des lecteurs disponibles :
+    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=--+Diagnostic+lecteurs+--" >nul 2>&1
+    for %%D in (C D E F G H I J K) do (
+        if exist %%D:\ (
+            echo   %%D: existe
+            dir %%D:\ > X:\dirlist.txt 2>&1
+            for /f "delims=" %%L in (X:\dirlist.txt) do (
+                X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=%%D+:+%%L" >nul 2>&1
+            )
+        )
+    )
     X:\curl.exe -sf "http://%OSIRIS_IP%:8000/capture/%MAC%/done?success=false" >nul 2>&1
-    pause
+    echo.
+    echo  Ouverture d'une invite de secours - la VM ne va PAS redemarrer.
+    echo  Vous pouvez lancer "diskpart" puis "list disk" / "list volume" pour
+    echo  inspecter la situation. Tapez "exit" pour fermer cette invite ensuite.
+    echo.
+    cmd.exe
     exit /b 1
 )
+echo [OSIRIS] Partition Windows detectee : %WIN_DRIVE%:
+X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Partition+Windows+:+%WIN_DRIVE%%3A" >nul 2>&1
 
 REM ── Verification espace disque sur le partage ────────────────────────────
 echo [OSIRIS] Verification de l'espace disponible...
@@ -57,7 +165,7 @@ X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Capture+DISM+en+
 
 dism /Capture-Image ^
      /ImageFile:Z:\%WIM_NAME% ^
-     /CaptureDir:C:\ ^
+     /CaptureDir:%WIN_DRIVE%:\ ^
      /Name:"OSIRIS Golden Image" ^
      /Description:"Capture automatique OSIRIS" ^
      /ScratchDir:X:\ ^

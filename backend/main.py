@@ -800,6 +800,7 @@ def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
         "win_index": p.win_index,
         "enable_bitlocker": p.enable_bitlocker,
         "bitlocker_pin": p.bitlocker_pin,
+        "laps_rotation_days": p.laps_rotation_days,
         "network_drives": json.loads(p.network_drives) if p.network_drives else [],
         "printers": json.loads(p.printers) if p.printers else [],
         "post_script": p.post_script or "",
@@ -1910,7 +1911,12 @@ def get_winpe_script_auto(request: Request):
             content=f"echo [OSIRIS] IP {client_ip} inconnue dans les leases DHCP\r\npause\r\nexit /b 1",
             media_type="text/plain", status_code=404,
         )
-    if mac in _capture_jobs and _capture_jobs[mac]["status"] == "waiting":
+    # Tant qu'un job de capture existe pour cette MAC (quel que soit son statut -
+    # waiting, capturing, ou meme failed suite a une tentative interrompue), on
+    # reste en mode capture. Ne JAMAIS retomber sur le deploiement normal, qui
+    # repartitionnerait le disque de la machine de reference. La seule sortie du
+    # mode capture est la suppression explicite du job (bouton dans l'UI).
+    if mac in _capture_jobs:
         return _build_capture_script(mac)
     return _build_winpe_script(mac)
 

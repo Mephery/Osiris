@@ -18,6 +18,9 @@ https://10.0.0.1, https://192.168.1.18 {
     handle /machines* {
         reverse_proxy localhost:8000
     }
+    handle /dashboard* {
+        reverse_proxy localhost:8000
+    }
     handle /organizations* {
         reverse_proxy localhost:8000
     }
@@ -31,9 +34,6 @@ https://10.0.0.1, https://192.168.1.18 {
         reverse_proxy localhost:8000
     }
     handle /audit-logs* {
-        reverse_proxy localhost:8000
-    }
-    handle /dashboard* {
         reverse_proxy localhost:8000
     }
     handle /domain-configs* {

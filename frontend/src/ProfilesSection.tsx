@@ -18,6 +18,26 @@ interface ProfilesSectionProps {
   onProfilesChanged: () => void
 }
 
+// Avertissement affiché quand une golden image est choisie : OSIRIS réinstalle quand même via winget
+// les apps cochées ci-dessous (aucune vérification de ce qui est déjà dans l'image), donc ça peut faire
+// perdre le bénéfice de vitesse de la golden image si les mêmes apps y sont déjà. Choix explicite de
+// l'admin (bouton), jamais d'effacement automatique/silencieux de sa sélection.
+function GoldenImageWarning({ winImage, hasSelectedApps, onClearApps }: { winImage: string; hasSelectedApps: boolean; onClearApps: () => void }) {
+  if (!winImage.trim()) return null
+  return (
+    <div className="rounded border border-amber-800/50 bg-amber-950/20 px-3 py-2 flex items-center gap-3 flex-wrap">
+      <p className="text-[10px] text-amber-400 flex-1 min-w-[220px]">
+        Golden image sélectionnée ({winImage}) — vérifie que les apps cochées ci-dessous n'y sont pas déjà incluses : elles seront réinstallées via winget quand même.
+      </p>
+      {hasSelectedApps && (
+        <button type="button" onClick={onClearApps} className="osiris-btn-ghost text-[10px] text-amber-400 border border-amber-800/60 rounded px-2 py-1 flex-shrink-0">
+          Vider la sélection d'apps
+        </button>
+      )}
+    </div>
+  )
+}
+
 // Grille de cartes pour le sélecteur d'applications, réutilisée pour la création et l'édition de profil.
 function AppGrid({ apps, selected, onToggle }: { apps: Application[]; selected: Set<string>; onToggle: (id: number) => void }) {
   return (
@@ -223,8 +243,15 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
               setNewProfile({ ...newProfile, app_ids: Array.from(s).join(',') })
             }
             return (
-              <div className="col-span-2 sm:col-span-3 pt-1">
+              <div className="col-span-2 sm:col-span-3 pt-1 space-y-2">
                 <p className="text-[10px] uppercase tracking-widest text-slate-600 mb-1.5">Applications à installer</p>
+                {os === 'windows' && (
+                  <GoldenImageWarning
+                    winImage={newProfile.win_image ?? ''}
+                    hasSelectedApps={selected.size > 0}
+                    onClearApps={() => setNewProfile({ ...newProfile, app_ids: '' })}
+                  />
+                )}
                 <AppGrid apps={eligible} selected={selected} onToggle={toggle} />
               </div>
             )
@@ -379,8 +406,15 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                   setEditingProfile({ ...editingProfile, app_ids: Array.from(s).join(',') })
                 }
                 return (
-                  <div>
+                  <div className="space-y-2">
                     <p className="text-[10px] uppercase tracking-widest text-slate-600 mb-1.5">Applications à installer</p>
+                    {editingProfile.os === 'windows' && (
+                      <GoldenImageWarning
+                        winImage={editingProfile.win_image ?? ''}
+                        hasSelectedApps={selected.size > 0}
+                        onClearApps={() => setEditingProfile({ ...editingProfile, app_ids: '' })}
+                      />
+                    )}
                     <AppGrid apps={eligible} selected={selected} onToggle={toggle} />
                   </div>
                 )

@@ -91,7 +91,7 @@ export function DashboardTab({ token, liveEvents }: { token: string; liveEvents:
     fetch(`${API_URL}/dashboard`, { headers: authHeader(token) })
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(data => { setDashboard(data); setDashboardLoading(false) })
-      .catch(() => { setDashboard({}); setDashboardLoading(false) })
+      .catch(() => { setDashboard(null); setDashboardLoading(false) })
   }
 
   useEffect(() => { fetchDashboard() }, [token])

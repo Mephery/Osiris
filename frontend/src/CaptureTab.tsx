@@ -60,7 +60,7 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
         {/* Étapes */}
         {[
           { n: 1, titre: 'Préparer la machine de référence', desc: 'Déployez un Windows via OSIRIS (ou installez-le manuellement), installez toutes vos applications (TeamViewer Host, antivirus, Office…). Ne joignez pas de domaine.' },
-          { n: 2, titre: 'Lancer Sysprep', desc: 'Sur la machine de référence, ouvrez une invite de commandes en administrateur et lancez :', cmd: 'C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown', note: 'La machine s\'éteint toute seule. Ne la redémarrez pas avant la capture !' },
+          { n: 2, titre: 'Lancer Sysprep', desc: 'Si des applications ont été installées via winget (déploiement OSIRIS ou manuel), supprimez d\'abord le paquet source winget - sinon Sysprep échoue avec "installed for a user, but not provisioned for all users". Puis, dans une invite de commandes en administrateur, lancez :', cmd: 'Get-AppxPackage -Name "Microsoft.Winget.Source*" -AllUsers | Remove-AppxPackage -AllUsers\nC:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown', note: 'La machine s\'éteint toute seule. Ne la redémarrez pas avant la capture !' },
           { n: 3, titre: 'Enregistrer la machine dans OSIRIS', desc: 'Renseignez l\'adresse MAC de la machine de référence et le nom du fichier WIM à créer, puis cliquez sur Enregistrer.' },
           { n: 4, titre: 'Démarrer la machine en PXE', desc: 'Démarrez la machine de référence sur le réseau (PXE). OSIRIS détecte automatiquement qu\'elle est en mode capture et lance le script. Attendez la fin (15–40 min).' },
         ].map(step => (
@@ -145,9 +145,7 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
                   {new Date(job.registered_at).toLocaleString('fr-FR')}
                 </td>
                 <td className="px-4 py-2">
-                  {(job.status === 'done' || job.status === 'failed') && (
-                    <button onClick={() => handleDeleteCapture(job.mac)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
-                  )}
+                  <button onClick={() => handleDeleteCapture(job.mac)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                 </td>
               </tr>
             ))}
