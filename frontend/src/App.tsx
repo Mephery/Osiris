@@ -93,6 +93,11 @@ export default function App() {
   const [newUserEmail, setNewUserEmail] = useState('')
   const [newUserPass, setNewUserPass]   = useState('')
   const [newUserRole, setNewUserRole]   = useState('technician')
+  const [newAppName, setNewAppName]           = useState('')
+  const [newAppWingetId, setNewAppWingetId]   = useState('')
+  const [newAppAptPackage, setNewAppAptPackage] = useState('')
+  const [newAppCategory, setNewAppCategory]   = useState('tools')
+  const [newAppIcon, setNewAppIcon]           = useState('📦')
 
   // ── Profils (liste partagée ; le state d'édition vit dans ProfilesSection) ──
   const [profiles, setProfiles] = useState<Profile[]>([])
@@ -581,6 +586,32 @@ export default function App() {
       .catch((err) => toast.error(err.message))
   }
 
+  // ── Admin : catalogue d'applications ────────────────────────────────────────
+
+  const handleCreateApp = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    fetch(`${API_URL}/apps`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
+      body: JSON.stringify({
+        name: newAppName, winget_id: newAppWingetId, apt_package: newAppAptPackage,
+        category: newAppCategory, icon: newAppIcon,
+      }),
+    })
+      .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
+      .then(() => {
+        setNewAppName(''); setNewAppWingetId(''); setNewAppAptPackage(''); setNewAppIcon('📦')
+        fetchApps(auth.token); toast.success('Application ajoutée')
+      })
+      .catch((err) => toast.error(err.message))
+  }
+
+  const handleDeleteApp = (id: number) => {
+    fetch(`${API_URL}/apps/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
+      .then(() => { fetchApps(auth.token); toast.success('Application supprimée') })
+      .catch(() => toast.error('Erreur suppression application'))
+  }
+
   const handleCreateImage = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
     fetch(`${API_URL}/images`, {
@@ -764,6 +795,46 @@ export default function App() {
                   <select value={newUserRole} onChange={e => setNewUserRole(e.target.value)} className="osiris-input text-xs flex-1">
                     <option value="technician">Technicien</option>
                     <option value="admin">Admin</option>
+                  </select>
+                  <button type="submit" className="osiris-btn text-xs px-3 flex-shrink-0">+</button>
+                </div>
+              </form>
+            </div>
+
+            {/* Catalogue d'applications (winget / apt) */}
+            <div className="osiris-table-wrap p-5 space-y-4">
+              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Applications</h2>
+              <ul className="space-y-1 max-h-64 overflow-y-auto">
+                {apps.map(a => (
+                  <li key={a.id} className="flex items-center justify-between text-sm py-1 border-b border-slate-800/50">
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span className="flex-shrink-0">{a.icon}</span>
+                      <span className="text-white truncate">{a.name}</span>
+                      <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">{a.category}</span>
+                    </span>
+                    <div className="flex items-center gap-3 flex-shrink-0">
+                      <span className="font-mono text-[10px] text-slate-600 truncate max-w-[140px]">{a.winget_id || a.apt_package}</span>
+                      <button onClick={() => handleDeleteApp(a.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
+                    </div>
+                  </li>
+                ))}
+                {apps.length === 0 && <li className="text-slate-700 text-xs font-mono">Aucune application</li>}
+              </ul>
+              <form onSubmit={handleCreateApp} className="space-y-2 pt-2">
+                <div className="flex gap-2">
+                  <input required placeholder="Nom (ex: Google Chrome)" value={newAppName} onChange={e => setNewAppName(e.target.value)} className="osiris-input text-xs flex-1 min-w-0" />
+                  <input placeholder="Icône (emoji)" value={newAppIcon} onChange={e => setNewAppIcon(e.target.value)} className="osiris-input text-xs w-20 flex-shrink-0 text-center" />
+                </div>
+                <input placeholder="ID winget (ex: Google.Chrome)" value={newAppWingetId} onChange={e => setNewAppWingetId(e.target.value)} className="osiris-input text-xs w-full font-mono" />
+                <input placeholder="Paquet apt (ex: chromium)" value={newAppAptPackage} onChange={e => setNewAppAptPackage(e.target.value)} className="osiris-input text-xs w-full font-mono" />
+                <div className="flex gap-2">
+                  <select value={newAppCategory} onChange={e => setNewAppCategory(e.target.value)} className="osiris-input text-xs flex-1">
+                    <option value="tools">Outils</option>
+                    <option value="office">Bureautique</option>
+                    <option value="browser">Navigateur</option>
+                    <option value="security">Sécurité</option>
+                    <option value="dev">Développement</option>
+                    <option value="media">Multimédia</option>
                   </select>
                   <button type="submit" className="osiris-btn text-xs px-3 flex-shrink-0">+</button>
                 </div>
