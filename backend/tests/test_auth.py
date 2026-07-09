@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
 """Tests d'intégration : authentification, JWT, clés API."""
 from sqlmodel import Session
 from models import engine, ApiKey

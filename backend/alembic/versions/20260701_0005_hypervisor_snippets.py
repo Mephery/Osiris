@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
 """Add snippets_storage to Hypervisor for cloud-init support
 
 Revision ID: 0005

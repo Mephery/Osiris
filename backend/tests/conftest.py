@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
 # Configuration et fixtures partagées pour tous les tests OSIRIS.
 # Les env vars doivent être posées AVANT tout import de models/main/auth,
 # car engine est un global de module créé à l'import.

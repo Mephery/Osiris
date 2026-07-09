@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
 """Tests unitaires de validate_mac (main.py)."""
 import pytest
 from fastapi import HTTPException

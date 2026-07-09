@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
 """Tests d'intégration : calcul de rotation LAPS (GET /machines/{mac}/laps-due)."""
 from datetime import datetime, timedelta, timezone
 from sqlmodel import Session
