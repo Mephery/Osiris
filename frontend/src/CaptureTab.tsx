@@ -117,6 +117,35 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
         ))}
       </div>
 
+      {/* ── Fallback capture manuelle ── */}
+      <details className="rounded-lg border border-amber-900/40 bg-amber-950/10 px-4 py-3">
+        <summary className="cursor-pointer text-xs font-semibold text-amber-500 select-none">
+          La capture automatique a échoué ? → Capture manuelle depuis WinPE
+        </summary>
+        <div className="mt-3 space-y-3 text-[11px] text-slate-400">
+          <p>
+            Sur certains disques NVMe rapides, WinPE met plus de temps à monter la partition
+            Windows que la fenêtre de détection du script. Si le job passe en <span className="text-red-400 font-semibold">Échec</span>,
+            la machine reste sous WinPE avec une invite de commandes : on peut capturer à la main sans rien réinstaller.
+          </p>
+          <ol className="list-decimal list-inside space-y-2">
+            <li>
+              Vérifier que le disque et la partition Windows sont bien visibles :
+              <pre className="mt-1 text-[10px] bg-slate-950 border border-slate-800 rounded px-3 py-2 text-emerald-400 font-mono overflow-x-auto">{'diskpart\nlist disk\nlist volume\nexit'}</pre>
+              <span className="text-slate-500">Repérez la lettre du volume Windows (souvent C:). Tapez <span className="font-mono">exit</span> pour quitter diskpart avant la suite.</span>
+            </li>
+            <li>
+              Lancer la capture DISM (adaptez la lettre <span className="font-mono">C:</span> et le nom du WIM) :
+              <pre className="mt-1 text-[10px] bg-slate-950 border border-slate-800 rounded px-3 py-2 text-emerald-400 font-mono overflow-x-auto">{'dism /Capture-Image /ImageFile:Z:\\golden.wim /CaptureDir:C:\\ /Name:"Golden" /ScratchDir:X:\\ /CheckIntegrity'}</pre>
+              <span className="text-slate-500">Z: est le partage OSIRIS déjà monté par le script (les WIM y atterrissent). Le fichier apparaîtra ensuite dans le sélecteur d'image de déploiement.</span>
+            </li>
+          </ol>
+          <p className="text-[10px] text-amber-600 font-mono">
+            La fenêtre de détection automatique a été portée à ~10 min — un simple redémarrage PXE suffit souvent à repasser en capture auto sur le retry suivant.
+          </p>
+        </div>
+      </details>
+
       {/* ── Liste des jobs ── */}
       {captureJobs.length > 0 && (
         <table className="w-full text-sm">

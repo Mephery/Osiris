@@ -8,11 +8,11 @@ set OSIRIS_IP={{ osiris_ip }}
 echo [OSIRIS] ===== Deploiement Windows =====
 echo [OSIRIS] Machine : {{ machine.hostname }} ({{ machine.client }})
 echo [OSIRIS] MAC     : %MAC%
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Demarrage+deploiement+{{ machine.hostname }}" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Demarrage+deploiement+{{ machine.hostname }}" >nul 2>&1
 
 REM ── Partitionnement GPT (UEFI) ────────────────────────────────────────────
 echo [OSIRIS] Partitionnement du disque (GPT/UEFI)...
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Partitionnement+GPT+en+cours..." >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Partitionnement+GPT+en+cours..." >nul 2>&1
 (
 echo select disk 0
 echo clean
@@ -27,45 +27,56 @@ echo assign letter=C
 ) > X:\diskpart.txt
 diskpart /s X:\diskpart.txt
 if errorlevel 1 (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=ERREUR+diskpart+!" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=ERREUR+diskpart+!" >nul 2>&1
     echo [OSIRIS] ERREUR diskpart !
     pause
     exit /b 1
 )
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/deploy-progress?p=10" >nul 2>&1
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Partitionnement+OK+(EFI+512MB+MSR+16MB+Windows+NTFS)" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/deploy-progress?p=10" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Partitionnement+OK+(EFI+512MB+MSR+16MB+Windows+NTFS)" >nul 2>&1
 
 REM ── Connexion au partage Windows ──────────────────────────────────────────
 echo [OSIRIS] Connexion au partage reseau SMB...
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Connexion+SMB+en+cours..." >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Connexion+SMB+en+cours..." >nul 2>&1
+REM Retry du montage : un error 53 passager (pile reseau, session zombie serveur)
+REM ne doit pas faire echouer le deploiement.
+set SMBTRY=0
+:smbz_retry
+net use Z: /delete /y >nul 2>&1
 net use Z: \\%OSIRIS_IP%\windows /user:guest "" 2>nul
-if errorlevel 1 (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=ERREUR+connexion+SMB+!" >nul 2>&1
-    echo [OSIRIS] ERREUR : impossible de se connecter au partage SMB !
-    pause
-    exit /b 1
+if not errorlevel 1 goto smbz_ok
+set /a SMBTRY+=1
+if %SMBTRY% lss 8 (
+    echo [OSIRIS] Montage SMB echoue - nouvelle tentative %SMBTRY%/8...
+    ping -n 6 127.0.0.1 >nul
+    goto smbz_retry
 )
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Partage+SMB+monte+OK" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=ERREUR+connexion+SMB+apres+8+tentatives" >nul 2>&1
+echo [OSIRIS] ERREUR : impossible de se connecter au partage SMB !
+pause
+exit /b 1
+:smbz_ok
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Partage+SMB+monte+OK" >nul 2>&1
 
 REM ── Detection de l'image ──────────────────────────────────────────────────
 {% if profile.win_image %}
 set WIM=Z:\{{ profile.win_image }}
 if not exist %WIM% (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=ERREUR+:+{{ profile.win_image }}+introuvable+!" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=ERREUR+:+{{ profile.win_image }}+introuvable+!" >nul 2>&1
     echo [OSIRIS] ERREUR : {{ profile.win_image }} introuvable sur le partage SMB !
     pause
     exit /b 1
 )
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Golden+image+:+{{ profile.win_image }}" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Golden+image+:+{{ profile.win_image }}" >nul 2>&1
 {% else %}
 if exist Z:\install.wim (
     set WIM=Z:\install.wim
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Image+trouvee+:+install.wim" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Image+trouvee+:+install.wim" >nul 2>&1
 ) else if exist Z:\install.esd (
     set WIM=Z:\install.esd
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Image+trouvee+:+install.esd" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Image+trouvee+:+install.esd" >nul 2>&1
 ) else (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=ERREUR+:+install.wim+introuvable+!" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=ERREUR+:+install.wim+introuvable+!" >nul 2>&1
     echo [OSIRIS] ERREUR : install.wim introuvable sur le partage !
     pause
     exit /b 1
@@ -74,58 +85,61 @@ if exist Z:\install.wim (
 
 REM ── Application de l'image Windows ───────────────────────────────────────
 echo [OSIRIS] Application de l'image Windows (patience - 15 a 30 min)...
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/deploy-progress?p=15" >nul 2>&1
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=DISM+en+cours+(15-30+min)..." >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/deploy-progress?p=15" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=DISM+en+cours+(15-30+min)..." >nul 2>&1
 dism /Apply-Image /ImageFile:%WIM% /Index:{{ win_index }} /ApplyDir:C:\
 if errorlevel 1 (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=ERREUR+DISM+!" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=ERREUR+DISM+!" >nul 2>&1
     echo [OSIRIS] ERREUR DISM !
     pause
     exit /b 1
 )
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/deploy-progress?p=85" >nul 2>&1
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=DISM+100%25+OK" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/deploy-progress?p=85" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=DISM+100%25+OK" >nul 2>&1
 
 REM ── Injection de drivers constructeurs ───────────────────────────────────
+REM {{ driver_dir }} = "drivers" (tout le dossier) ou "drivers\<vendor>\<key>" (pack cible)
 echo [OSIRIS] Recherche de drivers constructeurs sur le partage...
-if exist Z:\drivers\ (
-    echo [OSIRIS] Injection de drivers depuis Z:\drivers\...
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Injection+drivers+constructeur..." >nul 2>&1
-    dism /Image:C:\ /Add-Driver /Driver:Z:\drivers\ /Recurse /ForceUnsigned
+REM Chemin SANS guillemets : model_key n'a jamais d'espace, et un chemin quote
+REM finissant par \" casse le parsing DISM (le \ echappe le guillemet fermant).
+if exist Z:\{{ driver_dir }}\ (
+    echo [OSIRIS] Injection de drivers depuis Z:\{{ driver_dir }}\...
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Injection+drivers+constructeur..." >nul 2>&1
+    dism /Image:C:\ /Add-Driver /Driver:Z:\{{ driver_dir }}\ /Recurse /ForceUnsigned
     if errorlevel 1 (
-        X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Avertissement+:+certains+drivers+KO+(non+bloquant)" >nul 2>&1
+        X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+:+certains+drivers+KO+(non+bloquant)" >nul 2>&1
         echo [OSIRIS] AVERTISSEMENT : certains drivers n'ont pas pu etre injectes ^(non bloquant^)
     ) else (
-        X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Drivers+injectes+avec+succes" >nul 2>&1
+        X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Drivers+injectes+avec+succes" >nul 2>&1
         echo [OSIRIS] Drivers injectes avec succes
     )
 ) else (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Aucun+dossier+drivers+(etape+ignoree)" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Aucun+dossier+drivers+(etape+ignoree)" >nul 2>&1
     echo [OSIRIS] Aucun dossier drivers sur le partage - etape ignoree
 )
 
 REM ── Configuration du demarrage UEFI ──────────────────────────────────────
 echo [OSIRIS] Configuration du boot UEFI...
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=bcdboot+UEFI+en+cours..." >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=bcdboot+UEFI+en+cours..." >nul 2>&1
 bcdboot C:\Windows /l {{ locale }} /s S: /f UEFI
 if errorlevel 1 (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Avertissement+bcdboot+(non+bloquant)" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+bcdboot+(non+bloquant)" >nul 2>&1
     echo [OSIRIS] AVERTISSEMENT bcdboot ^(non bloquant^)
 ) else (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=bcdboot+UEFI+OK" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=bcdboot+UEFI+OK" >nul 2>&1
 )
 bcdedit /store S:\EFI\Microsoft\Boot\BCD /set {bootmgr} timeout 0
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/deploy-progress?p=92" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/deploy-progress?p=92" >nul 2>&1
 
 REM ── Unattend.xml : personnalisation OOBE ─────────────────────────────────
 echo [OSIRIS] Telechargement de unattend.xml...
 mkdir C:\Windows\Panther 2>nul
-X:\curl.exe -sf -k -o C:\Windows\Panther\unattend.xml "http://%OSIRIS_IP%:8000/unattend.xml?mac=%MAC%" 2>nul
+X:\curl.exe -sf -k -o C:\Windows\Panther\unattend.xml "http://%OSIRIS_IP%/unattend.xml?mac=%MAC%" 2>nul
 if exist C:\Windows\Panther\unattend.xml (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=unattend.xml+installe" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=unattend.xml+installe" >nul 2>&1
     echo [OSIRIS] unattend.xml installe
 ) else (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Avertissement+:+unattend.xml+manquant" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+:+unattend.xml+manquant" >nul 2>&1
     echo [OSIRIS] AVERTISSEMENT : unattend.xml non disponible ^(OOBE non automatisee^)
 )
 
@@ -135,23 +149,23 @@ echo OSIRIS_URL=%OSIRIS% > C:\osiris.cfg
 
 REM ── Script de post-deploiement (premier demarrage) ────────────────────────
 echo [OSIRIS] Telechargement du script de premier demarrage...
-X:\curl.exe -sf -k -o C:\osiris-firstboot.ps1 "http://%OSIRIS_IP%:8000/firstboot-windows/%MAC%" 2>nul
+X:\curl.exe -sf -k -o C:\osiris-firstboot.ps1 "http://%OSIRIS_IP%/firstboot-windows/%MAC%" 2>nul
 if exist C:\osiris-firstboot.ps1 (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=firstboot.ps1+installe" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=firstboot.ps1+installe" >nul 2>&1
     echo [OSIRIS] osiris-firstboot.ps1 installe
 ) else (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Avertissement+:+firstboot.ps1+manquant" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+:+firstboot.ps1+manquant" >nul 2>&1
     echo [OSIRIS] AVERTISSEMENT : osiris-firstboot.ps1 non disponible
 )
 
 REM ── Notification OSIRIS ───────────────────────────────────────────────────
 echo [OSIRIS] Notification du serveur (statut : deployed)...
-X:\curl.exe -sf -k -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/status?status=deployed" 2>nul
+X:\curl.exe -sf -k -X POST "http://%OSIRIS_IP%/machines/%MAC%/status?status=deployed" 2>nul
 if errorlevel 1 (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Avertissement+:+callback+deployed+echoue" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+:+callback+deployed+echoue" >nul 2>&1
     echo [OSIRIS] ^(avertissement : callback echoue, ignoré^)
 ) else (
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Statut+deployed+confirme+-+reboot+dans+10s" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Statut+deployed+confirme+-+reboot+dans+10s" >nul 2>&1
     echo [OSIRIS] Statut mis a jour : deployed
 )
 

@@ -1,0 +1,10 @@
+# Autorise l'utilisateur applicatif OSIRIS (humans) à exécuter uniquement les
+# deux scripts dédiés à la gestion des tunnels VPN clients, sans mot de passe,
+# et sans accès sudo générique.
+#
+# Installation :
+#   sudo install -o root -g root -m 700 deploy/osiris-vpn-apply.sh   /usr/local/sbin/osiris-vpn-apply.sh
+#   sudo install -o root -g root -m 700 deploy/osiris-vpn-disable.sh /usr/local/sbin/osiris-vpn-disable.sh
+#   sudo install -o root -g root -m 440 deploy/osiris-vpn.sudoers    /etc/sudoers.d/osiris-vpn
+#   sudo visudo -c
+humans ALL=(root) NOPASSWD: /usr/local/sbin/osiris-vpn-apply.sh, /usr/local/sbin/osiris-vpn-disable.sh

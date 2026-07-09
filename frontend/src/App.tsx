@@ -5,7 +5,7 @@ import { Toaster, toast } from 'sonner'
 import './App.css'
 import type {
   AuthState, Organization, Machine, Profile, Application,
-  DeploymentEvent, Hypervisor, OsImage, SnapshotEntry, LiveEvent,
+  DeploymentEvent, Hypervisor, OsImage, SnapshotEntry, LiveEvent, VpnTunnel,
 } from './types'
 import { IMAGE_STATUS, EMPTY_FORM, authHeader } from './types'
 import {
@@ -57,6 +57,7 @@ export default function App() {
   const [editingMac, setEditingMac]     = useState<string | null>(null)
   const [formData, setFormData]         = useState<Machine>(EMPTY_FORM)
   const [submitError, setSubmitError]   = useState<string | null>(null)
+  const [driverPacks, setDriverPacks]   = useState<any[]>([])
 
   // Confirmation suppression
   const [deletingMac, setDeletingMac]         = useState<string | null>(null)
@@ -182,7 +183,12 @@ export default function App() {
 
   // Domaines AD par organisation
   const [domainConfigs, setDomainConfigs] = useState<any[]>([])
-  const [newDomainConfig, setNewDomainConfig] = useState({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '' })
+  const [newDomainConfig, setNewDomainConfig] = useState({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '', wifi_ssid: '', wifi_password: '' })
+
+  // Tunnels VPN clients (routage site-à-site)
+  const [vpnTunnels, setVpnTunnels] = useState<VpnTunnel[]>([])
+  const [newVpnTunnel, setNewVpnTunnel] = useState({ organization_id: 0, name: '', ovpn_config: '', remote_dns: '', route_cidr: '', vpn_username: '', vpn_password: '', requires_totp: false, enabled: true })
+  const [applyingTunnelId, setApplyingTunnelId] = useState<number | null>(null)
 
   // Login 2FA
   const [pendingTotp, setPendingTotp] = useState<{temp_token: string} | null>(null)
@@ -227,6 +233,13 @@ export default function App() {
       .catch(() => {})
   }
 
+  const fetchDriverPacks = (token: string) => {
+    fetch(`${API_URL}/drivers`, { headers: authHeader(token) })
+      .then((res) => res.ok ? res.json() : [])
+      .then((data) => setDriverPacks(Array.isArray(data) ? data.filter((p: any) => p.status === 'ready') : []))
+      .catch(() => {})
+  }
+
   const fetchApps = (token: string) => {
     fetch(`${API_URL}/apps`, { headers: authHeader(token) })
       .then((res) => res.ok ? res.json() : [])
@@ -240,6 +253,14 @@ export default function App() {
     fetch(url, { headers: authHeader(token) })
       .then(r => r.ok ? r.json() : [])
       .then(setDomainConfigs)
+      .catch(() => {})
+  }
+
+  const fetchVpnTunnels = (token: string, orgId?: number) => {
+    const url = orgId ? `${API_URL}/vpn-tunnels?org_id=${orgId}` : `${API_URL}/vpn-tunnels`
+    fetch(url, { headers: authHeader(token) })
+      .then(r => r.ok ? r.json() : [])
+      .then(setVpnTunnels)
       .catch(() => {})
   }
 
@@ -300,13 +321,13 @@ export default function App() {
     fetchAll(auth.token, selectedOrg)
     fetchOrgs(auth.token)
     fetchProfiles(auth.token)
-    if (auth.role === 'admin') { fetchUsers(auth.token); fetchImages(auth.token); fetchApps(auth.token) }
+    if (auth.role === 'admin') { fetchUsers(auth.token); fetchImages(auth.token); fetchApps(auth.token); fetchDriverPacks(auth.token) }
   }, [auth, selectedOrg])
 
   useEffect(() => {
     if (!auth) return
     if (auth.role !== 'admin') return
-    if (activeTab === 'admin') fetchDomainConfigs(auth.token)
+    if (activeTab === 'admin') { fetchDomainConfigs(auth.token); fetchVpnTunnels(auth.token) }
     else if (activeTab === 'infrastructure') fetchHypervisors(auth.token)
   }, [activeTab])
 
@@ -955,10 +976,87 @@ export default function App() {
               <input placeholder="Compte jonction AD" value={newDomainConfig.join_user} onChange={e => setNewDomainConfig({...newDomainConfig, join_user: e.target.value})} className="osiris-input text-xs font-mono" />
               <input type="password" placeholder="Mot de passe jonction" value={newDomainConfig.join_password} onChange={e => setNewDomainConfig({...newDomainConfig, join_password: e.target.value})} className="osiris-input text-xs font-mono" />
               <input placeholder="OU par defaut (optionnel)" value={newDomainConfig.default_ou} onChange={e => setNewDomainConfig({...newDomainConfig, default_ou: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input placeholder="SSID WiFi (optionnel)" value={newDomainConfig.wifi_ssid} onChange={e => setNewDomainConfig({...newDomainConfig, wifi_ssid: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input type="password" placeholder="Mot de passe WiFi" value={newDomainConfig.wifi_password} onChange={e => setNewDomainConfig({...newDomainConfig, wifi_password: e.target.value})} className="osiris-input text-xs font-mono" />
               <button onClick={() => {
                 if (!newDomainConfig.organization_id || !newDomainConfig.name || !newDomainConfig.domain) { toast.error('Organisation, nom et domaine requis'); return }
                 fetch(`${API_URL}/domain-configs`, { method: 'POST', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify(newDomainConfig) })
-                  .then(r => { if (r.ok) { fetchDomainConfigs(auth.token); setNewDomainConfig({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '' }); toast.success('Configuration AD ajoutee') } else throw new Error() })
+                  .then(r => { if (r.ok) { fetchDomainConfigs(auth.token); setNewDomainConfig({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '', wifi_ssid: '', wifi_password: '' }); toast.success('Configuration AD ajoutee') } else throw new Error() })
+                  .catch(() => toast.error('Erreur'))
+              }} className="osiris-btn text-xs col-span-2 sm:col-span-1">Ajouter</button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Tunnels VPN clients (dans onglet Admin, section separee) ──────── */}
+        {activeTab === 'admin' && auth.role === 'admin' && (
+          <div className="max-w-7xl mx-auto px-6 py-4 border-t border-slate-800/40 space-y-3">
+            <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Tunnels VPN clients</h2>
+            <p className="text-[10px] text-slate-600">Un tunnel OpenVPN permanent par client. OSIRIS route automatiquement les machines déployées vers le bon domaine AD (DNS split-horizon + route classless), sans bascule manuelle.</p>
+            {vpnTunnels.length > 0 && (
+              <div className="space-y-1">
+                {vpnTunnels.map((t) => {
+                  const orgName = orgs.find(o => o.id === t.organization_id)?.name ?? `Org #${t.organization_id}`
+                  const statusColor = t.status === 'active' ? 'text-emerald-400' : t.status === 'failed' ? 'text-red-400' : 'text-slate-500'
+                  return (
+                    <div key={t.id} className="flex items-center justify-between py-1.5 px-3 border border-slate-800/60 rounded text-xs">
+                      <div>
+                        <span className="text-white font-medium">{t.name}</span>
+                        <span className="text-slate-500 ml-3">{orgName}</span>
+                        {t.route_cidr && <span className="text-slate-600 ml-2 font-mono text-[9px]">{t.route_cidr}</span>}
+                        {t.remote_dns && <span className="text-slate-700 ml-2 font-mono text-[9px]">DNS {t.remote_dns}</span>}
+                        {t.requires_totp && <span className="ml-2 text-[9px] text-amber-400">TOTP requis</span>}
+                        <span className={`ml-3 font-mono text-[9px] ${statusColor}`}>{t.status}</span>
+                        {!t.enabled && <span className="ml-2 text-[9px] text-slate-700">(désactivé)</span>}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          disabled={applyingTunnelId === t.id}
+                          onClick={() => {
+                            let totp_code: string | null = null
+                            if (t.requires_totp) {
+                              totp_code = window.prompt(`Code TOTP actuel pour "${t.name}" (jamais stocké, utilisé une seule fois) :`)
+                              if (!totp_code) return
+                            }
+                            setApplyingTunnelId(t.id)
+                            fetch(`${API_URL}/vpn-tunnels/${t.id}/apply`, {
+                              method: 'POST',
+                              headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ totp_code }),
+                            })
+                              .then(async r => { if (!r.ok) throw new Error((await r.json()).detail || 'Erreur'); return r.json() })
+                              .then(() => { fetchVpnTunnels(auth.token); toast.success('Tunnel appliqué') })
+                              .catch((e) => toast.error(e.message || 'Échec de l\'application du tunnel'))
+                              .finally(() => setApplyingTunnelId(null))
+                          }}
+                          className="osiris-btn text-[10px] px-2 py-1"
+                        >{applyingTunnelId === t.id ? '...' : 'Appliquer'}</button>
+                        <button onClick={() => fetch(`${API_URL}/vpn-tunnels/${t.id}`, { method: 'DELETE', headers: authHeader(auth.token) }).then(async r => { if (r.ok) { fetchVpnTunnels(auth.token); toast.success('Tunnel supprimé') } else { toast.error((await r.json()).detail || 'Erreur') } })} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-2 border-t border-slate-800/40">
+              <select value={newVpnTunnel.organization_id} onChange={e => setNewVpnTunnel({...newVpnTunnel, organization_id: parseInt(e.target.value)})} className="osiris-input text-xs">
+                <option value={0}>-- Organisation --</option>
+                {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+              </select>
+              <input placeholder="Nom (ex: Tunnel Midi2i)" value={newVpnTunnel.name} onChange={e => setNewVpnTunnel({...newVpnTunnel, name: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input placeholder="DNS interne client (ex: 192.0.2.53)" value={newVpnTunnel.remote_dns} onChange={e => setNewVpnTunnel({...newVpnTunnel, remote_dns: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input placeholder="Réseau client (ex: 10.8.0.0/16)" value={newVpnTunnel.route_cidr} onChange={e => setNewVpnTunnel({...newVpnTunnel, route_cidr: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input placeholder="Utilisateur auth-user-pass" value={newVpnTunnel.vpn_username} onChange={e => setNewVpnTunnel({...newVpnTunnel, vpn_username: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input type="password" placeholder="Mot de passe auth-user-pass" value={newVpnTunnel.vpn_password} onChange={e => setNewVpnTunnel({...newVpnTunnel, vpn_password: e.target.value})} className="osiris-input text-xs font-mono" />
+              <label className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                <input type="checkbox" checked={newVpnTunnel.requires_totp} onChange={e => setNewVpnTunnel({...newVpnTunnel, requires_totp: e.target.checked})} />
+                Code TOTP requis à chaque application (jamais stocké)
+              </label>
+              <textarea placeholder="Contenu du fichier .ovpn (avec certificats inline)" value={newVpnTunnel.ovpn_config} onChange={e => setNewVpnTunnel({...newVpnTunnel, ovpn_config: e.target.value})} rows={4} className="osiris-input text-xs font-mono col-span-2 sm:col-span-3" />
+              <button onClick={() => {
+                if (!newVpnTunnel.organization_id || !newVpnTunnel.name || !newVpnTunnel.ovpn_config) { toast.error('Organisation, nom et fichier .ovpn requis'); return }
+                fetch(`${API_URL}/vpn-tunnels`, { method: 'POST', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify(newVpnTunnel) })
+                  .then(async r => { if (r.ok) { fetchVpnTunnels(auth.token); setNewVpnTunnel({ organization_id: 0, name: '', ovpn_config: '', remote_dns: '', route_cidr: '', vpn_username: '', vpn_password: '', requires_totp: false, enabled: true }); toast.success('Tunnel VPN ajouté') } else { toast.error((await r.json()).detail || 'Erreur') } })
                   .catch(() => toast.error('Erreur'))
               }} className="osiris-btn text-xs col-span-2 sm:col-span-1">Ajouter</button>
             </div>
@@ -1354,8 +1452,8 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Client</label>
-                  <input required type="text" placeholder="Acme Corp."
+                  <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Client <span className="text-slate-700 normal-case font-normal">(optionnel)</span></label>
+                  <input type="text" placeholder="Acme Corp."
                     value={formData.client} onChange={(e) => setFormData({ ...formData, client: e.target.value })}
                     className="osiris-input" />
                 </div>
@@ -1369,10 +1467,23 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
               </div>
               {formData.os === 'windows' && (
                 <div className="space-y-1.5">
-                  <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Chemin OU Active Directory</label>
-                  <input required type="text" placeholder="OU=Workstations,DC=domain,DC=local"
+                  <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Chemin OU Active Directory <span className="text-slate-700 normal-case font-normal">(optionnel — uniquement si jonction AD)</span></label>
+                  <input type="text" placeholder="OU=Workstations,DC=humans,DC=local (vide = conteneur par defaut)"
                     value={formData.ou} onChange={(e) => setFormData({ ...formData, ou: e.target.value })}
                     className="osiris-input font-mono text-xs" />
+                </div>
+              )}
+              {formData.os === 'windows' && (
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">
+                    Pack de drivers
+                    <span className="ml-1 text-slate-700 normal-case font-normal">(optionnel — injection ciblée du bon modèle)</span>
+                  </label>
+                  <select value={formData.driver_pack_id ?? ''} onChange={(e) => setFormData({ ...formData, driver_pack_id: e.target.value ? Number(e.target.value) : null })} className="osiris-input text-xs">
+                    <option value="">— Tous les drivers téléchargés (plus lent) —</option>
+                    {driverPacks.map((p: any) => <option key={p.id} value={p.id}>{p.vendor.toUpperCase()} · {p.model} [{p.os_code}]</option>)}
+                  </select>
+                  {driverPacks.length === 0 && <p className="text-[10px] text-slate-600">Aucun pack téléchargé — va dans l'onglet Drivers pour en télécharger un.</p>}
                 </div>
               )}
               <div className="flex justify-end gap-3 pt-2">

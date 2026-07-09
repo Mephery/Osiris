@@ -4,7 +4,7 @@ After=network.target redis.service
 Wants=redis.service
 
 [Service]
-User=osiris-admin
+User=humans
 WorkingDirectory=/opt/osiris/backend
 Environment=PATH=/opt/osiris/backend/venv/bin
 ExecStart=/opt/osiris/backend/venv/bin/arq worker.WorkerSettings

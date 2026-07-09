@@ -1,0 +1,40 @@
+# Copier ce fichier en Caddyfile et remplacer les IP par les vôtres.
+# Le Caddyfile réel est ignoré par git (il contient l'IP de gestion interne).
+# OSIRIS — Reverse proxy
+{
+    auto_https disable_redirects
+}
+
+# ── HTTPS — Interface d'administration & API ─────────────────────────────────
+https://10.0.0.1 {
+    tls /etc/caddy/certs/osiris.crt /etc/caddy/certs/osiris.key
+
+    # Définition du matcher nommé (Ici, Caddy adore les listes d'espaces !)
+    @backend path /auth/* /machines* /dashboard* /organizations* /users* /profiles* /images* /audit-logs* /domain-configs* /vpn-tunnels* /apps* /capture* /drivers* /wims* /webhooks* /health* /docs* /openapi.json /ws/*
+
+    handle @backend {
+        reverse_proxy localhost:8000
+    }
+
+    # Serveur de fichiers pour le Frontend React
+    handle {
+        root * /opt/osiris/frontend/dist
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# ── HTTP — Routes iPXE & Redirection automatique ────────────────────────────
+http://10.0.0.1 {
+    # Définition du matcher nommé pour le déploiement réseau
+    @pxe path /boot* /cloud-init/* /static/* /machines/* /winpe-script/* /winpe-auto /unattend.xml* /firstboot-ubuntu/* /firstboot-debian/* /firstboot-windows/* /preseed/* /capture/*
+
+    handle @pxe {
+        reverse_proxy localhost:8000
+    }
+
+    # Tout le reste (les humains) bascule en HTTPS
+    handle {
+        redir https://10.0.0.1{uri} 308
+    }
+}

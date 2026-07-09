@@ -14,7 +14,7 @@ echo  Machine  : %MAC%
 echo  Fichier  : %WIM_NAME%
 echo  Serveur  : %OSIRIS_IP%
 echo.
-X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Mode+capture+demarre+:+%WIM_NAME%" >nul 2>&1
+X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Mode+capture+demarre+:+%WIM_NAME%" >nul 2>&1
 
 REM ── Connexion au partage SMB ──────────────────────────────────────────────
 echo [OSIRIS] Connexion au partage SMB...
@@ -26,7 +26,7 @@ if errorlevel 1 (
     goto retry_smb
 )
 echo [OSIRIS] Partage SMB connecte.
-X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=SMB+connecte" >nul 2>&1
+X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=SMB+connecte" >nul 2>&1
 
 REM ── Detection de la lettre de la partition Windows ───────────────────────
 REM WinPE ne garantit pas la meme lettre de lecteur d'un demarrage a l'autre
@@ -44,9 +44,9 @@ REM de continuer a deviner a l'aveugle.
     echo list volume
 ) > X:\diag_query.txt
 diskpart /s X:\diag_query.txt > X:\diag_result.txt 2>&1
-X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=--+Diagnostic+diskpart+--" >nul 2>&1
+X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=--+Diagnostic+diskpart+--" >nul 2>&1
 for /f "delims=" %%L in (X:\diag_result.txt) do (
-    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=DP:+%%L" >nul 2>&1
+    X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=DP:+%%L" >nul 2>&1
 )
 
 REM Le sous-systeme disque de WinPE peut mettre bien plus que quelques secondes
@@ -112,8 +112,18 @@ if not defined WIN_DRIVE (
 )
 
 if not defined WIN_DRIVE (
-    if !DETECT_RETRY! lss 30 (
-        echo [OSIRIS] Partition pas encore prete, nouvelle tentative dans 10s... (!DETECT_RETRY!/30)
+    REM Certains NVMe (ex: EliteBook 13e gen) mettent plus de 5 min a etre montes
+    REM par WinPE en mode capture. On etend la fenetre a ~10 min (60 x 10s).
+    if !DETECT_RETRY! lss 60 (
+        echo [OSIRIS] Partition pas encore prete, nouvelle tentative dans 10s... (!DETECT_RETRY!/60)
+        REM Diagnostic diskpart periodique (toutes les ~10 tentatives) pour voir
+        REM QUAND le disque apparait, plutot qu'un seul diag au demarrage (inutile).
+        set /a DIAGMOD=!DETECT_RETRY! %% 10
+        if !DIAGMOD! equ 0 (
+            diskpart /s X:\diag_query.txt > X:\diag_result.txt 2>&1
+            X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Diag+tentative+!DETECT_RETRY!+:" >nul 2>&1
+            for /f "delims=" %%L in (X:\diag_result.txt) do X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=DP:+%%L" >nul 2>&1
+        )
         ping -n 11 127.0.0.1 >nul
         goto retry_detect
     )
@@ -126,17 +136,17 @@ if not defined WIN_DRIVE (
     echo  (sysprep /generalize /oobe /shutdown)
     echo.
     echo [OSIRIS] Diagnostic des lecteurs disponibles :
-    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=--+Diagnostic+lecteurs+--" >nul 2>&1
+    X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=--+Diagnostic+lecteurs+--" >nul 2>&1
     for %%D in (C D E F G H I J K) do (
         if exist %%D:\ (
             echo   %%D: existe
             dir %%D:\ > X:\dirlist.txt 2>&1
             for /f "delims=" %%L in (X:\dirlist.txt) do (
-                X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=%%D+:+%%L" >nul 2>&1
+                X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=%%D+:+%%L" >nul 2>&1
             )
         )
     )
-    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/capture/%MAC%/done?success=false" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/capture/%MAC%/done?success=false" >nul 2>&1
     echo.
     echo  Ouverture d'une invite de secours - la VM ne va PAS redemarrer.
     echo  Vous pouvez lancer "diskpart" puis "list disk" / "list volume" pour
@@ -146,13 +156,13 @@ if not defined WIN_DRIVE (
     exit /b 1
 )
 echo [OSIRIS] Partition Windows detectee : %WIN_DRIVE%:
-X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Partition+Windows+:+%WIN_DRIVE%%3A" >nul 2>&1
+X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Partition+Windows+:+%WIN_DRIVE%%3A" >nul 2>&1
 
 REM ── Verification espace disque sur le partage ────────────────────────────
 echo [OSIRIS] Verification de l'espace disponible...
 if exist Z:\%WIM_NAME% (
     echo [OSIRIS] ATTENTION : Z:\%WIM_NAME% existe deja, il sera ecrase.
-    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Avertissement+:+%WIM_NAME%+existe+deja,+ecrasement..." >nul 2>&1
+    X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+:+%WIM_NAME%+existe+deja,+ecrasement..." >nul 2>&1
 )
 
 REM ── Lancement de la capture ──────────────────────────────────────────────
@@ -161,7 +171,7 @@ echo [OSIRIS] Demarrage de la capture DISM...
 echo [OSIRIS] Duree estimee : 15 a 40 minutes selon la taille.
 echo [OSIRIS] Ne pas fermer cette fenetre et ne pas eteindre la machine !
 echo.
-X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Capture+DISM+en+cours..." >nul 2>&1
+X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Capture+DISM+en+cours..." >nul 2>&1
 
 dism /Capture-Image ^
      /ImageFile:Z:\%WIM_NAME% ^
@@ -175,15 +185,15 @@ if errorlevel 1 (
     echo.
     echo  ERREUR : la capture a echoue !
     echo  Verifiez l'espace disponible sur le partage SMB.
-    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=ERREUR+:+capture+echouee+!" >nul 2>&1
-    X:\curl.exe -sf "http://%OSIRIS_IP%:8000/capture/%MAC%/done?success=false" >nul 2>&1
+    X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=ERREUR+:+capture+echouee+!" >nul 2>&1
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/capture/%MAC%/done?success=false" >nul 2>&1
     pause
     exit /b 1
 )
 
 REM ── Notification succes ──────────────────────────────────────────────────
-X:\curl.exe -sf "http://%OSIRIS_IP%:8000/machines/%MAC%/log?msg=Capture+terminee+:+%WIM_NAME%" >nul 2>&1
-X:\curl.exe -sf "http://%OSIRIS_IP%:8000/capture/%MAC%/done?success=true" >nul 2>&1
+X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Capture+terminee+:+%WIM_NAME%" >nul 2>&1
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/capture/%MAC%/done?success=true" >nul 2>&1
 
 echo.
 echo  =============================================

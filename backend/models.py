@@ -55,6 +55,27 @@ class DomainConfig(SQLModel, table=True):
     join_user: str = Field(default="")    # compte de jonction (clair)
     join_password: str = Field(default="")  # chiffre Fernet
     default_ou: str = Field(default="")   # OU par defaut pour les machines
+    wifi_ssid: str = Field(default="")    # SSID WiFi pousse aux machines qui joignent ce domaine
+    wifi_password: str = Field(default="")  # mot de passe WiFi chiffre Fernet
+
+
+class VpnTunnel(SQLModel, table=True):
+    __tablename__ = "vpn_tunnel"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    organization_id: int = Field(foreign_key="organization.id", index=True, unique=True)
+    name: str                              # label affiche dans l'UI, ex: "Tunnel Midi2i"
+    slug: str = Field(unique=True)         # nom de fichier / instance systemd, ex: "midi2i"
+    ovpn_config: str = Field(default="")   # contenu du .ovpn chiffre Fernet
+    remote_dns: str = Field(default="")    # IP(s) du DNS interne du client, separees par des virgules
+    route_cidr: str = Field(default="")    # reseau du client joignable via le tunnel, ex: "10.8.0.0/16"
+    vpn_username: str = Field(default="")  # compte auth-user-pass cote client (clair, comme DomainConfig.join_user)
+    vpn_password: str = Field(default="")  # mot de passe auth-user-pass, chiffre Fernet
+    requires_totp: bool = Field(default=False)  # si True, un code TOTP saisi par un humain est requis a chaque Apply (jamais stocke)
+    enabled: bool = Field(default=True)
+    status: str = Field(default="unknown")            # unknown | active | inactive | failed
+    last_applied_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Profile(SQLModel, table=True):
@@ -105,6 +126,14 @@ class Application(SQLModel, table=True):
     apt_package: str = Field(default="")  # "google-chrome-stable" — vide si pas de package Linux
     category: str    = Field(default="tools")  # browser | tools | security | office | media | dev | comm | remote
     icon: str        = Field(default="📦")
+    # Installeur custom Windows (au lieu de winget) : pour les apps a licence/enrolement
+    # comme WithSecure. Le MSI/EXE est heberge sous backend/static/installers/ et servi
+    # par OSIRIS ; le firstboot le telecharge et lance la commande silencieuse.
+    install_type: str    = Field(default="winget")  # "winget" | "msi" | "exe"
+    installer_file: str  = Field(default="")        # nom du fichier sous static/installers/
+    install_args: str    = Field(default="")        # args silencieux (ex: "/qn VOUCHER=... LANGUAGE=fr")
+    installer_config_file: str = Field(default="")  # fichier compagnon telecharge a cote (ex: config XML de l'ODT Office)
+    detect_name: str     = Field(default="")        # chaine cherchee dans le registre pour le smoke test (si le nom installe differe du nom affiche)
 
 
 class Machine(SQLModel, table=True):
@@ -123,6 +152,9 @@ class Machine(SQLModel, table=True):
     hw_serial: str = Field(default="")
     hw_model: str = Field(default="")
     hw_ram_gb: int = Field(default=0)
+    hw_disk_gb: int = Field(default=0)     # taille du disque systeme (Go)
+    hw_disk_type: str = Field(default="")  # type de disque (SSD NVMe, SSD (SATA), HDD...)
+    hw_cpu: str = Field(default="")        # type/modele du processeur
     # BitLocker (Windows uniquement) - chiffres Fernet
     bitlocker_key: str = Field(default="")
     bitlocker_pin: str = Field(default="")
@@ -137,6 +169,9 @@ class Machine(SQLModel, table=True):
     # Smoke tests post-deploiement
     smoke_status: str = Field(default="")   # "" | "ok" | "warnings"
     smoke_results: str = Field(default="")  # JSON : [{"name": "...", "ok": true, "detail": "..."}]
+    # Pack de drivers a injecter au deploiement (choisi/confirme par l'operateur).
+    # Si defini + pack telecharge : injection ciblee ; sinon fallback = tout le dossier drivers.
+    driver_pack_id: Optional[int] = Field(default=None, foreign_key="driver_pack.id")
     # VM (Proxmox) - vide pour les machines physiques
     hypervisor_id: Optional[int] = Field(default=None, foreign_key="hypervisor.id")
     proxmox_vm_id: int = Field(default=0)   # ID de la VM dans Proxmox (ex: 101), 0 = physique

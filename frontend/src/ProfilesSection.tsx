@@ -200,7 +200,6 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
               <input type="password" placeholder="Mot de passe jonction AD" value={newProfile.domain_join_password ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_password: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
             </>
           )}
-          <input placeholder="Suffixe TeamViewer (optionnel)" title="Mot de passe TV = NOMPC_MAJUSCULES + ce suffixe" value={newProfile.tv_suffix ?? ''} onChange={e => setNewProfile({ ...newProfile, tv_suffix: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
           {newProfile.os === 'windows' && (() => {
             const drives: {letter:string,path:string}[] = (() => { try { return JSON.parse(newProfile.network_drives || '[]') } catch { return [] } })()
             const printers: string[] = (() => { try { return JSON.parse(newProfile.printers || '[]') } catch { return [] } })()
@@ -233,7 +232,7 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
           {/* Sélecteur d'applications */}
           {(() => {
             const os = newProfile.os ?? 'ubuntu'
-            const eligible = apps.filter(a => os === 'windows' ? a.winget_id : a.apt_package)
+            const eligible = apps.filter(a => os === "windows" ? (a.winget_id || a.installer_file) : a.apt_package)
 
             if (eligible.length === 0) return null
             const selected = new Set((newProfile.app_ids ?? '').split(',').filter(Boolean))
@@ -350,8 +349,6 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                     <button type="button" title="Parcourir les WIM disponibles" onClick={() => { fetchWims(); setShowWimPicker('edit') }} className="osiris-btn text-xs px-2 flex-shrink-0">📂</button>
                   </div>
                 </>)}
-                <label className="text-xs text-slate-400 self-center">Suffixe TeamViewer</label>
-                <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, tv_suffix: e.target.value })} />
                 {(editingProfile.os === 'ubuntu' || editingProfile.os === 'debian') && (<>
                   <label className="text-xs text-slate-400 self-center">Type de machine</label>
                   <select value={editingProfile.machine_type ?? 'workstation'} onChange={e => setEditingProfile({ ...editingProfile, machine_type: e.target.value })} className="osiris-input text-xs">
@@ -397,7 +394,7 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
               </div>
               {/* Sélecteur d'applications */}
               {(() => {
-                const eligible = apps.filter(a => editingProfile.os === 'windows' ? a.winget_id : a.apt_package)
+                const eligible = apps.filter(a => editingProfile.os === "windows" ? (a.winget_id || a.installer_file) : a.apt_package)
                 if (eligible.length === 0) return null
                 const selected = new Set((editingProfile.app_ids ?? '').split(',').filter(Boolean))
                 const toggle = (id: number) => {

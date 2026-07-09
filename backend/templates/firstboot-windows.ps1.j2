@@ -27,6 +27,16 @@ function Write-Log($msg) {
     $line = "$(Get-Date -Format 'HH:mm:ss') $msg"
     Write-Host $line
     Add-Content -Path $logFile -Value $line
+    # Remonte aussi dans OSIRIS (vue live du deploiement, comme la phase WinPE) pour
+    # qu'un operateur voie la progression du firstboot au lieu d'un ecran fige.
+    # Fire-and-forget : jamais bloquant, echecs ignores. Actif des que la MAC est connue.
+    if ($script:_mac) {
+        try {
+            $enc = [uri]::EscapeDataString($msg)
+            Invoke-WebRequest -Uri "$osirisUrl/machines/$($script:_mac)/log?msg=$enc" `
+                -Method POST -UseBasicParsing -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+        } catch {}
+    }
 }
 
 # Ecrit le detail dans le fichier de log seulement (pas la console) - utilise pour
@@ -44,7 +54,7 @@ Write-Log "Attente de la connectivite reseau..."
 $retries = 0
 while ($retries -lt 30) {
     try {
-        $null = Invoke-WebRequest -Uri "$osirisUrl/" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+        $null = Invoke-WebRequest -Uri "$osirisUrl/boot" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
         break
     } catch {
         Start-Sleep -Seconds 5
@@ -75,10 +85,33 @@ try {
     $hwModelName  = if ($cs.Model)          { $cs.Model.Trim()         } else { '' }
     $hwModel  = "$hwManufact $hwModelName".Trim()
     $hwRamGb  = [math]::Round($cs.TotalPhysicalMemory / 1GB)
-    Write-Log "Materiel : $hwModel | S/N : $hwSerial | RAM : ${hwRamGb} Go"
+    # CPU (type/modele) et taille du disque systeme (disque physique portant C:).
+    $cpu = Get-CimInstance -ClassName Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+    $hwCpu = if ($cpu -and $cpu.Name) { $cpu.Name.Trim() } else { '' }
+    $diskNum = (Get-Partition -DriveLetter C -ErrorAction SilentlyContinue).DiskNumber
+    $disk = if ($null -ne $diskNum) {
+        Get-CimInstance Win32_DiskDrive -EA SilentlyContinue | Where-Object { $_.Index -eq $diskNum } | Select-Object -First 1
+    } else {
+        Get-CimInstance Win32_DiskDrive -EA SilentlyContinue | Sort-Object Index | Select-Object -First 1
+    }
+    $hwDiskGb = if ($disk -and $disk.Size) { [math]::Round($disk.Size / 1GB) } else { 0 }
+    # Type de disque (SSD/HDD + bus NVMe/SATA) via Get-PhysicalDisk (dispo en Windows complet).
+    $hwDiskType = ''
+    $pd = Get-PhysicalDisk -ErrorAction SilentlyContinue | Where-Object { "$($_.DeviceId)" -eq "$diskNum" } | Select-Object -First 1
+    if (-not $pd) { $pd = Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    if ($pd) {
+        $mt = "$($pd.MediaType)"   # SSD / HDD / Unspecified
+        $bt = "$($pd.BusType)"     # NVMe / SATA / RAID / USB...
+        if     ($bt -eq 'NVMe')  { $hwDiskType = 'SSD NVMe' }
+        elseif ($mt -eq 'SSD')   { $hwDiskType = if ($bt) { "SSD ($bt)" } else { 'SSD' } }
+        elseif ($mt -eq 'HDD')   { $hwDiskType = 'HDD' }
+        elseif ($mt)             { $hwDiskType = $mt }
+        elseif ($bt)             { $hwDiskType = $bt }
+    }
+    Write-Log "Materiel : $hwModel | S/N : $hwSerial | RAM : ${hwRamGb} Go | Disque : ${hwDiskGb} Go $hwDiskType | CPU : $hwCpu"
 
     if ($mac) {
-        $hwBody = @{ serial = $hwSerial; model = $hwModel; ram_gb = $hwRamGb } | ConvertTo-Json
+        $hwBody = @{ serial = $hwSerial; model = $hwModel; ram_gb = $hwRamGb; disk_gb = $hwDiskGb; disk_type = $hwDiskType; cpu = $hwCpu } | ConvertTo-Json
         Invoke-WebRequest -Uri "$osirisUrl/machines/$mac/hardware" `
             -Method POST -Body $hwBody -ContentType "application/json" `
             -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop | Out-Null
@@ -100,6 +133,11 @@ if ($mac) {
 }
 
 # ── LAPS - Mot de passe administrateur local unique ───────────────────────────
+# Sert aussi de garde-fou : on ne supprimera le compte de deploiement osiris-admin
+# a la fin que si un AUTRE admin local utilisable existe (Administrateur integre
+# active + mot de passe connu d'OSIRIS). Sinon on garderait osiris-admin pour ne
+# pas verrouiller la machine hors de tout admin local.
+$script:localAdminReady = $false
 Write-Log "Generation du mot de passe administrateur local (LAPS)..."
 try {
     $chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789!@#$%'.ToCharArray()
@@ -120,6 +158,9 @@ try {
             -UseBasicParsing -TimeoutSec 10 | Out-Null
         Write-Log "Mot de passe LAPS sauvegarde dans OSIRIS"
     }
+    # Administrateur integre actif + mot de passe sauvegarde : on a un admin local
+    # de secours, la suppression d'osiris-admin est donc sans danger.
+    $script:localAdminReady = $true
 } catch {
     Write-Log "AVERTISSEMENT : LAPS echoue - $_"
 }
@@ -230,7 +271,7 @@ $wingetExe = Get-WingetPath
 
 Write-Log "Installation des applications via winget..."
 $apps = @(
-{% for app in win_apps %}
+{% for app in win_apps if app.install_type == 'winget' and app.winget_id %}
     "{{ app.winget_id }}"{{ "," if not loop.last else "" }}
 {% endfor %}
 )
@@ -251,7 +292,12 @@ if (-not $wingetExe) {
         $i++
         Write-Progress -Activity "Installation des applications" `
             -Status "$appId ($i/$total)" -PercentComplete (($i - 1) / $total * 100)
+        # --source winget : on force la source communautaire (qui contient nos apps)
+        # et on ignore msstore, dont le CDN (storeedgefd.dsx.mp.microsoft.com) peut
+        # etre injoignable/filtre sur le reseau client. Sans ca, l'erreur msstore
+        # fait echouer winget alors que le paquet existe dans la source winget.
         & $wingetExe install --id $appId -e `
+            --source winget `
             --accept-source-agreements `
             --accept-package-agreements `
             --silent 2>&1 | ForEach-Object { Write-LogFile "  $_" }
@@ -268,26 +314,99 @@ if (-not $wingetExe) {
 Write-Log "Applications installees."
 {% endif %}
 
-{% if tv_password %}
-# ── TeamViewer ───────────────────────────────────────────────────────────────
-# Placé après l'installation des apps winget : si TeamViewer est sélectionné comme
-# app du profil (plutôt que pré-installé dans une golden image), il vient d'être
-# installé juste au-dessus - le chercher avant ce point le manquait toujours.
-$tvPassword = "{{ tv_password }}"
+{% set custom_apps = win_apps | rejectattr('install_type', 'equalto', 'winget') | selectattr('installer_file') | list %}
+{% if custom_apps %}
+# ── Applications a installeur dedie (MSI/EXE heberge par OSIRIS) ───────────────
+# Pour les apps a licence/enrolement que winget ne gere pas (ex: WithSecure : le
+# VOUCHER = cle d'abonnement est passe en argument). L'installeur est telecharge
+# depuis OSIRIS puis lance en silencieux.
+Write-Log "Installation des applications a installeur dedie..."
+$uacPath2 = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+$uacOrig2 = (Get-ItemProperty -Path $uacPath2 -Name ConsentPromptBehaviorAdmin -EA SilentlyContinue).ConsentPromptBehaviorAdmin
+Set-ItemProperty -Path $uacPath2 -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord -EA SilentlyContinue
+{% for app in custom_apps %}
+$tmpDir = Join-Path $env:TEMP ("osiris-inst-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+try {
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+    $dst = Join-Path $tmpDir "{{ app.installer_file }}"
+    Write-Log "Telechargement de l'installeur {{ app.name }}..."
+    Invoke-WebRequest -Uri "$osirisUrl/static/installers/{{ app.installer_file }}" -OutFile $dst -UseBasicParsing -TimeoutSec 600 -ErrorAction Stop
+    {% if app.installer_config_file %}
+    # Fichier compagnon (ex: configuration.xml de l'Office Deployment Tool), a cote de l'exe
+    Invoke-WebRequest -Uri "$osirisUrl/static/installers/{{ app.installer_config_file }}" -OutFile (Join-Path $tmpDir "{{ app.installer_config_file }}") -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+    {% endif %}
+    Write-Log ">>> Installation de {{ app.name }} en cours - PEUT PRENDRE 15-20 MIN (telechargement + install). NE PAS ETEINDRE LE PC. <<<"
+    {% if app.install_type == 'msi' %}
+    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList ('/i "' + $dst + '" {{ app.install_args }}') -Wait -PassThru -WindowStyle Hidden
+    {% else %}
+    # WorkingDirectory = dossier temp : les chemins relatifs des args (ex: /configure conf.xml) s'y resolvent
+    $proc = Start-Process -FilePath $dst -ArgumentList '{{ app.install_args }}' -WorkingDirectory $tmpDir -Wait -PassThru -WindowStyle Hidden
+    {% endif %}
+    Write-Log "{{ app.name }} : installeur termine (code $($proc.ExitCode))"
+} catch {
+    Write-Log "AVERTISSEMENT : {{ app.name }} - installeur echoue : $_"
+} finally {
+    Remove-Item -LiteralPath $tmpDir -Recurse -Force -EA SilentlyContinue
+}
+{% endfor %}
+if ($null -ne $uacOrig2) { Set-ItemProperty -Path $uacPath2 -Name ConsentPromptBehaviorAdmin -Value $uacOrig2 -Type DWord -EA SilentlyContinue }
+else { Remove-ItemProperty -Path $uacPath2 -Name ConsentPromptBehaviorAdmin -EA SilentlyContinue }
+{% endif %}
+
+# ── TeamViewer : acceptation du CLUF (mot de passe configure MANUELLEMENT) ─────
+# L'automatisation du mot de passe TeamViewer via `--passwd` a ete abandonnee :
+# la commande lance l'appli qui ne se ferme pas et FIGE le firstboot, et le
+# resultat est de toute facon peu fiable (TeamViewer 15+). On se contente donc
+# d'accepter le CLUF pour que TV soit utilisable ; le mot de passe d'acces non
+# surveille se configure a la main (10 s), c'est negligeable vs le reste automatise.
 $tvExe = if (Test-Path "C:\Program Files\TeamViewer\TeamViewer.exe") {
     "C:\Program Files\TeamViewer\TeamViewer.exe"
 } elseif (Test-Path "C:\Program Files (x86)\TeamViewer\TeamViewer.exe") {
     "C:\Program Files (x86)\TeamViewer\TeamViewer.exe"
 } else { $null }
-
 if ($tvExe) {
     foreach ($p in @("HKLM:\SOFTWARE\TeamViewer", "HKLM:\SOFTWARE\WOW6432Node\TeamViewer")) {
         if (Test-Path $p) { Set-ItemProperty -Path $p -Name "LicenseAccepted" -Value 1 -Type DWord -EA SilentlyContinue }
     }
-    & $tvExe --passwd $tvPassword | Out-Null
-    Write-Log "TeamViewer : mot de passe defini"
-} else {
-    Write-Log "AVERTISSEMENT : TeamViewer introuvable (ni golden image, ni installe via winget)"
+    Write-Log "TeamViewer : installe, CLUF accepte (mot de passe a configurer manuellement)."
+}
+
+{% if profile.join_domain and profile.wifi_ssid %}
+# ── Profil WiFi (pousse pour les machines qui joignent ce domaine) ────────────
+Write-Log "Configuration du profil WiFi {{ profile.wifi_ssid }}..."
+try {
+    # here-strings litterales @' '@ : aucune interpolation PowerShell du SSID/mdp
+    $wifiSsid = @'
+{{ profile.wifi_ssid }}
+'@.Trim()
+    $wifiPass = @'
+{{ profile.wifi_password }}
+'@.Trim()
+    $ssidX = [System.Security.SecurityElement]::Escape($wifiSsid)
+    $passX = [System.Security.SecurityElement]::Escape($wifiPass)
+    $wifiXml = @"
+<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+  <name>$ssidX</name>
+  <SSIDConfig><SSID><name>$ssidX</name></SSID></SSIDConfig>
+  <connectionType>ESS</connectionType>
+  <connectionMode>auto</connectionMode>
+  <MSM><security>
+    <authEncryption><authentication>WPA2PSK</authentication><encryption>AES</encryption><useOneX>false</useOneX></authEncryption>
+    <sharedKey><keyType>passPhrase</keyType><protected>false</protected><keyMaterial>$passX</keyMaterial></sharedKey>
+  </security></MSM>
+</WLANProfile>
+"@
+    $wifiFile = Join-Path $env:TEMP "osiris-wifi.xml"
+    Set-Content -Path $wifiFile -Value $wifiXml -Encoding UTF8
+    # user=all : profil disponible pour tous les utilisateurs de la machine.
+    # Sur un poste sans carte WiFi, netsh renvoie une erreur non bloquante (catch).
+    $wifiOut = netsh wlan add profile filename="$wifiFile" user=all 2>&1
+    Remove-Item $wifiFile -Force -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -eq 0) { Write-Log "WiFi : profil $wifiSsid ajoute" }
+    else { Write-Log "WiFi : non ajoute ($wifiOut)" }
+} catch {
+    Write-Log "AVERTISSEMENT WiFi : $_"
 }
 {% endif %}
 
@@ -441,12 +560,18 @@ try {
 # Presence des applications installees
 {% for app in win_apps %}
 try {
+    {% if app.install_type == 'winget' and app.winget_id %}
     if (-not $wingetExe) { throw "winget introuvable" }
-    $appOut = & $wingetExe list --id "{{ app.winget_id }}" -e --accept-source-agreements 2>&1
+    # --source winget : evite l'erreur msstore lors de la correlation (voir install)
+    $appOut = & $wingetExe list --id "{{ app.winget_id }}" -e --source winget --accept-source-agreements 2>&1
     $appOk = $LASTEXITCODE -eq 0
-    Add-SmokeTest "App : {{ app.name }}" $appOk $(if ($appOk) { "Installe" } else { "Non trouve dans winget" })
+    {% else %}
+    # Installeur custom (ex: WithSecure) : verifier la presence dans les programmes installes
+    $appOk = $null -ne (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -EA SilentlyContinue | Where-Object { $_.DisplayName -like "*{{ app.detect_name or app.name }}*" })
+    {% endif %}
+    Add-SmokeTest "App : {{ app.name }}" $appOk $(if ($appOk) { "Installe" } else { "Non trouve" })
 } catch {
-    Add-SmokeTest "App : {{ app.name }}" $false "Erreur winget"
+    Add-SmokeTest "App : {{ app.name }}" $false "Erreur"
 }
 {% endfor %}
 {% endif %}
@@ -465,6 +590,64 @@ try {
     Write-Log "AVERTISSEMENT : Echec envoi rapport smoke tests - $_"
 }
 
+# Progression a 100% : le deploiement (firstboot compris) est vraiment termine.
+if ($script:_mac) {
+    try {
+        Invoke-WebRequest -Uri "$osirisUrl/machines/$($script:_mac)/deploy-progress?p=100" `
+            -Method POST -UseBasicParsing -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+    } catch {}
+}
+Write-Log "===== DEPLOIEMENT TERMINE ====="
+
+# ── Suppression du compte de deploiement osiris-admin ─────────────────────────
+# Le firstboot tourne SOUS osiris-admin => impossible de se supprimer soi-meme.
+# On planifie une tache SYSTEM au demarrage qui supprime le compte + son profil au
+# prochain boot (autologon coupe => plus personne connecte dessus), puis se supprime.
+# Restent uniquement : l'Administrateur integre (LAPS) + les comptes du domaine.
+# Garde-fou : on ne le fait que si un admin local de secours existe (voir LAPS).
+if ($script:localAdminReady) {
+    try {
+        $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+        Set-ItemProperty    -Path $winlogon -Name AutoAdminLogon -Value "0" -EA SilentlyContinue
+        Remove-ItemProperty -Path $winlogon -Name DefaultPassword -EA SilentlyContinue
+        Remove-ItemProperty -Path $winlogon -Name DefaultUserName -EA SilentlyContinue
+        Remove-ItemProperty -Path $winlogon -Name AutoLogonCount  -EA SilentlyContinue
+
+        $cleanup = @'
+$ErrorActionPreference = "SilentlyContinue"
+$target = "osiris-admin"
+$prof = Get-CimInstance Win32_UserProfile | Where-Object { $_.LocalPath -like "*\$target" }
+if ($prof) { Remove-CimInstance -InputObject $prof }
+Remove-LocalUser -Name $target
+Unregister-ScheduledTask -TaskName "OsirisCleanupAdmin" -Confirm:$false
+Remove-Item -LiteralPath "C:\osiris-cleanup-admin.ps1" -Force
+'@
+        Set-Content -Path "C:\osiris-cleanup-admin.ps1" -Value $cleanup -Encoding UTF8
+        $act  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\osiris-cleanup-admin.ps1"
+        $trg  = New-ScheduledTaskTrigger -AtStartup
+        $prin = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+        Register-ScheduledTask -TaskName "OsirisCleanupAdmin" -Action $act -Trigger $trg -Principal $prin -Force | Out-Null
+        Write-Log "Compte osiris-admin : suppression planifiee au prochain demarrage"
+    } catch {
+        Write-Log "AVERTISSEMENT planification suppression osiris-admin : $_"
+    }
+} else {
+    Write-Log "osiris-admin CONSERVE (aucun admin local de secours : LAPS a echoue)"
+}
+
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 Start-Sleep -Seconds 2
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -EA SilentlyContinue
+
+{% if profile.bitlocker_pin %}
+# BitLocker TPM+PIN : redemarrage MANUEL requis (le PIN est demande au boot).
+# osiris-admin sera supprime a ce redemarrage par la tache planifiee.
+Write-Log "Deploiement termine. Redemarrage manuel requis (BitLocker PIN) - osiris-admin sera supprime au boot."
+{% else %}
+# Redemarrage final : deconnecte osiris-admin et declenche son nettoyage au boot.
+if ($script:localAdminReady) {
+    Write-Log "Deploiement termine - redemarrage final (suppression osiris-admin)..."
+    Start-Sleep -Seconds 3
+    Restart-Computer -Force
+}
+{% endif %}

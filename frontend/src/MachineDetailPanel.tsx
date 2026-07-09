@@ -132,12 +132,14 @@ export function MachineDetailPanel({
           )}
 
           {/* ── Inventaire materiel ── */}
-          {(machine.hw_model || machine.hw_serial) && (
+          {(machine.hw_model || machine.hw_serial || machine.hw_cpu || machine.hw_disk_gb) && (
             <div>
               <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Inventaire materiel</p>
               <div className="flex flex-wrap gap-4 text-[10px] font-mono">
                 {machine.hw_model && <span className="text-slate-400">{machine.hw_model}</span>}
+                {machine.hw_cpu && <span className="text-slate-500">{machine.hw_cpu}</span>}
                 {machine.hw_ram_gb ? <span className="text-slate-500">{machine.hw_ram_gb} Go RAM</span> : null}
+                {machine.hw_disk_gb ? <span className="text-slate-500">{machine.hw_disk_gb} Go {machine.hw_disk_type || 'disque'}</span> : null}
                 {machine.hw_serial && <span className="text-slate-600">S/N : {machine.hw_serial}</span>}
               </div>
             </div>

@@ -14,6 +14,22 @@ export interface Organization {
   webhook_url: string;
 }
 
+export interface VpnTunnel {
+  id: number;
+  organization_id: number;
+  name: string;
+  slug: string;
+  has_config: boolean;
+  remote_dns: string;
+  route_cidr: string;
+  vpn_username: string;
+  has_password: boolean;
+  requires_totp: boolean;
+  enabled: boolean;
+  status: string;
+  last_applied_at: string | null;
+}
+
 export interface WimFile {
   name: string;
   size_mb: number;
@@ -32,10 +48,14 @@ export interface Machine {
   deployed_at?: string | null;
   organization_id?: number | null;
   profile_id?: number | null;
+  driver_pack_id?: number | null;
   dism_progress?: number;
   hw_serial?: string;
   hw_model?: string;
   hw_ram_gb?: number;
+  hw_disk_gb?: number;
+  hw_disk_type?: string;
+  hw_cpu?: string;
   has_bitlocker?: boolean;
   has_laps?: boolean;
   user_name?: string;
@@ -95,6 +115,8 @@ export interface Application {
   apt_package: string;
   category: string;
   icon: string;
+  install_type?: string;
+  installer_file?: string;
 }
 
 export interface DeploymentEvent {
@@ -206,7 +228,7 @@ export function formatMac(mac: string): string {
   return mac.match(/.{1,2}/g)?.join(':').toUpperCase() ?? mac
 }
 
-export const EMPTY_FORM: Machine = { mac: '', client: '', os: 'windows', hostname: '', ou: '', organization_id: null, profile_id: null }
+export const EMPTY_FORM: Machine = { mac: '', client: '', os: 'windows', hostname: '', ou: '', organization_id: null, profile_id: null, driver_pack_id: null }
 
 export function authHeader(token: string) {
   return { 'Authorization': `Bearer ${token}` }

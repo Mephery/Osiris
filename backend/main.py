@@ -31,7 +31,8 @@ from jinja2 import Environment, FileSystemLoader
 
 import pyotp
 import qrcode
-from models import ApiKey, Application, AuditLog, DeploymentEvent, DriverPack, DomainConfig, Hypervisor, Machine, Organization, OsImage, Profile, User, engine, init_db, normalize_model
+from models import ApiKey, Application, AuditLog, DeploymentEvent, DriverPack, DomainConfig, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
+import vpn
 from auth import (
     hash_password, verify_password, create_token,
     get_current_user, require_admin
@@ -73,7 +74,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 OSIRIS_BASE_URL = os.environ.get("OSIRIS_BASE_URL", "http://10.0.0.1:8000")
-OSIRIS_IP       = os.environ.get("OSIRIS_IP", "192.168.1.18")
+OSIRIS_IP       = os.environ.get("OSIRIS_IP", "10.0.0.1")
 SSH_PUBKEY      = os.environ.get("OSIRIS_SSH_PUBKEY", "").strip()
 ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL", "admin@osiris.local")
 ADMIN_PASSWORD  = os.environ.get("ADMIN_PASSWORD", "changeme")
@@ -186,6 +187,7 @@ class MachinePatch(SQLModel):
     ou: Optional[str] = None
     organization_id: Optional[int] = None
     profile_id: Optional[int] = None
+    driver_pack_id: Optional[int] = None
     notes: Optional[str] = None
     user_name: Optional[str] = None
     user_email: Optional[str] = None
@@ -300,7 +302,8 @@ _SEED_APPS = [
     {"name": "Teams",                "winget_id": "Microsoft.Teams",                      "apt_package": "",                     "category": "comm",     "icon": "💬"},
     {"name": "Signal",               "winget_id": "OpenWhisperSystems.Signal",            "apt_package": "signal-desktop",       "category": "comm",     "icon": "🔒"},
     {"name": "TeamViewer",           "winget_id": "TeamViewer.TeamViewer",                "apt_package": "",                     "category": "remote",   "icon": "👥"},
-    {"name": "Microsoft Office 365", "winget_id": "Microsoft.Office",                     "apt_package": "",                     "category": "office",   "icon": "🏢"},
+    {"name": "Microsoft 365 (abonnement)", "winget_id": "Microsoft.Office",              "apt_package": "",                     "category": "office",   "icon": "🏢"},
+    {"name": "Office 2021 (volume)", "winget_id": "",                                     "apt_package": "",                     "category": "office",   "icon": "🏢", "install_type": "exe", "installer_file": "setup_office2021.exe", "installer_config_file": "conf_office2021.xml", "install_args": "/configure conf_office2021.xml", "detect_name": "Office LTSC"},
     {"name": "Adobe Acrobat Reader", "winget_id": "Adobe.Acrobat.Reader.64-bit",          "apt_package": "",                     "category": "tools",    "icon": "📋"},
     {"name": "Audacity",             "winget_id": "Audacity.Audacity",                    "apt_package": "audacity",             "category": "media",    "icon": "🎙️"},
     {"name": "VS Code",              "winget_id": "Microsoft.VisualStudioCode",           "apt_package": "",                     "category": "dev",      "icon": "💻"},
@@ -310,7 +313,7 @@ _SEED_APPS = [
     {"name": "NetExplorer",          "winget_id": "NetExplorer.NetExplorer",              "apt_package": "",                     "category": "office",   "icon": "📁"},
     {"name": "Citrix Workspace",     "winget_id": "Citrix.Workspace",                     "apt_package": "",                     "category": "remote",   "icon": "🖥️"},
     {"name": "OpenVPN",              "winget_id": "OpenVPNTechnologies.OpenVPN",          "apt_package": "openvpn",              "category": "security", "icon": "🔑"},
-    {"name": "WithSecure",           "winget_id": "WithSecure.ElementsAgent",             "apt_package": "",                     "category": "security", "icon": "🛡️"},
+    {"name": "WithSecure",           "winget_id": "",                                     "apt_package": "",                     "category": "security", "icon": "🛡️", "install_type": "msi", "installer_file": "ElementsAgentOfflineInstaller.msi", "install_args": "/qn VOUCHER=REMPLACER_PAR_VOTRE_CLE LANGUAGE=fr UNIQUE_SIGNUP_ID=smbios"},
     # Services serveur (apt uniquement)
     {"name": "Docker",               "winget_id": "",    "apt_package": "docker.io",                    "category": "server",   "icon": "🐳"},
     {"name": "Nginx",                "winget_id": "",    "apt_package": "nginx",                        "category": "server",   "icon": "🌐"},
@@ -507,6 +510,8 @@ class DomainConfigCreate(SQLModel):
     join_user: str = ""
     join_password: str = ""
     default_ou: str = ""
+    wifi_ssid: str = ""
+    wifi_password: str = ""
 
 class DomainConfigPatch(SQLModel):
     name: Optional[str] = None
@@ -514,6 +519,8 @@ class DomainConfigPatch(SQLModel):
     join_user: Optional[str] = None
     join_password: Optional[str] = None
     default_ou: Optional[str] = None
+    wifi_ssid: Optional[str] = None
+    wifi_password: Optional[str] = None
 
 @app.get("/domain-configs", dependencies=[Depends(get_current_user)])
 def get_domain_configs(org_id: Optional[int] = None):
@@ -526,7 +533,8 @@ def get_domain_configs(org_id: Optional[int] = None):
             {
                 "id": c.id, "organization_id": c.organization_id, "name": c.name,
                 "domain": c.domain, "join_user": c.join_user, "default_ou": c.default_ou,
-                # join_password jamais retourne en clair
+                "wifi_ssid": c.wifi_ssid, "has_wifi_password": bool(c.wifi_password),
+                # join_password / wifi_password jamais retournes en clair
             }
             for c in configs
         ]
@@ -541,11 +549,13 @@ def create_domain_config(data: DomainConfigCreate, current_user: User = Depends(
             join_user=data.join_user,
             join_password=encrypt(data.join_password) if data.join_password else "",
             default_ou=data.default_ou,
+            wifi_ssid=data.wifi_ssid,
+            wifi_password=encrypt(data.wifi_password) if data.wifi_password else "",
         )
         session.add(cfg)
         session.commit()
         session.refresh(cfg)
-        return {"id": cfg.id, "name": cfg.name, "domain": cfg.domain, "join_user": cfg.join_user, "default_ou": cfg.default_ou}
+        return {"id": cfg.id, "name": cfg.name, "domain": cfg.domain, "join_user": cfg.join_user, "default_ou": cfg.default_ou, "wifi_ssid": cfg.wifi_ssid}
 
 @app.patch("/domain-configs/{cfg_id}")
 def update_domain_config(cfg_id: int, data: DomainConfigPatch, current_user: User = Depends(require_admin)):
@@ -558,6 +568,9 @@ def update_domain_config(cfg_id: int, data: DomainConfigPatch, current_user: Use
         if data.join_user is not None: cfg.join_user = data.join_user
         if data.join_password is not None: cfg.join_password = encrypt(data.join_password) if data.join_password else ""
         if data.default_ou is not None: cfg.default_ou = data.default_ou
+        if data.wifi_ssid is not None: cfg.wifi_ssid = data.wifi_ssid
+        if data.wifi_password is not None and data.wifi_password != "":
+            cfg.wifi_password = encrypt(data.wifi_password)
         session.add(cfg)
         session.commit()
         return {"detail": "ok"}
@@ -570,6 +583,146 @@ def delete_domain_config(cfg_id: int, current_user: User = Depends(require_admin
             raise HTTPException(status_code=404, detail="Configuration introuvable")
         session.delete(cfg)
         session.commit()
+
+
+# ── Tunnels VPN clients (routage site-à-site) ───────────────────────────────────
+
+class VpnTunnelCreate(SQLModel):
+    organization_id: int
+    name: str
+    ovpn_config: str
+    remote_dns: str = ""
+    route_cidr: str = ""
+    vpn_username: str = ""
+    vpn_password: str = ""
+    requires_totp: bool = False
+    enabled: bool = True
+
+class VpnTunnelPatch(SQLModel):
+    name: Optional[str] = None
+    ovpn_config: Optional[str] = None
+    remote_dns: Optional[str] = None
+    route_cidr: Optional[str] = None
+    vpn_username: Optional[str] = None
+    vpn_password: Optional[str] = None
+    requires_totp: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+class VpnTunnelApply(SQLModel):
+    totp_code: Optional[str] = None
+
+def _serialize_vpn_tunnel(t: VpnTunnel) -> dict:
+    return {
+        "id": t.id, "organization_id": t.organization_id, "name": t.name, "slug": t.slug,
+        "has_config": bool(t.ovpn_config), "remote_dns": t.remote_dns, "route_cidr": t.route_cidr,
+        "vpn_username": t.vpn_username, "has_password": bool(t.vpn_password), "requires_totp": t.requires_totp,
+        "enabled": t.enabled, "status": t.status, "last_applied_at": t.last_applied_at,
+    }
+
+@app.get("/vpn-tunnels", dependencies=[Depends(get_current_user)])
+def get_vpn_tunnels(org_id: Optional[int] = None):
+    with Session(engine) as session:
+        query = select(VpnTunnel)
+        if org_id is not None:
+            query = query.where(VpnTunnel.organization_id == org_id)
+        return [_serialize_vpn_tunnel(t) for t in session.exec(query).all()]
+
+@app.post("/vpn-tunnels", status_code=201)
+def create_vpn_tunnel(data: VpnTunnelCreate, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        org = session.get(Organization, data.organization_id)
+        if not org:
+            raise HTTPException(status_code=404, detail="Organisation introuvable")
+        if session.exec(select(VpnTunnel).where(VpnTunnel.organization_id == data.organization_id)).first():
+            raise HTTPException(status_code=400, detail="Cette organisation a déjà un tunnel VPN")
+        try:
+            slug = vpn.make_slug(org.slug)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        tunnel = VpnTunnel(
+            organization_id=data.organization_id, name=data.name, slug=slug,
+            ovpn_config=encrypt(data.ovpn_config) if data.ovpn_config else "",
+            remote_dns=data.remote_dns, route_cidr=data.route_cidr,
+            vpn_username=data.vpn_username,
+            vpn_password=encrypt(data.vpn_password) if data.vpn_password else "",
+            requires_totp=data.requires_totp, enabled=data.enabled,
+        )
+        session.add(tunnel)
+        _log(session, current_user, "create_vpn_tunnel", details={"organization_id": data.organization_id, "name": data.name})
+        session.commit()
+        session.refresh(tunnel)
+        return _serialize_vpn_tunnel(tunnel)
+
+@app.patch("/vpn-tunnels/{tunnel_id}")
+def update_vpn_tunnel(tunnel_id: int, data: VpnTunnelPatch, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        tunnel = session.get(VpnTunnel, tunnel_id)
+        if not tunnel:
+            raise HTTPException(status_code=404, detail="Tunnel introuvable")
+        if data.name is not None: tunnel.name = data.name
+        if data.ovpn_config is not None and data.ovpn_config != "":
+            tunnel.ovpn_config = encrypt(data.ovpn_config)
+        if data.remote_dns is not None: tunnel.remote_dns = data.remote_dns
+        if data.route_cidr is not None: tunnel.route_cidr = data.route_cidr
+        if data.vpn_username is not None: tunnel.vpn_username = data.vpn_username
+        if data.vpn_password is not None and data.vpn_password != "":
+            tunnel.vpn_password = encrypt(data.vpn_password)
+        if data.requires_totp is not None: tunnel.requires_totp = data.requires_totp
+        if data.enabled is not None: tunnel.enabled = data.enabled
+        session.add(tunnel)
+        session.commit()
+        return {"detail": "ok"}
+
+@app.delete("/vpn-tunnels/{tunnel_id}", status_code=204)
+def delete_vpn_tunnel(tunnel_id: int, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        tunnel = session.get(VpnTunnel, tunnel_id)
+        if not tunnel:
+            raise HTTPException(status_code=404, detail="Tunnel introuvable")
+        try:
+            vpn.disable_tunnel(session, tunnel)
+        except (RuntimeError, ValueError) as e:
+            raise HTTPException(status_code=502, detail=f"Impossible de désactiver proprement le tunnel : {e}")
+        _log(session, current_user, "delete_vpn_tunnel", details={"organization_id": tunnel.organization_id, "name": tunnel.name})
+        session.delete(tunnel)
+        session.commit()
+
+@app.post("/vpn-tunnels/{tunnel_id}/apply")
+def apply_vpn_tunnel(tunnel_id: int, body: VpnTunnelApply = VpnTunnelApply(), current_user: User = Depends(require_admin)):
+    if body.totp_code is not None and not re.fullmatch(r"\d{4,8}", body.totp_code):
+        raise HTTPException(status_code=400, detail="Code TOTP invalide")
+    with Session(engine) as session:
+        tunnel = session.get(VpnTunnel, tunnel_id)
+        if not tunnel:
+            raise HTTPException(status_code=404, detail="Tunnel introuvable")
+        if not tunnel.ovpn_config:
+            raise HTTPException(status_code=400, detail="Aucune configuration .ovpn enregistrée pour ce tunnel")
+        try:
+            vpn.apply_tunnel(session, tunnel, totp_code=body.totp_code)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except RuntimeError as e:
+            tunnel.status = "failed"
+            session.add(tunnel)
+            session.commit()
+            raise HTTPException(status_code=502, detail=str(e))
+        tunnel.status = vpn.tunnel_status(tunnel.slug)
+        tunnel.last_applied_at = datetime.now(timezone.utc)
+        session.add(tunnel)
+        _log(session, current_user, "apply_vpn_tunnel", details={"organization_id": tunnel.organization_id, "name": tunnel.name})
+        session.commit()
+        return _serialize_vpn_tunnel(tunnel)
+
+@app.get("/vpn-tunnels/{tunnel_id}/status")
+def get_vpn_tunnel_status(tunnel_id: int, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        tunnel = session.get(VpnTunnel, tunnel_id)
+        if not tunnel:
+            raise HTTPException(status_code=404, detail="Tunnel introuvable")
+        tunnel.status = vpn.tunnel_status(tunnel.slug)
+        session.add(tunnel)
+        session.commit()
+        return {"status": tunnel.status}
 
 
 # ── Utilisateurs ───────────────────────────────────────────────────────────────
@@ -790,6 +943,17 @@ def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
             domain = dc.domain
             domain_join_user = dc.join_user
             domain_join_password = decrypt(dc.join_password or "")
+    # WiFi : porte par la DomainConfig. On la retrouve via domain_config_id, sinon
+    # (profil a domaine inline) via correspondance sur le nom de domaine resolu.
+    wifi_ssid = ""
+    wifi_password = ""
+    if session:
+        dc_wifi = session.get(DomainConfig, p.domain_config_id) if p.domain_config_id else None
+        if not dc_wifi and domain:
+            dc_wifi = session.exec(select(DomainConfig).where(DomainConfig.domain == domain)).first()
+        if dc_wifi:
+            wifi_ssid = dc_wifi.wifi_ssid
+            wifi_password = decrypt(dc_wifi.wifi_password or "")
     return {
         "locale": p.locale, "keyboard": p.keyboard, "timezone": p.timezone,
         "default_user": p.default_user, "extra_packages": p.extra_packages,
@@ -807,6 +971,8 @@ def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
         "tv_suffix": decrypt(p.tv_suffix or ""),
         "app_ids": p.app_ids or "",
         "domain_config_id": p.domain_config_id,
+        "wifi_ssid": wifi_ssid,
+        "wifi_password": wifi_password,
         "machine_type": p.machine_type or "workstation",
         "ssh_authorized_keys": p.ssh_authorized_keys or "",
     }
@@ -923,7 +1089,8 @@ class ApplicationCreate(SQLModel):
 
 def _app_dict(a: Application) -> dict:
     return {"id": a.id, "name": a.name, "winget_id": a.winget_id,
-            "apt_package": a.apt_package, "category": a.category, "icon": a.icon}
+            "apt_package": a.apt_package, "category": a.category, "icon": a.icon,
+            "install_type": a.install_type, "installer_file": a.installer_file}
 
 
 @app.get("/apps", dependencies=[Depends(get_current_user)])
@@ -1249,7 +1416,11 @@ def get_windows_firstboot(mac: str):
             raise HTTPException(status_code=404, detail="Machine inconnue")
         profile = _resolve_profile(session, machine)
         app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
-        win_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.winget_id != "")).all() if app_id_list else []
+        # Apps Windows : winget OU installeur custom (MSI/EXE heberge, ex: WithSecure)
+        win_apps = session.exec(select(Application).where(
+            Application.id.in_(app_id_list),
+            (Application.winget_id != "") | (Application.installer_file != ""),
+        )).all() if app_id_list else []
     profile_ctx = _profile_for_template(profile, session)
     tv_suffix = profile_ctx.get("tv_suffix", "")
     tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
@@ -1337,9 +1508,10 @@ def get_all_machines(org_id: Optional[int] = None):
                 "id": m.id, "mac": m.mac, "client": m.client,
                 "os": m.os, "hostname": m.hostname, "ou": m.ou,
                 "status": m.status, "organization_id": m.organization_id,
-                "profile_id": m.profile_id,
+                "profile_id": m.profile_id, "driver_pack_id": m.driver_pack_id,
                 "deployed_at": m.deployed_at.isoformat() if m.deployed_at else None,
                 "hw_serial": m.hw_serial, "hw_model": m.hw_model, "hw_ram_gb": m.hw_ram_gb,
+                "hw_disk_gb": m.hw_disk_gb, "hw_disk_type": m.hw_disk_type, "hw_cpu": m.hw_cpu,
                 "notes": m.notes,
                 "user_name": m.user_name, "user_email": m.user_email,
                 "has_bitlocker": bool(m.bitlocker_key),
@@ -1526,6 +1698,9 @@ def post_hardware(mac: str, data: dict):
         machine.hw_serial = (data.get("serial") or "")[:128]
         machine.hw_model  = (data.get("model") or "")[:128]
         machine.hw_ram_gb = int(data.get("ram_gb") or 0)
+        machine.hw_disk_gb = int(data.get("disk_gb") or 0)
+        machine.hw_disk_type = (data.get("disk_type") or "")[:64]
+        machine.hw_cpu    = (data.get("cpu") or "")[:128]
         session.add(machine)
         session.commit()
     return {"detail": "ok"}
@@ -1803,6 +1978,11 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
+        # Le meme statut peut etre poste plusieurs fois (ex: "deployed" par WinPE
+        # juste avant le reboot PUIS par le firstboot apres l'OOBE). On ne journalise
+        # l'evenement et n'envoie le webhook que sur un VRAI changement de statut,
+        # pour eviter les doublons dans "Deploiements recents" / les notifications.
+        status_changed = (machine.status != status)
         machine.status = status
         if status == "deployed":
             machine.deployed_at = datetime.now(timezone.utc)
@@ -1810,11 +1990,27 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
         if status == "pending":
             _deploy_logs.pop(clean_mac, None)
             _deploy_progress.pop(clean_mac, None)
-        _record_deploy_event(session, machine, status)
+        if status_changed:
+            _record_deploy_event(session, machine, status)
+        elif status == "deployed":
+            # "deployed" est poste 2x : par WinPE juste avant le reboot (pour eviter
+            # une boucle de redeploiement au reboot) PUIS par le firstboot a la vraie
+            # fin. On garde UN seul evenement, mais on avance son horodatage au dernier
+            # post (firstboot = vraie fin) au lieu de celui, premature, de WinPE.
+            last_dep = session.exec(
+                select(DeploymentEvent)
+                .where(DeploymentEvent.mac == clean_mac, DeploymentEvent.status == "deployed")
+                .order_by(DeploymentEvent.timestamp.desc())
+            ).first()
+            if last_dep:
+                last_dep.timestamp = datetime.now(timezone.utc)
+                session.add(last_dep)
+            else:
+                _record_deploy_event(session, machine, status)
         session.add(machine)
         # Récupère le webhook de l'org avant le commit pour éviter session expirée
         webhook_url = ""
-        if status in ("deployed", "failed") and machine.organization_id:
+        if status_changed and status in ("deployed", "failed") and machine.organization_id:
             org = session.get(Organization, machine.organization_id)
             if org:
                 webhook_url = org.webhook_url
@@ -1945,6 +2141,11 @@ def _build_winpe_script(mac: str) -> Response:
             media_type="text/plain", status_code=503,
         )
 
+    # Dossier de drivers a injecter (relatif au partage Z:).
+    # Par defaut "drivers" = tout le dossier (comportement historique, fallback sur).
+    # Si la machine a un pack explicite ET telecharge : injection ciblee de ce seul pack.
+    driver_dir = _resolve_driver_dir(machine)
+
     profile_ctx = _profile_for_template(profile, session)
     locale = profile_ctx["locale"].replace("_", "-")[:5]
     content = jinja_env.get_template("winpe-deploy.cmd.j2").render(
@@ -1955,8 +2156,26 @@ def _build_winpe_script(mac: str) -> Response:
         osiris_ip=OSIRIS_IP,
         win_index=profile_ctx["win_index"],
         locale=locale,
+        driver_dir=driver_dir,
     )
     return Response(content=content, media_type="text/plain")
+
+
+def _resolve_driver_dir(machine: Machine) -> str:
+    """Chemin du dossier de drivers a injecter, relatif au partage SMB (Z:), en
+    notation Windows (backslashes). 'drivers' = tout le dossier (fallback historique) ;
+    'drivers\\<vendor>\\<key>' = injection ciblee du pack explicite de la machine."""
+    if not machine.driver_pack_id:
+        return "drivers"
+    with Session(engine) as session:
+        pack = session.get(DriverPack, machine.driver_pack_id)
+    if not pack or pack.status != "ready" or not pack.local_path:
+        return "drivers"
+    share = WIN_SHARE_PATH.rstrip("/")
+    if not pack.local_path.startswith(share):
+        return "drivers"
+    rel = pack.local_path[len(share):].lstrip("/")
+    return rel.replace("/", "\\") or "drivers"
 
 
 @app.get("/winpe-script/{mac}")

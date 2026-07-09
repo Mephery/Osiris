@@ -11,6 +11,15 @@ frontend/.env.*
 *.dump
 backend/backups/
 
+# CONFIGS D'INFRA AVEC TOPOLOGIE RÉSEAU INTERNE (IP serveur, passerelle, DC AD,
+# domaine AD). On versionne uniquement les templates *.example.
+/Caddyfile
+/dnsmasq.conf
+deploy/.diskcheck.txt
+
+# INSTALLEURS TIERS (binaires lourds + logiciels sous licence : Office, EDR…)
+backend/static/installers/
+
 # BASE DE DONNÉES
 **/*.db
 **/*.sqlite

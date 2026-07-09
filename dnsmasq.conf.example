@@ -1,0 +1,59 @@
+# Copier ce fichier en dnsmasq.conf et remplacer les valeurs par les vôtres.
+# Le fichier réel (dnsmasq.conf) est ignoré par git : il contient la topologie
+# réseau interne (IP serveur, passerelle, DC AD) qui ne doit pas être publiée.
+#
+# DNS activé (port 53) : dnsmasq sert aussi de résolveur pour les machines du
+# VLAN de déploiement, avec un aiguillage par domaine vers les VPN clients
+# (voir /etc/dnsmasq.d/osiris-vpn-domains.conf, généré par backend/vpn.py).
+# N'écoute que sur l'interface du VLAN labo + loopback (pas de résolveur ouvert).
+listen-address=10.0.0.1,127.0.0.1
+bind-interfaces
+log-dhcp
+
+# OSIRIS est le seul serveur DHCP du VLAN de déploiement : il répond de façon
+# autoritaire (NAK des baux périmés d'un ancien serveur, réponse plus rapide aux PXE).
+dhcp-authoritative
+
+# Résolveurs "normaux" pour tout ce qui n'est pas un domaine AD client
+server=1.1.1.1
+server=8.8.8.8
+
+# ── DOMAINE AD INTERNE ───────────────────────────────────────────────────────
+# Aiguille les requêtes du domaine AD vers le DNS Active Directory interne.
+# Le DC est joignable directement via la passerelle du VLAN, pas de VPN. Sans
+# cette ligne, les machines déployées ne peuvent pas résoudre le domaine ni ses
+# SRV, donc la jonction au domaine échoue.
+# Remplacer example.local par votre domaine et 10.0.1.10 par l'IP de votre DC.
+server=/example.local/10.0.1.10
+
+# ── LE VRAI POOL DHCP ────────────────────────────────────────────────────────
+# On définit la plage d'IP, le masque de sous-réseau, et le bail (2h)
+dhcp-range=10.0.0.100,10.0.0.200,255.255.255.0,2h
+
+# ── OPTIONS RÉSEAU CLASSIQUES ────────────────────────────────────────────────
+# Option 3 : La passerelle / routeur par défaut de votre VLAN (à adapter)
+dhcp-option=3,10.0.0.254
+
+# Option 6 : DNS = OSIRIS lui-même, pour l'aiguillage par domaine vers les VPN clients
+dhcp-option=6,10.0.0.1
+
+# Les routes classless (option 121) vers les réseaux clients sont ajoutées
+# dynamiquement dans /etc/dnsmasq.d/osiris-vpn-domains.conf par backend/vpn.py
+
+# ── LOGIQUE DE BOOT iPXE (ANTI-BOUCLE INFERNALE) ─────────────────────────────
+# On détecte si la machine qui demande une IP est déjà sous l'environnement iPXE
+# (iPXE envoie l'User-Class "iPXE" ou l'option 175).
+dhcp-match=set:is_ipxe,175
+
+# CAS 1 : Le PC boot pour la première fois (PXE standard de la carte mère)
+# On lui donne une IP + on lui dit de télécharger "ipxe.efi" via notre TFTP
+dhcp-boot=tag:!is_ipxe,ipxe.efi,10.0.0.1
+
+# CAS 2 : Le PC a chargé iPXE et refait sa requête DHCP pour avoir son script
+# On lui donne une IP + on le redirige vers l'URL HTTP servie par Caddy (port 80),
+# qui proxifie vers le backend sur localhost:8000 (le backend n'écoute pas sur le réseau).
+dhcp-boot=tag:is_ipxe,http://10.0.0.1/boot
+
+# ── CONFIGURATION TFTP INTEGRÉ ───────────────────────────────────────────────
+enable-tftp
+tftp-root=/srv/tftp
