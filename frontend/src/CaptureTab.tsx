@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import type { Machine } from './types'
 import { authHeader } from './types'
@@ -15,6 +15,7 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
   const [captureMac, setCaptureMac]   = useState('')
   const [captureWim, setCaptureWim]   = useState('')
   const [captureStep, setCaptureStep] = useState(1)
+  const prevStatuses = useRef<Record<string, string>>({})
 
   const fetchCaptures = () => {
     fetch(`${API_URL}/capture`, { headers: authHeader(token) })
@@ -23,6 +24,35 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
   }
 
   useEffect(() => { fetchCaptures() }, [token, refreshSignal])
+
+  // Polling live tant qu'une capture est en attente de boot ou en cours,
+  // pour refléter les changements de statut sans clic manuel sur « Rafraîchir ».
+  useEffect(() => {
+    const hasActive = captureJobs.some(j => j.status === 'waiting' || j.status === 'capturing')
+    if (!hasActive) return
+    const id = setInterval(fetchCaptures, 5000)
+    return () => clearInterval(id)
+  }, [captureJobs, token])
+
+  // Auto-avancement de l'étape + notifications aux transitions de statut.
+  // On ne réagit qu'aux VRAIS changements (job déjà vu qui change d'état) :
+  // un job vu pour la première fois est enregistré en silence (pas de toast au chargement).
+  useEffect(() => {
+    captureJobs.forEach(j => {
+      const prev = prevStatuses.current[j.mac]
+      if (prev !== undefined && prev !== j.status) {
+        if (j.status === 'capturing') {
+          setCaptureStep(s => Math.max(s, 4))   // boot PXE détecté → étape 4
+          toast.info(`Boot PXE détecté — capture de ${j.mac} en cours`)
+        } else if (j.status === 'done') {
+          toast.success(`Capture terminée : ${j.wim_name}`)
+        } else if (j.status === 'failed') {
+          toast.error(`Capture échouée : ${j.mac} — voir le fallback manuel`)
+        }
+      }
+      prevStatuses.current[j.mac] = j.status
+    })
+  }, [captureJobs])
 
   const handleRegisterCapture = () => {
     if (!captureMac || !captureWim) return
@@ -57,6 +87,21 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
           Suivez les étapes dans l'ordre. La machine de référence doit être sur le même réseau qu'OSIRIS.
         </p>
 
+        {/* Encart stratégie : 1 golden par modèle */}
+        <div className="rounded-lg border border-sky-900/40 bg-sky-950/10 px-4 py-3 space-y-1.5">
+          <p className="text-xs font-semibold text-sky-400">💡 Stratégie : une golden par modèle</p>
+          <p className="text-[11px] text-slate-400">
+            Une golden embarque les <span className="text-slate-300">pilotes du modèle depuis lequel elle a été capturée</span>{' '}
+            (le magasin de pilotes survit au sysprep) : déployée sur le <span className="text-slate-300">même modèle</span>, elle est
+            ultra-rapide et déjà driverée. Sur un <span className="text-slate-300">modèle différent</span>, ces pilotes ne
+            correspondent pas.
+          </p>
+          <ul className="text-[11px] text-slate-500 list-disc list-inside space-y-0.5">
+            <li><span className="text-slate-400">Parc standard</span> : capturez <span className="text-slate-300">une golden par famille de modèle</span> → chaque déploiement rapide et correctement driveré.</li>
+            <li><span className="text-slate-400">Modèle rare / one-off</span> : gardez le déploiement <span className="text-slate-300">install.wim + injection ciblée du pack de pilotes</span> (universel, un peu plus lent).</li>
+          </ul>
+        </div>
+
         {/* Étapes */}
         {[
           { n: 1, titre: 'Préparer la machine de référence', desc: 'Déployez un Windows via OSIRIS (ou installez-le manuellement), installez toutes vos applications (TeamViewer Host, antivirus, Office…). Ne joignez pas de domaine.' },
@@ -64,15 +109,26 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
           { n: 3, titre: 'Enregistrer la machine dans OSIRIS', desc: 'Renseignez l\'adresse MAC de la machine de référence et le nom du fichier WIM à créer, puis cliquez sur Enregistrer.' },
           { n: 4, titre: 'Démarrer la machine en PXE', desc: 'Démarrez la machine de référence sur le réseau (PXE). OSIRIS détecte automatiquement qu\'elle est en mode capture et lance le script. Attendez la fin (15–40 min).' },
         ].map(step => (
-          <div key={step.n} className={`flex gap-4 ${captureStep >= step.n ? '' : 'opacity-40'}`}>
-            <div className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border
-              ${captureStep > step.n ? 'bg-emerald-900 border-emerald-700 text-emerald-400' :
-                captureStep === step.n ? 'bg-blue-900 border-blue-600 text-blue-300' :
-                'border-slate-700 text-slate-600'}`}>
+          <div key={step.n} className={`flex gap-4 transition-opacity ${captureStep >= step.n ? '' : 'opacity-40'}`}>
+            <button
+              type="button"
+              onClick={() => setCaptureStep(step.n)}
+              title={`Aller à l'étape ${step.n}`}
+              className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border
+                cursor-pointer transition hover:ring-2 hover:ring-blue-500/40 hover:border-blue-500
+                ${captureStep > step.n ? 'bg-emerald-900 border-emerald-700 text-emerald-400' :
+                  captureStep === step.n ? 'bg-blue-900 border-blue-600 text-blue-300' :
+                  'border-slate-700 text-slate-600'}`}>
               {captureStep > step.n ? <IcoCheck cls="w-3 h-3" /> : step.n}
-            </div>
+            </button>
             <div className="flex-1 space-y-1">
-              <p className="text-xs font-semibold text-white">{step.titre}</p>
+              <button
+                type="button"
+                onClick={() => setCaptureStep(step.n)}
+                className="text-xs font-semibold text-white text-left hover:text-blue-300 transition cursor-pointer"
+              >
+                {step.titre}
+              </button>
               <p className="text-[11px] text-slate-500">{step.desc}</p>
               {'cmd' in step && (
                 <pre className="text-[10px] bg-slate-950 border border-slate-800 rounded px-3 py-2 text-emerald-400 font-mono overflow-x-auto">{step.cmd}</pre>
