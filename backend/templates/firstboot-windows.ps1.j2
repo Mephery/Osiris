@@ -47,6 +47,9 @@ function Write-LogFile($msg) {
 
 Write-Log "=========================================="
 Write-Log "OSIRIS First Boot - {{ machine.hostname }}"
+{% if profile.machine_type == 'server' %}
+Write-Log "Type : Windows Server (deploiement serveur)"
+{% endif %}
 Write-Log "=========================================="
 
 # ── Attendre que le reseau soit disponible ───────────────────────────────────

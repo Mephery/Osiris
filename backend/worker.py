@@ -22,6 +22,10 @@ from models import DriverPack, OsImage, engine, normalize_model  # noqa: E402
 OSIRIS_BASE_URL = os.environ.get("OSIRIS_BASE_URL", "http://10.0.0.1")
 OSIRIS_IP       = os.environ.get("OSIRIS_IP", "10.0.0.1")
 
+# Pilotes rebakes dans CHAQUE boot.wim regenere (arborescence : <path>/net/<pilote>/*.inf).
+# Monte en X:\drivers\ dans WinPE — startnet.cmd charge X:\drivers\net au demarrage.
+WINPE_DRIVERS_PATH = os.environ.get("WINPE_DRIVERS_PATH", "/srv/data/windows/winpe-drivers")
+
 
 def _make_startnet_cmd() -> bytes:
     """Génère startnet.cmd.
@@ -35,14 +39,39 @@ def _make_startnet_cmd() -> bytes:
     """
     lines = [
         "@echo off",
+        "",
+        "REM -- Chargement des pilotes reseau bakes dans le WIM (X:\\drivers\\net)",
+        "REM WinPE ne dispose que des pilotes *inbox* de l'ISO Windows. Sur les",
+        "REM machines dont la carte n'est pas reconnue (Realtek, Intel recentes...),",
+        "REM il n'y a AUCUN reseau => blocage total. On ne peut pas aller chercher le",
+        "REM pilote sur le partage : il faut le reseau pour ca (oeuf et poule).",
+        "REM => les pilotes reseau sont bakes dans boot.wim et charges ici.",
+        "if exist X:\\drivers\\net (",
+        "    echo [OSIRIS] Chargement des pilotes reseau...",
+        "    for /r X:\\drivers\\net %%i in (*.inf) do drvload \"%%i\" >nul 2>&1",
+        ")",
         "wpeinit",
         "echo [OSIRIS] Reseau en cours d'initialisation...",
+        "set NETTRY=0",
         ":check_net",
         f"ping -n 1 {OSIRIS_IP} >nul 2>&1",
-        "if errorlevel 1 (",
+        "if not errorlevel 1 goto net_ok",
+        "set /a NETTRY+=1",
+        "if %NETTRY% lss 30 (",
+        f"    echo [OSIRIS] OSIRIS ({OSIRIS_IP}) injoignable - tentative %NETTRY%/30...",
         "    ping -n 3 127.0.0.1 >nul",
         "    goto check_net",
         ")",
+        "echo.",
+        f"echo [OSIRIS] ERREUR: impossible de joindre OSIRIS ({OSIRIS_IP}) apres 30 tentatives.",
+        "echo [OSIRIS] --- Diagnostic reseau ---",
+        "ipconfig /all",
+        "echo.",
+        "echo [OSIRIS] Si AUCUNE carte reseau n'apparait ci-dessus, son pilote manque",
+        "echo [OSIRIS] dans WinPE. Sinon, verifiez le VLAN / le cable / le DHCP.",
+        "pause",
+        "exit /b 1",
+        ":net_ok",
         # ~5s pour laisser le client SMB se stabiliser (timeout non dispo en WinPE)
         "ping -n 6 127.0.0.1 >nul",
         "",
@@ -135,10 +164,14 @@ async def _7z_extract(iso_path: str, iso_src: str, out_dir: str, label: str):
     )
 
 
-async def _process_windows(iso_path: str, _update):
+async def _process_windows(iso_path: str, _update, wim_name: str = ""):
     """
     Extrait les fichiers WinPE de l'ISO (UDF), injecte notre startnet.cmd,
     et copie install.wim vers /srv/data/windows/.
+
+    wim_name : nom du .wim cible sur le partage (ex. "server2022.wim"). Vide =>
+    "install.wim" (comportement historique). Permet de faire coexister plusieurs
+    images Windows (client / Server) sur le meme partage sans ecrasement.
     """
     winpe_dir   = "static/winpe"
     windows_dir = "/srv/data/windows"
@@ -193,6 +226,22 @@ async def _process_windows(iso_path: str, _update):
     )
     os.unlink(startnet)
     os.unlink(winpeshl)
+
+    # ── 2bis. Reinjection des pilotes WinPE persistants ─────────────────────
+    # WinPE ne dispose que des pilotes *inbox* de l'ISO. Sur les machines dont la
+    # carte reseau n'est pas reconnue, il n'y a AUCUN reseau => blocage total
+    # (cf. startnet.cmd, qui charge X:\drivers\net au demarrage).
+    # Ces pilotes etaient bakes A LA MAIN : toute regeneration de boot.wim (ajout
+    # d'une nouvelle ISO Windows) les faisait disparaitre silencieusement. On les
+    # reinjecte donc systematiquement depuis un dossier persistant.
+    # Pour ajouter un pilote : le deposer dans WINPE_DRIVERS_PATH/net/<nom>/ (INF+SYS+CAT).
+    if os.path.isdir(WINPE_DRIVERS_PATH) and os.listdir(WINPE_DRIVERS_PATH):
+        await _run(
+            ["/usr/bin/wimlib-imagex", "update", boot_wim, "2",
+             "--command", f"add {WINPE_DRIVERS_PATH} /drivers"],
+            "wimlib inject persistent WinPE drivers",
+        )
+
     os.replace(boot_wim, f"{winpe_dir}/sources/boot.wim")
 
     _update(progress=50)
@@ -208,6 +257,13 @@ async def _process_windows(iso_path: str, _update):
         )
         await proc.communicate()
         if proc.returncode == 0 and os.path.exists(f"{windows_dir}/{filename}"):
+            # Renommage vers wim_name si demande (coexistence client / Server).
+            # On garde l'extension d'origine (.wim/.esd) si wim_name n'en precise pas.
+            if wim_name:
+                target = wim_name if wim_name.lower().endswith((".wim", ".esd")) \
+                    else f"{wim_name}.{filename.rsplit('.', 1)[-1]}"
+                if target != filename:
+                    os.replace(f"{windows_dir}/{filename}", f"{windows_dir}/{target}")
             extracted = True
             break
 
@@ -218,7 +274,7 @@ async def _process_windows(iso_path: str, _update):
     # Ce script sera appelé par startnet.cmd via net use Y: \\OSIRIS\windows
     deploy_script = "\r\n".join([
         "@echo off",
-        "echo [OSIRIS] ===== Deploiement Windows 11 =====",
+        "echo [OSIRIS] ===== Deploiement Windows =====",
         "",
         "echo [OSIRIS] Partitionnement du disque (GPT/UEFI)...",
         "(",
@@ -265,6 +321,7 @@ async def download_iso(ctx, image_id: int):
         iso_url  = image.iso_url
         os_name  = image.os
         version  = image.version
+        wim_name = image.wim_name
         nfs_path = image.nfs_path or f"/srv/nfs/{os_name}-{version}"
         image.status   = "downloading"
         image.progress = 0
@@ -313,7 +370,7 @@ async def download_iso(ctx, image_id: int):
         if os_name == "ubuntu":
             await _process_ubuntu(iso_path, nfs_path, static_dir, _update)
         elif os_name == "windows":
-            await _process_windows(iso_path, _update)
+            await _process_windows(iso_path, _update, wim_name=wim_name)
 
         if not local_file:
             os.unlink(iso_path)

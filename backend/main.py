@@ -284,6 +284,13 @@ def _seed_default_profiles():
         session.add(Profile(name="Windows — par défaut", os="windows", locale="fr-FR"))
         session.add(Profile(name="Ubuntu Server — par défaut", os="ubuntu", machine_type="server", enable_bitlocker=False))
         session.add(Profile(name="Debian Server — par défaut", os="debian", machine_type="server", enable_bitlocker=False))
+        # Windows Server : jamais BitLocker par défaut, pas de jonction domaine auto.
+        # win_index=2 = édition "Standard (Desktop Experience)" typique des ISO Server.
+        # win_image reste vide : l'admin le renseigne avec le wim_name de son image Server
+        # (ex. "server2022.wim") une fois l'ISO Server ajoutée dans OSIRIS.
+        session.add(Profile(name="Windows Server — par défaut", os="windows", locale="fr-FR",
+                            machine_type="server", enable_bitlocker=False,
+                            join_domain=False, win_index=2))
         session.commit()
         print("[OSIRIS] Profils par défaut créés")
 
@@ -1075,6 +1082,8 @@ class ImageCreate(SQLModel):
     version: str
     os: str = "ubuntu"
     iso_url: str
+    wim_name: str = ""   # Windows : nom du .wim cible sur le partage (ex. "server2022.wim").
+                         # Vide = install.wim. Permet de faire coexister client / Server.
 
 
 # ── Applications (winget / apt) ───────────────────────────────────────────────
@@ -1123,7 +1132,7 @@ def _image_dict(img: OsImage) -> dict:
     return {
         "id": img.id, "name": img.name, "version": img.version,
         "os": img.os, "status": img.status, "progress": img.progress,
-        "nfs_path": img.nfs_path, "error": img.error,
+        "nfs_path": img.nfs_path, "wim_name": img.wim_name, "error": img.error,
         "created_at": img.created_at.isoformat(),
     }
 
@@ -1142,6 +1151,7 @@ async def create_image(body: ImageCreate, current_user: User = Depends(require_a
         image = OsImage(
             name=body.name, version=body.version,
             os=body.os, iso_url=body.iso_url,
+            wim_name=body.wim_name.strip() if body.os == "windows" else "",
             nfs_path=f"/srv/nfs/{body.os}-{body.version}",
         )
         session.add(image)
@@ -2811,7 +2821,10 @@ class VmCreateBody(SQLModel):
     # Identité OSIRIS
     hostname: str
     client: str
-    os: str                          # "ubuntu" | "debian"
+    os: str                          # "ubuntu" | "debian" | "windows"
+    # Windows uniquement : type d'OS Proxmox. "win11" couvre Server 2022/2025 + Win10/11 ;
+    # "win10" pour Server 2016/2019. Sans effet pour Linux.
+    win_ostype: str = "win11"
     profile_id: Optional[int] = None
     organization_id: Optional[int] = None
     ou: str = ""
@@ -2843,6 +2856,10 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
         raise HTTPException(status_code=400, detail="boot_mode invalide (pxe ou cloudinit)")
     if body.boot_mode == "cloudinit" and not body.cloud_template_id:
         raise HTTPException(status_code=400, detail="cloud_template_id requis pour le mode cloud-init")
+    # Windows = PXE uniquement : le chemin cloud-init est spécifique Linux (user-data, apt).
+    # Le déploiement Windows passe par WinPE (booté en PXE), piloté par MAC comme un poste physique.
+    if body.os == "windows" and body.boot_mode != "pxe":
+        raise HTTPException(status_code=400, detail="Windows nécessite le mode PXE (cloud-init est Linux uniquement)")
 
     with Session(engine) as session:
         h = session.get(Hypervisor, hv_id)
@@ -2860,15 +2877,34 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
 
     if body.boot_mode == "pxe":
         # ── Chemin PXE ──────────────────────────────────────────────────────────
-        vm_config: dict = {
-            "vmid": vm_id, "name": body.hostname,
-            "cores": body.vcpus, "sockets": 1, "memory": body.ram_mb,
-            "net0": f"virtio={mac_colons},bridge={body.bridge}",
-            "ostype": "l26", "agent": "enabled=1", "onboot": 1,
-            "boot": "order=net0;scsi0;ide2",
-            "scsihw": "virtio-scsi-pci",
-            "scsi0": f"{body.storage}:{body.disk_gb},format=qcow2",
-        }
+        if body.os == "windows":
+            # VM Windows : matériel compatible pilotes *inbox* (aucune injection virtio).
+            #  - SATA (sata0) + NIC e1000  => WinPE voit disque et réseau sans driver.
+            #  - OVMF/q35 + efidisk0       => le déploiement WinPE fait du GPT/UEFI
+            #    (bcdboot /f UEFI) : le firmware DOIT être UEFI, pas SeaBIOS.
+            #  - SecureBoot désactivé (pre-enrolled-keys=0) pour ne pas bloquer le boot PXE/WinPE.
+            #    TPM non nécessaire : DISM applique le WIM sans passer par setup.exe.
+            vm_config: dict = {
+                "vmid": vm_id, "name": body.hostname,
+                "cores": body.vcpus, "sockets": 1, "memory": body.ram_mb,
+                "net0": f"e1000={mac_colons},bridge={body.bridge}",
+                "ostype": body.win_ostype or "win11",
+                "bios": "ovmf", "machine": "q35",
+                "efidisk0": f"{body.storage}:1,efitype=4m,pre-enrolled-keys=0,format=qcow2",
+                "agent": "enabled=1", "onboot": 1,
+                "boot": "order=net0;sata0",
+                "sata0": f"{body.storage}:{body.disk_gb},format=qcow2",
+            }
+        else:
+            vm_config = {
+                "vmid": vm_id, "name": body.hostname,
+                "cores": body.vcpus, "sockets": 1, "memory": body.ram_mb,
+                "net0": f"virtio={mac_colons},bridge={body.bridge}",
+                "ostype": "l26", "agent": "enabled=1", "onboot": 1,
+                "boot": "order=net0;scsi0;ide2",
+                "scsihw": "virtio-scsi-pci",
+                "scsi0": f"{body.storage}:{body.disk_gb},format=qcow2",
+            }
         if body.iso:
             vm_config["ide2"] = f"{body.iso},media=cdrom"
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu", vm_config)

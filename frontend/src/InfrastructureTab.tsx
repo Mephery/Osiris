@@ -204,9 +204,14 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
               <div className="grid grid-cols-2 gap-2">
                 <input required placeholder="Hostname" value={vmForm.hostname} onChange={e => setVmForm(f => ({...f, hostname: e.target.value}))} className="osiris-input text-xs font-mono" />
                 <input required placeholder="Client / label" value={vmForm.client} onChange={e => setVmForm(f => ({...f, client: e.target.value}))} className="osiris-input text-xs" />
-                <select value={vmForm.os} onChange={e => setVmForm(f => ({...f, os: e.target.value}))} className="osiris-input text-xs">
+                <select value={vmForm.os} onChange={e => setVmForm(f => ({
+                    ...f, os: e.target.value, profile_id: '',
+                    // Windows = PXE uniquement (WinPE) : le cloud-init est spécifique Linux.
+                    ...(e.target.value === 'windows' ? { boot_mode: 'pxe', cloud_template_id: '' } : {}),
+                  }))} className="osiris-input text-xs">
                   <option value="ubuntu">Ubuntu</option>
                   <option value="debian">Debian</option>
+                  <option value="windows">Windows</option>
                 </select>
                 <select value={vmForm.profile_id} onChange={e => setVmForm(f => ({...f, profile_id: e.target.value}))} className="osiris-input text-xs">
                   <option value="">Profil par défaut</option>
@@ -232,15 +237,21 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
               </div>
 
               {/* Mode de boot */}
-              <div className="flex gap-2">
-                {(['pxe', 'cloudinit'] as const).map(mode => (
-                  <button key={mode} type="button"
-                    onClick={() => setVmForm(f => ({...f, boot_mode: mode, cloud_template_id: '', iso: ''}))}
-                    className={`flex-1 py-1.5 rounded text-xs border transition-colors ${vmForm.boot_mode === mode ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500'}`}>
-                    {mode === 'pxe' ? 'PXE (ISO / installation)' : 'Cloud-init (clone de template)'}
-                  </button>
-                ))}
-              </div>
+              {vmForm.os === 'windows' ? (
+                <div className="rounded border border-blue-500/40 bg-blue-600/10 px-2.5 py-1.5 text-[11px] text-blue-300">
+                  Déploiement Windows via <span className="font-semibold">PXE / WinPE</span> · VM en UEFI (OVMF) · disque SATA · carte réseau e1000.
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  {(['pxe', 'cloudinit'] as const).map(mode => (
+                    <button key={mode} type="button"
+                      onClick={() => setVmForm(f => ({...f, boot_mode: mode, cloud_template_id: '', iso: ''}))}
+                      className={`flex-1 py-1.5 rounded text-xs border transition-colors ${vmForm.boot_mode === mode ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500'}`}>
+                      {mode === 'pxe' ? 'PXE (ISO / installation)' : 'Cloud-init (clone de template)'}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {/* Ressources */}
               <div className="grid grid-cols-2 gap-2">

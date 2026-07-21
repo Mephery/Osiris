@@ -106,7 +106,7 @@ export default function App() {
 
   // ── Images OS ──────────────────────────────────────────────────────────────
   const [images, setImages] = useState<OsImage[]>([])
-  const [newImage, setNewImage] = useState({ name: '', version: '', os: 'ubuntu', iso_url: '' })
+  const [newImage, setNewImage] = useState({ name: '', version: '', os: 'ubuntu', iso_url: '', wim_name: '' })
 
   // ── Infrastructure (Hyperviseurs) ──────────────────────────────────────────
   // hypervisors reste ici car l'onglet Machines l'utilise aussi (statut/console VM).
@@ -641,7 +641,7 @@ export default function App() {
       body: JSON.stringify(newImage),
     })
       .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
-      .then(() => { setNewImage({ name: '', version: '', os: 'ubuntu', iso_url: '' }); fetchImages(auth!.token); toast.success('Image ajoutée — téléchargement en cours') })
+      .then(() => { setNewImage({ name: '', version: '', os: 'ubuntu', iso_url: '', wim_name: '' }); fetchImages(auth!.token); toast.success('Image ajoutée — téléchargement en cours') })
       .catch((err) => toast.error(err.message))
   }
 
@@ -914,6 +914,9 @@ export default function App() {
                     <option value="windows">Windows</option>
                   </select>
                 </div>
+                {newImage.os === 'windows' && (
+                  <input placeholder="Nom du .wim sur le partage (ex : server2022.wim) — optionnel, vide = install.wim" value={newImage.wim_name} onChange={e => setNewImage({ ...newImage, wim_name: e.target.value })} className="osiris-input text-xs font-mono w-full" />
+                )}
                 <div className="flex gap-2">
                   <input required placeholder="URL ISO  (https://...)" value={newImage.iso_url} onChange={e => setNewImage({ ...newImage, iso_url: e.target.value })} className="osiris-input text-xs font-mono flex-1 min-w-0" />
                   <button type="submit" className="osiris-btn text-xs flex-shrink-0">↓ Télécharger</button>

@@ -187,6 +187,9 @@ class OsImage(SQLModel, table=True):
     os: str                                # "ubuntu"
     iso_url: str                           # URL de téléchargement
     nfs_path: str  = Field(default="")    # /srv/nfs/ubuntu-24.04
+    wim_name: str  = Field(default="")    # Windows : nom du .wim cible sur le partage SMB
+                                          # (vide = install.wim). Permet de faire coexister
+                                          # plusieurs images Windows (client / Server) sur le partage.
     status: str    = Field(default="queued")   # queued/downloading/extracting/ready/failed
     progress: int  = Field(default=0)     # 0-100 pendant le téléchargement
     error: Optional[str] = Field(default=None)
