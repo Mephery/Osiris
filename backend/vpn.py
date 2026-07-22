@@ -28,6 +28,12 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
 
 VPN_APPLY_SCRIPT = "/usr/local/sbin/osiris-vpn-apply.sh"
 VPN_DISABLE_SCRIPT = "/usr/local/sbin/osiris-vpn-disable.sh"
+
+# Chemins ABSOLUS obligatoires : l'unité systemd fixe PATH=/opt/osiris/backend/venv/bin
+# uniquement, donc ni /usr/bin ni /bin. Appeler "sudo" ou "systemctl" par leur nom lève
+# FileNotFoundError. Le reste du code (worker.py) utilise déjà /usr/bin/7z, etc.
+SUDO_BIN = "/usr/bin/sudo"
+SYSTEMCTL_BIN = "/usr/bin/systemctl"
 DNSMASQ_SNIPPET_HEADER = "# Généré automatiquement par OSIRIS (backend/vpn.py) — ne pas éditer à la main\n"
 
 
@@ -124,7 +130,7 @@ def apply_tunnel(session: Session, tunnel: VpnTunnel, totp_code: Optional[str] =
             password += totp_code
         auth_path = _write_temp(render_auth_file(tunnel.vpn_username, password))
     try:
-        cmd = ["sudo", "-n", VPN_APPLY_SCRIPT, tunnel.slug, ovpn_path, dnsmasq_path, auth_path or "-"]
+        cmd = [SUDO_BIN, "-n", VPN_APPLY_SCRIPT, tunnel.slug, ovpn_path, dnsmasq_path, auth_path or "-"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
     finally:
         os.unlink(ovpn_path)
@@ -144,7 +150,7 @@ def disable_tunnel(session: Session, tunnel: VpnTunnel) -> None:
     dnsmasq_path = _write_temp(dnsmasq_content, mode=0o644)
     try:
         result = subprocess.run(
-            ["sudo", "-n", VPN_DISABLE_SCRIPT, tunnel.slug, dnsmasq_path],
+            [SUDO_BIN, "-n", VPN_DISABLE_SCRIPT, tunnel.slug, dnsmasq_path],
             capture_output=True, text=True, timeout=20,
         )
     finally:
@@ -158,7 +164,7 @@ def tunnel_status(slug: str) -> str:
     if not SLUG_RE.match(slug):
         return "unknown"
     result = subprocess.run(
-        ["systemctl", "is-active", f"openvpn-client@{slug}"],
+        [SYSTEMCTL_BIN, "is-active", f"openvpn-client@{slug}"],
         capture_output=True, text=True, timeout=5,
     )
     return result.stdout.strip() or "unknown"
