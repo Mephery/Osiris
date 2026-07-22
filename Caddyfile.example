@@ -10,7 +10,7 @@ https://10.0.0.1 {
     tls /etc/caddy/certs/osiris.crt /etc/caddy/certs/osiris.key
 
     # Définition du matcher nommé (Ici, Caddy adore les listes d'espaces !)
-    @backend path /auth/* /machines* /dashboard* /organizations* /users* /profiles* /images* /audit-logs* /domain-configs* /vpn-tunnels* /apps* /capture* /drivers* /wims* /webhooks* /health* /docs* /openapi.json /ws/*
+    @backend path /auth/* /machines* /hypervisors* /dashboard* /organizations* /users* /profiles* /images* /audit-logs* /domain-configs* /vpn-tunnels* /apps* /capture* /drivers* /wims* /webhooks* /health* /docs* /openapi.json /ws/*
 
     handle @backend {
         reverse_proxy localhost:8000

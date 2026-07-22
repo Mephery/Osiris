@@ -15,6 +15,7 @@
 
     handle /auth/*          { reverse_proxy backend:8000 }
     handle /machines*       { reverse_proxy backend:8000 }
+    handle /hypervisors*    { reverse_proxy backend:8000 }
     handle /organizations*  { reverse_proxy backend:8000 }
     handle /users*          { reverse_proxy backend:8000 }
     handle /profiles*       { reverse_proxy backend:8000 }
