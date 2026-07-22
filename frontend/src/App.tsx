@@ -1427,6 +1427,19 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                   value={formData.mac} onChange={(e) => setFormData({ ...formData, mac: e.target.value })}
                   disabled={!!editingMac} className={`osiris-input font-mono ${editingMac ? 'opacity-40 cursor-not-allowed' : ''}`} />
               </div>
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">
+                  Numéro de série <span className="text-slate-700 normal-case">(recommandé)</span>
+                </label>
+                <input type="text" placeholder="5CD1234ABC"
+                  value={formData.hw_serial ?? ''} onChange={(e) => setFormData({ ...formData, hw_serial: e.target.value })}
+                  className="osiris-input font-mono" />
+                <p className="text-[10px] text-slate-600 leading-relaxed">
+                  Identité stable de la machine (étiquette / BIOS). Indispensable pour les portables
+                  sans port RJ45 : avec un adaptateur USB, la MAC vue au démarrage réseau n'est pas
+                  celle de la machine. WinPE s'identifie en priorité par ce numéro.
+                </p>
+              </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">Nom d'hôte</label>

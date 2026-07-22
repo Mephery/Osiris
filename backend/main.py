@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import ipaddress
 import json
 import logging
 import os
@@ -634,8 +635,40 @@ def get_vpn_tunnels(org_id: Optional[int] = None):
             query = query.where(VpnTunnel.organization_id == org_id)
         return [_serialize_vpn_tunnel(t) for t in session.exec(query).all()]
 
+def _clean_vpn_network_fields(route_cidr: Optional[str], remote_dns: Optional[str]) -> tuple:
+    """Normalise et valide les champs réseau d'un tunnel.
+
+    Une simple espace collée en fin de champ (copier-coller depuis une doc) faisait
+    échouer ipaddress.ip_network() au moment de l'Apply, très loin de la saisie et
+    avec un message incompréhensible. On nettoie et on valide ici, à la source.
+    """
+    if route_cidr is not None:
+        route_cidr = route_cidr.strip()
+        if route_cidr:
+            try:
+                ipaddress.ip_network(route_cidr, strict=False)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Réseau distant invalide : {route_cidr!r}. Format attendu : 192.168.10.0/24",
+                )
+    if remote_dns is not None:
+        ips = [ip.strip() for ip in remote_dns.split(",") if ip.strip()]
+        for ip in ips:
+            try:
+                ipaddress.ip_address(ip)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"DNS distant invalide : {ip!r}. Format attendu : 192.168.10.5,192.168.10.6",
+                )
+        remote_dns = ",".join(ips)
+    return route_cidr, remote_dns
+
+
 @app.post("/vpn-tunnels", status_code=201)
 def create_vpn_tunnel(data: VpnTunnelCreate, current_user: User = Depends(require_admin)):
+    data.route_cidr, data.remote_dns = _clean_vpn_network_fields(data.route_cidr, data.remote_dns)
     with Session(engine) as session:
         org = session.get(Organization, data.organization_id)
         if not org:
@@ -669,8 +702,9 @@ def update_vpn_tunnel(tunnel_id: int, data: VpnTunnelPatch, current_user: User =
         if data.name is not None: tunnel.name = data.name
         if data.ovpn_config is not None and data.ovpn_config != "":
             tunnel.ovpn_config = encrypt(data.ovpn_config)
-        if data.remote_dns is not None: tunnel.remote_dns = data.remote_dns
-        if data.route_cidr is not None: tunnel.route_cidr = data.route_cidr
+        route_cidr, remote_dns = _clean_vpn_network_fields(data.route_cidr, data.remote_dns)
+        if remote_dns is not None: tunnel.remote_dns = remote_dns
+        if route_cidr is not None: tunnel.route_cidr = route_cidr
         if data.vpn_username is not None: tunnel.vpn_username = data.vpn_username
         if data.vpn_password is not None and data.vpn_password != "":
             tunnel.vpn_password = encrypt(data.vpn_password)
@@ -1190,6 +1224,17 @@ def health():
 
 # ── Boot iPXE ──────────────────────────────────────────────────────────────────
 
+def _winpe_chain_lines() -> str:
+    """Lignes iPXE qui chargent WinPE via wimboot (identiques pour toute machine)."""
+    return (
+        f"kernel {OSIRIS_BASE_URL}/static/wimboot\n"
+        f"initrd --name bootmgr {OSIRIS_BASE_URL}/static/winpe/bootmgr bootmgr\n"
+        f"initrd --name BCD {OSIRIS_BASE_URL}/static/winpe/boot/bcd BCD\n"
+        f"initrd --name boot.sdi {OSIRIS_BASE_URL}/static/winpe/boot/boot.sdi boot.sdi\n"
+        f"initrd --name boot.wim {OSIRIS_BASE_URL}/static/winpe/sources/boot.wim boot.wim\n"
+    )
+
+
 @app.get("/boot")
 @limiter.limit("30/minute")
 def get_boot_script(request: Request, mac: str | None = None):
@@ -1204,6 +1249,33 @@ def get_boot_script(request: Request, mac: str | None = None):
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
 
         if not machine:
+            # Aucune machine ne porte cette MAC. Avant de rendre la main au disque
+            # local, on regarde s'il existe un déploiement en attente identifié par
+            # numéro de série : avec un adaptateur USB-Ethernet, la MAC vue ici n'est
+            # pas celle de la machine (adaptateur partagé, 'MAC Address Pass Through'),
+            # donc l'identification ne peut se faire que plus tard, dans WinPE.
+            # Sans risque : si le série ne correspond à rien, le script de secours
+            # refuse et ne touche pas au disque.
+            pending = session.exec(
+                select(Machine).where(Machine.status == "pending", Machine.hw_serial != "")
+            ).first()
+            win_img = session.exec(
+                select(OsImage)
+                .where(OsImage.os == "windows", OsImage.status == "ready")
+                .order_by(OsImage.created_at.desc())
+            ).first() if pending else None
+
+            if pending and win_img:
+                script = "#!ipxe\n"
+                script += f"echo [OSIRIS] MAC {clean_mac} inconnue - deploiement en attente detecte\n"
+                script += "echo [OSIRIS] Demarrage de WinPE pour identification par numero de serie...\n"
+                script += _winpe_chain_lines()
+                # Ce return court-circuite le "boot" final du flux normal : il faut donc
+                # l'émettre ici. Sans lui, iPXE télécharge tout puis ne démarre rien et
+                # rend la main au firmware ("no more network devices" + bip).
+                script += "boot\n"
+                return Response(content=script, media_type="text/plain")
+
             script = "#!ipxe\n"
             script += "echo ==================================================\n"
             script += "echo   BIENVENUE SUR OSIRIS RESEAU (LAB LABORATOIRE)   \n"
@@ -1245,11 +1317,7 @@ def get_boot_script(request: Request, mac: str | None = None):
             ).first()
         if win_img:
             script += f"echo [OSIRIS] Chargement WinPE ({win_img.name})...\n"
-            script += f"kernel {OSIRIS_BASE_URL}/static/wimboot\n"
-            script += f"initrd --name bootmgr {OSIRIS_BASE_URL}/static/winpe/bootmgr bootmgr\n"
-            script += f"initrd --name BCD {OSIRIS_BASE_URL}/static/winpe/boot/bcd BCD\n"
-            script += f"initrd --name boot.sdi {OSIRIS_BASE_URL}/static/winpe/boot/boot.sdi boot.sdi\n"
-            script += f"initrd --name boot.wim {OSIRIS_BASE_URL}/static/winpe/sources/boot.wim boot.wim\n"
+            script += _winpe_chain_lines()
         else:
             script += "echo [OSIRIS] Aucune image Windows disponible - boot local\n"
             script += "exit\n"
@@ -2103,18 +2171,41 @@ def _ip_to_mac(ip: str) -> Optional[str]:
     return None
 
 
+def _mac_from_serial(serial: str) -> Optional[str]:
+    """Résout un numéro de série SMBIOS en MAC de la machine enregistrée."""
+    clean = (serial or "").strip()
+    if not clean:
+        return None
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.hw_serial == clean)).first()
+    return machine.mac if machine else None
+
+
 @app.get("/winpe-auto")
-def get_winpe_script_auto(request: Request):
-    """Identifie la machine par son IP source (lookup dnsmasq), retourne le script de déploiement."""
+def get_winpe_script_auto(request: Request, serial: str = ""):
+    """Identifie la machine et retourne son script de déploiement.
+
+    Deux voies, dans cet ordre :
+      1. le numéro de série SMBIOS remonté par WinPE — identité STABLE, attachée à
+         la machine elle-même ;
+      2. à défaut, le lookup IP source → MAC dans les baux dnsmasq (historique).
+
+    Le série prime car la MAC n'identifie plus la machine dès qu'on passe par un
+    adaptateur USB-Ethernet : le firmware peut présenter la MAC système (option
+    'MAC Address Pass Through') tandis que WinPE présente la MAC gravée de
+    l'adaptateur, et un même adaptateur sert à déployer plusieurs machines.
+    """
     client_ip = (
         request.headers.get("X-Real-IP")
         or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
         or request.client.host
     )
-    mac = _ip_to_mac(client_ip)
+    mac = _mac_from_serial(serial) or _ip_to_mac(client_ip)
     if not mac:
+        detail = f"serie {serial!r} inconnue et IP {client_ip} absente des baux DHCP" \
+            if serial.strip() else f"IP {client_ip} inconnue dans les leases DHCP"
         return Response(
-            content=f"echo [OSIRIS] IP {client_ip} inconnue dans les leases DHCP\r\npause\r\nexit /b 1",
+            content=f"echo [OSIRIS] Machine non identifiee : {detail}\r\npause\r\nexit /b 1",
             media_type="text/plain", status_code=404,
         )
     # Tant qu'un job de capture existe pour cette MAC (quel que soit son statut -

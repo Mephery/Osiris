@@ -149,7 +149,9 @@ class Machine(SQLModel, table=True):
     organization_id: Optional[int] = Field(default=None, foreign_key="organization.id")
     profile_id: Optional[int] = Field(default=None, foreign_key="profile.id")
     # Inventaire materiel (collecte au premier demarrage)
-    hw_serial: str = Field(default="")
+    # Indexé : sert d'identité STABLE au déploiement (lookup depuis WinPE), la MAC
+    # n'identifiant plus la machine dès qu'on passe par un adaptateur USB-Ethernet.
+    hw_serial: str = Field(default="", index=True)
     hw_model: str = Field(default="")
     hw_ram_gb: int = Field(default=0)
     hw_disk_gb: int = Field(default=0)     # taille du disque systeme (Go)

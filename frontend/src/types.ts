@@ -228,7 +228,7 @@ export function formatMac(mac: string): string {
   return mac.match(/.{1,2}/g)?.join(':').toUpperCase() ?? mac
 }
 
-export const EMPTY_FORM: Machine = { mac: '', client: '', os: 'windows', hostname: '', ou: '', organization_id: null, profile_id: null, driver_pack_id: null }
+export const EMPTY_FORM: Machine = { mac: '', client: '', os: 'windows', hostname: '', ou: '', organization_id: null, profile_id: null, driver_pack_id: null, hw_serial: '' }
 
 export function authHeader(token: string) {
   return { 'Authorization': `Bearer ${token}` }

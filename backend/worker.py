@@ -26,6 +26,16 @@ OSIRIS_IP       = os.environ.get("OSIRIS_IP", "10.0.0.1")
 # Monte en X:\drivers\ dans WinPE — startnet.cmd charge X:\drivers\net au demarrage.
 WINPE_DRIVERS_PATH = os.environ.get("WINPE_DRIVERS_PATH", "/srv/data/windows/winpe-drivers")
 
+# DESACTIVE le 2026-07-22. La reinjection produit un boot.wim que wimboot n'arrive
+# plus a demarrer : le poste telecharge tous les fichiers puis revient au Startup
+# Menu sans lancer WinPE (constate sur ZBook Firefly G8). Le MEME boot.wim sans
+# injection demarre normalement, et le WIM injecte passe pourtant 'wimlib verify'
+# et garde son Boot Index — la cause reste a identifier.
+# Consequence assumee : les machines dont la carte reseau n'est pas inbox (ThinkPad
+# T15...) reperdent le reseau en WinPE tant que ce n'est pas resolu.
+# Mettre WINPE_INJECT_DRIVERS=1 pour retester une fois une piste trouvee.
+WINPE_INJECT_DRIVERS = os.environ.get("WINPE_INJECT_DRIVERS", "0") == "1"
+
 
 def _make_startnet_cmd() -> bytes:
     """Génère startnet.cmd.
@@ -98,9 +108,38 @@ def _make_startnet_cmd() -> bytes:
         "REM -- curl.exe depuis le partage pour identifier la machine via HTTP",
         "if exist Y:\\curl.exe copy Y:\\curl.exe X:\\curl.exe >nul",
         "",
+        "REM -- Numero de serie : identite STABLE de la machine, independante de la",
+        "REM carte reseau. Indispensable avec les adaptateurs USB-Ethernet : la MAC",
+        "REM vue au PXE (firmware, option 'MAC Address Pass Through') peut differer",
+        "REM de celle vue ici (pilote Windows = MAC gravee de l'adaptateur), et un",
+        "REM meme adaptateur sert a deployer plusieurs machines.",
+        "REM ATTENTION : findstr.exe N'EXISTE PAS dans ce WinPE (verifie sur l'image :",
+        "REM 0 occurrence sur 26666 fichiers) - on utilise find.exe, bien present.",
+        "REM On passe par un fichier : wmic sort de l'UTF-16 et laisse un retour chariot",
+        "REM parasite ; le pipe normalise l'encodage et 'for /f' sur un FICHIER supprime",
+        "REM proprement les CRLF - sinon le CR finirait dans l'URL et casserait curl.",
+        "REM Lecture best-effort : si elle echoue, OSSERIAL reste vide et OSIRIS retombe",
+        "REM sur le lookup IP->MAC. Cette etape ne doit JAMAIS bloquer le deploiement.",
+        "set OSSERIAL=",
+        "wmic bios get serialnumber /value 2>nul | find \"SerialNumber=\" > X:\\osiris-sn.txt 2>nul",
+        "if exist X:\\osiris-sn.txt for /f \"usebackq tokens=2 delims==\" %%s in (\"X:\\osiris-sn.txt\") do if not defined OSSERIAL set OSSERIAL=%%s",
+        "del X:\\osiris-sn.txt >nul 2>&1",
+        "REM Retrait des espaces finaux. Boucle SANS '&' : en batch, 'if cond cmd & goto'",
+        "REM execute le goto INCONDITIONNELLEMENT (le & decoupe au niveau superieur),",
+        "REM ce qui produisait une boucle infinie.",
+        ":trimsn",
+        "if not defined OSSERIAL goto snready",
+        "if not \"%OSSERIAL:~-1%\"==\" \" goto snready",
+        "set OSSERIAL=%OSSERIAL:~0,-1%",
+        "goto trimsn",
+        ":snready",
+        "if not defined OSSERIAL echo [OSIRIS] Numero de serie illisible - repli sur l'identification par MAC",
+        "if defined OSSERIAL echo [OSIRIS] Numero de serie : %OSSERIAL%",
+        "",
         "REM -- Identification de la machine (script personnalise par machine)",
+        "REM Le serial prime cote serveur ; a defaut OSIRIS retombe sur le lookup IP->MAC.",
         "echo [OSIRIS] Identification de la machine...",
-        f"X:\\curl.exe -sf --connect-timeout 15 -o X:\\osiris-machine.cmd \"{OSIRIS_BASE_URL}/winpe-auto\" 2>nul",
+        f"X:\\curl.exe -sf --connect-timeout 15 -o X:\\osiris-machine.cmd \"{OSIRIS_BASE_URL}/winpe-auto?serial=%OSSERIAL%\" 2>nul",
         "if not errorlevel 1 (",
         "    echo [OSIRIS] Script personnalise recu - lancement...",
         "    call X:\\osiris-machine.cmd",
@@ -235,7 +274,7 @@ async def _process_windows(iso_path: str, _update, wim_name: str = ""):
     # d'une nouvelle ISO Windows) les faisait disparaitre silencieusement. On les
     # reinjecte donc systematiquement depuis un dossier persistant.
     # Pour ajouter un pilote : le deposer dans WINPE_DRIVERS_PATH/net/<nom>/ (INF+SYS+CAT).
-    if os.path.isdir(WINPE_DRIVERS_PATH) and os.listdir(WINPE_DRIVERS_PATH):
+    if WINPE_INJECT_DRIVERS and os.path.isdir(WINPE_DRIVERS_PATH) and os.listdir(WINPE_DRIVERS_PATH):
         await _run(
             ["/usr/bin/wimlib-imagex", "update", boot_wim, "2",
              "--command", f"add {WINPE_DRIVERS_PATH} /drivers"],
@@ -247,65 +286,83 @@ async def _process_windows(iso_path: str, _update, wim_name: str = ""):
     _update(progress=50)
 
     # ── 3. Extraction de install.wim (ou install.esd) ────────────────────────
+    # IMPORTANT : 7z ecrit TOUJOURS le nom d'origine (install.wim). Extraire
+    # directement dans windows_dir ecraserait un WIM deja en place portant ce nom
+    # (typiquement l'image client) AVANT meme le renommage vers wim_name.
+    # On passe donc par un dossier de staging, et on ne deplace vers le partage
+    # qu'une fois le nom final connu : seul ce nom-la peut etre ecrase.
+    staging_dir = os.path.join(windows_dir, ".osiris-staging")
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    os.makedirs(staging_dir, exist_ok=True)
+
     extracted = False
-    for iso_src in ["sources/install.wim", "sources/install.esd"]:
-        filename = iso_src.split("/")[-1]
-        proc = await asyncio.create_subprocess_exec(
-            "/usr/bin/7z", "e", iso_path, iso_src, f"-o{windows_dir}", "-y",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.communicate()
-        if proc.returncode == 0 and os.path.exists(f"{windows_dir}/{filename}"):
-            # Renommage vers wim_name si demande (coexistence client / Server).
-            # On garde l'extension d'origine (.wim/.esd) si wim_name n'en precise pas.
-            if wim_name:
-                target = wim_name if wim_name.lower().endswith((".wim", ".esd")) \
-                    else f"{wim_name}.{filename.rsplit('.', 1)[-1]}"
-                if target != filename:
-                    os.replace(f"{windows_dir}/{filename}", f"{windows_dir}/{target}")
-            extracted = True
-            break
+    try:
+        for iso_src in ["sources/install.wim", "sources/install.esd"]:
+            filename = iso_src.split("/")[-1]
+            proc = await asyncio.create_subprocess_exec(
+                "/usr/bin/7z", "e", iso_path, iso_src, f"-o{staging_dir}", "-y",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            src = os.path.join(staging_dir, filename)
+            if proc.returncode == 0 and os.path.exists(src):
+                # Nom final : wim_name si demande, sinon le nom d'origine.
+                # On garde l'extension d'origine (.wim/.esd) si wim_name n'en precise pas.
+                if wim_name:
+                    target = wim_name if wim_name.lower().endswith((".wim", ".esd")) \
+                        else f"{wim_name}.{filename.rsplit('.', 1)[-1]}"
+                else:
+                    target = filename
+                os.replace(src, os.path.join(windows_dir, target))
+                extracted = True
+                break
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     if not extracted:
         raise RuntimeError("Impossible de trouver install.wim / install.esd dans l'ISO")
 
     # ── 4. Écriture de osiris-deploy.cmd sur le partage Samba ────────────────
-    # Ce script sera appelé par startnet.cmd via net use Y: \\OSIRIS\windows
+    # Script de SECOURS, appele par startnet.cmd uniquement quand OSIRIS n'a PAS
+    # reconnu la machine.
+    #
+    # Il ne deploie DELIBEREMENT rien. Historiquement il appliquait install.wim
+    # index 1 : une machine mal identifiee repartait donc avec une image arbitraire,
+    # sans unattend (OOBE manuelle), sans pilotes constructeur et sans firstboot
+    # (ni domaine, ni BitLocker, ni LAPS) - un poste inutilisable, disque ecrase,
+    # et AUCUN avertissement. Une erreur d'identification ne doit pas couter un
+    # deploiement complet : on refuse et on affiche de quoi corriger.
     deploy_script = "\r\n".join([
         "@echo off",
-        "echo [OSIRIS] ===== Deploiement Windows =====",
-        "",
-        "echo [OSIRIS] Partitionnement du disque (GPT/UEFI)...",
-        "(",
-        "echo select disk 0",
-        "echo clean",
-        "echo convert gpt",
-        "echo create partition efi size=512",
-        "echo format quick fs=fat32 label=System",
-        "echo assign letter=S",
-        "echo create partition msr size=16",
-        "echo create partition primary",
-        "echo format quick fs=ntfs label=Windows",
-        "echo assign letter=C",
-        ") > X:\\diskpart.txt",
-        "diskpart /s X:\\diskpart.txt",
-        "if errorlevel 1 ( echo [OSIRIS] ERREUR diskpart & pause & exit /b 1 )",
-        "",
-        "echo [OSIRIS] Application de l'image Windows (15-30 min, patience)...",
-        "if exist Y:\\install.wim (",
-        "    dism /Apply-Image /ImageFile:Y:\\install.wim /Index:1 /ApplyDir:C:\\",
-        ") else (",
-        "    dism /Apply-Image /ImageFile:Y:\\install.esd /Index:1 /ApplyDir:C:\\",
-        ")",
-        "if errorlevel 1 ( echo [OSIRIS] ERREUR DISM & pause & exit /b 1 )",
-        "",
-        "echo [OSIRIS] Configuration du demarrage UEFI...",
-        "bcdboot C:\\Windows /l fr-FR /s S: /f UEFI",
-        "",
-        "echo [OSIRIS] ===== Installation terminee ! Redemarrage dans 10s =====",
-        "ping -n 11 127.0.0.1 >nul",
-        "wpeutil reboot",
+        "setlocal enabledelayedexpansion",
+        "echo.",
+        "echo ============================================================",
+        "echo   [OSIRIS] MACHINE NON RECONNUE - DEPLOIEMENT ANNULE",
+        "echo ============================================================",
+        "echo.",
+        "echo Aucune configuration ne correspond a cette machine dans OSIRIS.",
+        "echo Le disque n'a PAS ete modifie.",
+        "echo.",
+        "echo --- Identifiants detectes sur cette machine ---",
+        "set SN=",
+        "for /f \"skip=1 delims=\" %%s in ('wmic bios get serialnumber 2^>nul') do if not defined SN set SN=%%s",
+        "if defined SN for /f \"tokens=* delims= \" %%a in (\"!SN!\") do set SN=%%a",
+        "echo   Numero de serie : !SN!",
+        "echo   Adresses MAC    :",
+        "getmac /nh /fo table",
+        "echo.",
+        "echo --- Causes frequentes ---",
+        "echo   * la machine n'est pas enregistree dans OSIRIS",
+        "echo   * le numero de serie enregistre ne correspond pas a celui ci-dessus",
+        "echo   * carte reseau USB : la MAC vue au PXE differe de celle vue ici",
+        "echo     (option BIOS HP 'MAC Address Pass Through')",
+        "echo.",
+        "echo Enregistrez la machine dans OSIRIS avec l'un des identifiants",
+        "echo ci-dessus, puis redemarrez en PXE.",
+        "echo.",
+        "pause",
+        "exit /b 1",
     ]) + "\r\n"
     with open(f"{windows_dir}/osiris-deploy.cmd", "w") as f:
         f.write(deploy_script)
