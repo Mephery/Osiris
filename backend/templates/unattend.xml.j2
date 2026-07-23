@@ -36,20 +36,26 @@
             <SystemLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</SystemLocale>
             <UserLocale>{{ profile.locale | replace('_','-') | truncate(5,true,'') }}</UserLocale>
         </component>
+{# domain/user/password : echappement XML obligatoire (filtre |e) - un mot de passe
+   contenant un simple "&" casse le parsing de l'unattend ("erreur interne lors du
+   chargement du fichier de reponses"), constate en prod avec un mdp de jonction AD
+   contenant "&". hostname/client/ou sont deja echappes cote Python (xml.sax.saxutils
+   escape), mais profile_ctx ne l'est pas (il sert aussi au firstboot PowerShell, ou
+   cet echappement XML serait au contraire faux). #}
 {% if profile.join_domain and profile.domain_join_user and profile.domain_join_password %}
         <component name="Microsoft-Windows-UnattendedJoin"
                    processorArchitecture="amd64"
                    publicKeyToken="31bf3856ad364e35"
                    language="neutral" versionScope="nonSxS">
             <Identification>
-                <JoinDomain>{{ profile.domain }}</JoinDomain>
+                <JoinDomain>{{ profile.domain | e }}</JoinDomain>
 {% if ou %}
                 <MachineObjectOU>{{ ou }}</MachineObjectOU>
 {% endif %}
                 <Credentials>
-                    <Domain>{{ profile.domain }}</Domain>
-                    <Username>{{ profile.domain_join_user }}</Username>
-                    <Password>{{ profile.domain_join_password }}</Password>
+                    <Domain>{{ profile.domain | e }}</Domain>
+                    <Username>{{ profile.domain_join_user | e }}</Username>
+                    <Password>{{ profile.domain_join_password | e }}</Password>
                 </Credentials>
             </Identification>
         </component>
@@ -59,7 +65,7 @@
                    publicKeyToken="31bf3856ad364e35"
                    language="neutral" versionScope="nonSxS">
             <Identification>
-                <JoinDomain>{{ profile.domain }}</JoinDomain>
+                <JoinDomain>{{ profile.domain | e }}</JoinDomain>
 {% if ou %}
                 <MachineObjectOU>{{ ou }}</MachineObjectOU>
 {% endif %}

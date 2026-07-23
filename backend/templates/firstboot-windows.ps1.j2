@@ -135,6 +135,50 @@ if ($mac) {
     }
 }
 
+{% if profile.join_domain and profile.domain_join_user and profile.domain_join_password %}
+# ── Jonction au domaine AD ────────────────────────────────────────────────────
+# L'unattend.xml tente deja la jonction, mais pendant la passe *specialize* :
+# AVANT que Windows ait installe le pilote de la carte reseau. Avec une carte
+# integree (pilote inbox, disponible immediatement) ca passe ; avec un adaptateur
+# USB-Ethernet la machine n'a pas encore d'adresse IP, la jonction echoue SANS
+# erreur visible et l'OOBE se termine normalement.
+# Ici le reseau est garanti : le script l'a explicitement attendu plus haut.
+# On ne rejoue donc la jonction que si elle n'a pas deja abouti.
+$csDom = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+if ($csDom -and $csDom.PartOfDomain) {
+    Write-Log "Domaine : deja joint a $($csDom.Domain) (via unattend)"
+} else {
+    Write-Log "Domaine : non joint - jonction a {{ profile.domain }} depuis le firstboot..."
+    try {
+        # here-strings litterales : aucune interpolation du mot de passe, qui peut
+        # contenir $ ` | et autres caracteres speciaux.
+        $djPwdPlain = @'
+{{ profile.domain_join_password }}
+'@.Trim()
+        $djUser = @'
+{{ profile.domain_join_user }}
+'@.Trim()
+        $djCred = New-Object System.Management.Automation.PSCredential(
+            $djUser, (ConvertTo-SecureString $djPwdPlain -AsPlainText -Force))
+        $djArgs = @{
+            DomainName  = '{{ profile.domain }}'
+            Credential  = $djCred
+            Force       = $true
+            ErrorAction = 'Stop'
+        }
+{% if machine.ou %}
+        $djArgs['OUPath'] = @'
+{{ machine.ou }}
+'@.Trim()
+{% endif %}
+        Add-Computer @djArgs
+        Write-Log "Domaine : jonction reussie a {{ profile.domain }} (effective au redemarrage final)"
+    } catch {
+        Write-Log "ERREUR jonction domaine {{ profile.domain }} : $_"
+    }
+}
+{% endif %}
+
 # ── LAPS - Mot de passe administrateur local unique ───────────────────────────
 # Sert aussi de garde-fou : on ne supprimera le compte de deploiement osiris-admin
 # a la fin que si un AUTRE admin local utilisable existe (Administrateur integre

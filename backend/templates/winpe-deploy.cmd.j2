@@ -11,6 +11,13 @@ echo [OSIRIS] MAC     : %MAC%
 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Demarrage+deploiement+{{ machine.hostname }}" >nul 2>&1
 
 REM ── Partitionnement GPT (UEFI) ────────────────────────────────────────────
+REM La partition Windows est montee en W: et NON en C: pendant WinPE : sur
+REM certaines machines, C: est deja pris (disque virtuel de wimboot, volume
+REM residuel...) et "assign letter=C" echoue avec "La lettre de lecteur
+REM specifiee n'est pas libre", ce qui fait ensuite planter DISM en erreur 21
+REM ("Le peripherique n'est pas pret") puisqu'il applique dans le vide.
+REM Apres le redemarrage, cette partition devient C: normalement : les chemins
+REM de l'unattend (C:\osiris-firstboot.ps1) restent donc bien en C:.
 echo [OSIRIS] Partitionnement du disque (GPT/UEFI)...
 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Partitionnement+GPT+en+cours..." >nul 2>&1
 (
@@ -23,7 +30,7 @@ echo assign letter=S
 echo create partition msr size=16
 echo create partition primary
 echo format quick fs=ntfs label=Windows
-echo assign letter=C
+echo assign letter=W
 ) > X:\diskpart.txt
 diskpart /s X:\diskpart.txt
 if errorlevel 1 (
@@ -87,7 +94,7 @@ REM ── Application de l'image Windows ────────────�
 echo [OSIRIS] Application de l'image Windows (patience - 15 a 30 min)...
 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/deploy-progress?p=15" >nul 2>&1
 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=DISM+en+cours+(15-30+min)..." >nul 2>&1
-dism /Apply-Image /ImageFile:%WIM% /Index:{{ win_index }} /ApplyDir:C:\
+dism /Apply-Image /ImageFile:%WIM% /Index:{{ win_index }} /ApplyDir:W:\
 if errorlevel 1 (
     X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=ERREUR+DISM+!" >nul 2>&1
     echo [OSIRIS] ERREUR DISM !
@@ -105,7 +112,7 @@ REM finissant par \" casse le parsing DISM (le \ echappe le guillemet fermant).
 if exist Z:\{{ driver_dir }}\ (
     echo [OSIRIS] Injection de drivers depuis Z:\{{ driver_dir }}\...
     X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Injection+drivers+constructeur..." >nul 2>&1
-    dism /Image:C:\ /Add-Driver /Driver:Z:\{{ driver_dir }}\ /Recurse /ForceUnsigned
+    dism /Image:W:\ /Add-Driver /Driver:Z:\{{ driver_dir }}\ /Recurse /ForceUnsigned
     if errorlevel 1 (
         X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+:+certains+drivers+KO+(non+bloquant)" >nul 2>&1
         echo [OSIRIS] AVERTISSEMENT : certains drivers n'ont pas pu etre injectes ^(non bloquant^)
@@ -121,7 +128,7 @@ if exist Z:\{{ driver_dir }}\ (
 REM ── Configuration du demarrage UEFI ──────────────────────────────────────
 echo [OSIRIS] Configuration du boot UEFI...
 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=bcdboot+UEFI+en+cours..." >nul 2>&1
-bcdboot C:\Windows /l {{ locale }} /s S: /f UEFI
+bcdboot W:\Windows /l {{ locale }} /s S: /f UEFI
 if errorlevel 1 (
     X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+bcdboot+(non+bloquant)" >nul 2>&1
     echo [OSIRIS] AVERTISSEMENT bcdboot ^(non bloquant^)
@@ -133,9 +140,9 @@ X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/deploy-progress?p=92"
 
 REM ── Unattend.xml : personnalisation OOBE ─────────────────────────────────
 echo [OSIRIS] Telechargement de unattend.xml...
-mkdir C:\Windows\Panther 2>nul
-X:\curl.exe -sf -k -o C:\Windows\Panther\unattend.xml "http://%OSIRIS_IP%/unattend.xml?mac=%MAC%" 2>nul
-if exist C:\Windows\Panther\unattend.xml (
+mkdir W:\Windows\Panther 2>nul
+X:\curl.exe -sf -k -o W:\Windows\Panther\unattend.xml "http://%OSIRIS_IP%/unattend.xml?mac=%MAC%" 2>nul
+if exist W:\Windows\Panther\unattend.xml (
     X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=unattend.xml+installe" >nul 2>&1
     echo [OSIRIS] unattend.xml installe
 ) else (
@@ -144,13 +151,13 @@ if exist C:\Windows\Panther\unattend.xml (
 )
 
 REM ── Config pour le premier demarrage ────────────────────────────────────
-echo OSIRIS_URL=%OSIRIS% > C:\osiris.cfg
-{% if profile.tv_suffix %}echo TV_SUFFIX={{ profile.tv_suffix }} >> C:\osiris.cfg{% endif %}
+echo OSIRIS_URL=%OSIRIS% > W:\osiris.cfg
+{% if profile.tv_suffix %}echo TV_SUFFIX={{ profile.tv_suffix }} >> W:\osiris.cfg{% endif %}
 
 REM ── Script de post-deploiement (premier demarrage) ────────────────────────
 echo [OSIRIS] Telechargement du script de premier demarrage...
-X:\curl.exe -sf -k -o C:\osiris-firstboot.ps1 "http://%OSIRIS_IP%/firstboot-windows/%MAC%" 2>nul
-if exist C:\osiris-firstboot.ps1 (
+X:\curl.exe -sf -k -o W:\osiris-firstboot.ps1 "http://%OSIRIS_IP%/firstboot-windows/%MAC%" 2>nul
+if exist W:\osiris-firstboot.ps1 (
     X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=firstboot.ps1+installe" >nul 2>&1
     echo [OSIRIS] osiris-firstboot.ps1 installe
 ) else (
