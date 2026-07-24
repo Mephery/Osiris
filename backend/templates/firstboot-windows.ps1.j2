@@ -158,6 +158,17 @@ if ($csDom -and $csDom.PartOfDomain) {
         $djUser = @'
 {{ profile.domain_join_user }}
 '@.Trim()
+        # Qualification OBLIGATOIRE du domaine : un nom nu ("svc_osiris_join") est
+        # interprete comme un compte LOCAL depuis une machine en WORKGROUP, et la
+        # jonction echoue en 0x52e "nom d'utilisateur ou mot de passe incorrect"
+        # MEME avec le bon mot de passe (constate en prod chez midi2i le 24/07 :
+        # "dca_cderycke" refuse, "midi2i.com\dca_cderycke" accepte, meme mdp).
+        # L'unattend.xml n'a pas ce probleme : il a une balise <Domain> separee.
+        # On ne prefixe que si l'utilisateur n'a pas deja qualifie (DOM\user ou user@dom).
+        if ($djUser -notmatch '[\\@]') {
+            $djUser = '{{ profile.domain }}\' + $djUser
+            Write-Log "Domaine : compte de jonction qualifie en $djUser"
+        }
         $djCred = New-Object System.Management.Automation.PSCredential(
             $djUser, (ConvertTo-SecureString $djPwdPlain -AsPlainText -Force))
         $djArgs = @{
