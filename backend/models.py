@@ -138,7 +138,17 @@ class Application(SQLModel, table=True):
 
 class Machine(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    # MAC PROPRE AU PC : identite permanente, obligatoire. C'est elle qui sert de cle
+    # a toute l'API (/machines/{mac}/...) et qui est gravee dans les scripts generes.
     mac: str = Field(index=True, unique=True)
+    # MAC de l'ADAPTATEUR USB-Ethernet utilise pour CE deploiement : facultative, et
+    # TRANSITOIRE. Un meme dongle sert a deployer plusieurs machines a la suite, donc
+    # OSIRIS l'OUBLIE (remise a None) des que la machine passe en "deployed" : le
+    # dongle redevient immediatement reutilisable sur une autre fiche.
+    # Unique + nullable : Postgres autorise plusieurs NULL, donc autant de machines
+    # sans dongle qu'on veut, mais un dongle donne ne peut etre revendique que par
+    # une seule machine a la fois (evite une identification ambigue en WinPE).
+    deploy_mac: Optional[str] = Field(default=None, index=True, unique=True, nullable=True)
     client: str
     os: str
     hostname: str

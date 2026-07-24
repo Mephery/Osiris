@@ -186,6 +186,9 @@ class MachinePatch(SQLModel):
     client: Optional[str] = None
     os: Optional[str] = None
     ou: Optional[str] = None
+    # MAC de l'adaptateur USB-Ethernet. Chaîne vide = libérer explicitement le dongle
+    # (le PATCH ignore les None, ils signifient "champ non fourni").
+    deploy_mac: Optional[str] = None
     organization_id: Optional[int] = None
     profile_id: Optional[int] = None
     driver_pack_id: Optional[int] = None
@@ -1519,6 +1522,14 @@ def get_windows_firstboot(mac: str):
 def create_machine(machine: Machine, current_user: User = Depends(get_current_user)):
     clean_mac = validate_mac(machine.mac)
     machine.mac = clean_mac
+    # MAC de l'adaptateur : facultative. Une chaîne vide vaut "pas de dongle" (None),
+    # sinon on normalise comme la MAC du PC.
+    raw_deploy_mac = (machine.deploy_mac or "").strip()
+    machine.deploy_mac = validate_mac(raw_deploy_mac) if raw_deploy_mac else None
+    if machine.deploy_mac == clean_mac:
+        raise HTTPException(
+            status_code=400, detail="L'adaptateur ne peut pas avoir la même MAC que le PC"
+        )
 
     plaintext_password = secrets.token_urlsafe(16)
     machine.password_hash = sha512_crypt.using(rounds=100000).hash(plaintext_password)
@@ -1526,6 +1537,16 @@ def create_machine(machine: Machine, current_user: User = Depends(get_current_us
     with Session(engine) as session:
         if session.exec(select(Machine).where(Machine.mac == clean_mac)).first():
             raise HTTPException(status_code=400, detail="Cette adresse MAC est déjà enregistrée.")
+        if machine.deploy_mac:
+            holder = session.exec(
+                select(Machine).where(Machine.deploy_mac == machine.deploy_mac)
+            ).first()
+            if holder:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Adaptateur déjà affecté à {holder.hostname} ({holder.mac}) "
+                           f"— le libérer d'abord",
+                )
         session.add(machine)
         _log(session, current_user, "create_machine", target_mac=clean_mac,
              details={"hostname": machine.hostname, "client": machine.client, "os": machine.os})
@@ -1533,7 +1554,8 @@ def create_machine(machine: Machine, current_user: User = Depends(get_current_us
         session.refresh(machine)
 
     return {
-        "id": machine.id, "mac": machine.mac, "client": machine.client,
+        "id": machine.id, "mac": machine.mac, "deploy_mac": machine.deploy_mac,
+        "client": machine.client,
         "os": machine.os, "hostname": machine.hostname, "ou": machine.ou,
         "status": machine.status, "organization_id": machine.organization_id,
         "profile_id": machine.profile_id, "password": plaintext_password,
@@ -1583,7 +1605,7 @@ def get_all_machines(org_id: Optional[int] = None):
         machines = session.exec(query).all()
         return [
             {
-                "id": m.id, "mac": m.mac, "client": m.client,
+                "id": m.id, "mac": m.mac, "deploy_mac": m.deploy_mac, "client": m.client,
                 "os": m.os, "hostname": m.hostname, "ou": m.ou,
                 "status": m.status, "organization_id": m.organization_id,
                 "profile_id": m.profile_id, "driver_pack_id": m.driver_pack_id,
@@ -1610,16 +1632,44 @@ def update_machine(mac: str, patch: MachinePatch, current_user: User = Depends(g
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
         changes = patch.model_dump(exclude_none=True)
+        # `deploy_mac` est le seul champ qu'on doit pouvoir REMETTRE À VIDE depuis l'UI
+        # (libérer le dongle à la main, sans attendre la fin d'un déploiement). Comme
+        # le PATCH ignore les None, on prend la chaîne vide comme demande de libération.
+        audit_extra = {}
+        if "deploy_mac" in changes:
+            raw = (changes.pop("deploy_mac") or "").strip()
+            new_deploy_mac = validate_mac(raw) if raw else None
+            if new_deploy_mac:
+                if new_deploy_mac == machine.mac:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="L'adaptateur ne peut pas avoir la même MAC que le PC",
+                    )
+                holder = session.exec(
+                    select(Machine).where(
+                        Machine.deploy_mac == new_deploy_mac, Machine.id != machine.id
+                    )
+                ).first()
+                if holder:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Adaptateur déjà affecté à {holder.hostname} "
+                               f"({holder.mac}) — le libérer d'abord",
+                    )
+            machine.deploy_mac = new_deploy_mac
+            audit_extra["deploy_mac"] = new_deploy_mac
         for field, value in changes.items():
             setattr(machine, field, value)
         session.add(machine)
-        _log(session, current_user, "update_machine", target_mac=clean_mac, details=changes)
+        _log(session, current_user, "update_machine", target_mac=clean_mac,
+             details={**changes, **audit_extra})
         session.commit()
         session.refresh(machine)
         return {
             "id": machine.id, "mac": machine.mac, "client": machine.client,
             "os": machine.os, "hostname": machine.hostname, "ou": machine.ou,
             "status": machine.status, "organization_id": machine.organization_id,
+            "deploy_mac": machine.deploy_mac,
         }
 
 
@@ -2065,6 +2115,16 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
         if status == "deployed":
             machine.deployed_at = datetime.now(timezone.utc)
             deployed_at = machine.deployed_at.isoformat()
+            # OUBLI DU DONGLE : l'adaptateur USB-Ethernet n'a servi qu'à ce déploiement.
+            # On le libère dès la fin pour qu'il puisse être déclaré sur la machine
+            # suivante sans conflit (l'index unique refuserait un doublon). L'identité
+            # du poste reste intacte : elle tient à `mac` et `hw_serial`.
+            if machine.deploy_mac:
+                _deploy_logs.setdefault(clean_mac, []).append(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] Adaptateur {machine.deploy_mac} "
+                    f"libere : reutilisable sur une autre machine"
+                )
+                machine.deploy_mac = None
         if status == "pending":
             _deploy_logs.pop(clean_mac, None)
             _deploy_progress.pop(clean_mac, None)
@@ -2181,14 +2241,38 @@ def _mac_from_serial(serial: str) -> Optional[str]:
     return machine.mac if machine else None
 
 
+def _mac_from_wire_mac(wire_mac: Optional[str]) -> Optional[str]:
+    """Résout la MAC vue sur le réseau en MAC CANONIQUE de la machine enregistrée.
+
+    La MAC vue par le DHCP est celle de l'adaptateur USB-Ethernet quand il y en a un,
+    et celle du PC sinon. On cherche donc d'abord dans `deploy_mac` (l'adaptateur
+    explicitement déclaré pour ce déploiement, donc l'indication la plus précise),
+    puis dans `mac` (déploiement sans adaptateur : la MAC vue EST celle du PC).
+
+    Renvoie toujours `machine.mac` : c'est cette valeur qui est gravée dans les scripts
+    générés et qui sert de clé à tous les endpoints /machines/{mac}/... . Le reste de
+    la chaîne n'a donc jamais à connaître l'existence du dongle.
+    """
+    if not wire_mac:
+        return None
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.deploy_mac == wire_mac)).first()
+        if not machine:
+            machine = session.exec(select(Machine).where(Machine.mac == wire_mac)).first()
+    return machine.mac if machine else None
+
+
 @app.get("/winpe-auto")
 def get_winpe_script_auto(request: Request, serial: str = ""):
     """Identifie la machine et retourne son script de déploiement.
 
-    Deux voies, dans cet ordre :
+    Trois voies, dans cet ordre :
       1. le numéro de série SMBIOS remonté par WinPE — identité STABLE, attachée à
          la machine elle-même ;
-      2. à défaut, le lookup IP source → MAC dans les baux dnsmasq (historique).
+      2. à défaut, IP source → MAC (baux dnsmasq) → `deploy_mac` : l'adaptateur
+         USB-Ethernet explicitement déclaré sur la fiche pour ce déploiement ;
+      3. à défaut, cette même MAC comparée à `mac` : déploiement sans adaptateur,
+         la MAC vue sur le réseau est directement celle du PC (cas historique).
 
     Le série prime car la MAC n'identifie plus la machine dès qu'on passe par un
     adaptateur USB-Ethernet : le firmware peut présenter la MAC système (option
@@ -2200,7 +2284,7 @@ def get_winpe_script_auto(request: Request, serial: str = ""):
         or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
         or request.client.host
     )
-    mac = _mac_from_serial(serial) or _ip_to_mac(client_ip)
+    mac = _mac_from_serial(serial) or _mac_from_wire_mac(_ip_to_mac(client_ip))
     if not mac:
         detail = f"serie {serial!r} inconnue et IP {client_ip} absente des baux DHCP" \
             if serial.strip() else f"IP {client_ip} inconnue dans les leases DHCP"

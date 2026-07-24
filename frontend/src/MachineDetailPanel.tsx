@@ -62,6 +62,13 @@ export function MachineDetailPanel({
           <div className="min-w-0">
             <h2 className="text-sm font-bold text-white font-mono truncate">{machine.hostname}</h2>
             <p className="text-[10px] font-mono text-slate-600">{machine.mac.match(/.{1,2}/g)?.join(':').toUpperCase()}{profileName ? ` · ${profileName}` : ''}</p>
+            {machine.deploy_mac && (
+              /* Adaptateur USB-Ethernet affecté à ce déploiement. Disparaît tout seul
+                 une fois la machine déployée : OSIRIS libère le dongle. */
+              <p className="text-[10px] font-mono text-amber-600/80" title="Adaptateur USB-Ethernet affecté à ce déploiement — libéré automatiquement une fois la machine déployée">
+                dongle : {machine.deploy_mac.match(/.{1,2}/g)?.join(':').toUpperCase()}
+              </p>
+            )}
           </div>
           <button onClick={onClose} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1 flex-shrink-0"><IcoX cls="w-4 h-4" /></button>
         </div>

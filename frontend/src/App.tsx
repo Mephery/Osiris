@@ -1421,11 +1421,28 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
             <form onSubmit={handleSubmit} className="p-6 space-y-4">
               <div className="space-y-1.5">
                 <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">
-                  Adresse MAC {editingMac && <span className="text-slate-700 normal-case">(non modifiable)</span>}
+                  Adresse MAC du PC {editingMac && <span className="text-slate-700 normal-case">(non modifiable)</span>}
                 </label>
                 <input required type="text" placeholder="00:11:22:AA:BB:CC"
                   value={formData.mac} onChange={(e) => setFormData({ ...formData, mac: e.target.value })}
                   disabled={!!editingMac} className={`osiris-input font-mono ${editingMac ? 'opacity-40 cursor-not-allowed' : ''}`} />
+                <p className="text-[10px] text-slate-600 leading-relaxed">
+                  Identité permanente du poste. Si tu déploies via un adaptateur USB, mets ici la
+                  MAC de la <strong>machine</strong>, pas celle de l'adaptateur.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">
+                  Adresse MAC de l'adaptateur <span className="text-slate-700 normal-case">(facultatif)</span>
+                </label>
+                <input type="text" placeholder="00:E0:4C:68:06:36"
+                  value={formData.deploy_mac ?? ''} onChange={(e) => setFormData({ ...formData, deploy_mac: e.target.value })}
+                  className="osiris-input font-mono" />
+                <p className="text-[10px] text-slate-600 leading-relaxed">
+                  À renseigner uniquement si tu déploies avec un dongle USB-Ethernet. OSIRIS
+                  l'<strong>oublie automatiquement</strong> en fin de déploiement : le dongle
+                  redevient utilisable sur une autre machine. Vider le champ le libère tout de suite.
+                </p>
               </div>
               <div className="space-y-1.5">
                 <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">

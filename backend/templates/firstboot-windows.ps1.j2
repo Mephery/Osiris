@@ -65,15 +65,25 @@ while ($retries -lt 30) {
     }
 }
 
-# ── Recuperer la vraie adresse MAC ───────────────────────────────────────────
-$adapter = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.HardwareInterface } | Select-Object -First 1
-if ($adapter) {
-    $mac = $adapter.MacAddress -replace '-', '' | ForEach-Object { $_.ToLower() }
-    $script:_mac = $mac
-    Write-Log "MAC detectee : $mac"
+# ── Adresse MAC : identite CANONIQUE de la machine ───────────────────────────
+# On prend la MAC gravee au rendu du script cote serveur, et NON celle detectee en
+# live : avec un adaptateur USB-Ethernet, Windows voit la MAC du DONGLE, qui n'est
+# PAS l'identite de la machine (elle est stockee a part dans `deploy_mac` et OUBLIEE
+# en fin de deploiement pour que le dongle serve ailleurs). Poster sur
+# /machines/<MAC-du-dongle>/... renverrait 404 des que le dongle est libere.
+# La MAC live reste affichee dans le log, utile au diagnostic.
+$mac = '{{ machine.mac }}'
+$script:_mac = $mac
+$adapterLive = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.HardwareInterface } | Select-Object -First 1
+if ($adapterLive) {
+    $macLive = $adapterLive.MacAddress -replace '-', '' | ForEach-Object { $_.ToLower() }
+    if ($macLive -ne $mac) {
+        Write-Log "MAC machine : $mac (adaptateur actif : $macLive)"
+    } else {
+        Write-Log "MAC machine : $mac"
+    }
 } else {
-    Write-Log "ERREUR : aucun adaptateur reseau actif"
-    $mac = $null
+    Write-Log "AVERTISSEMENT : aucun adaptateur reseau actif (MAC machine : $mac)"
 }
 
 # ── Inventaire materiel ───────────────────────────────────────────────────────

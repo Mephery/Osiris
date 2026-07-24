@@ -40,6 +40,10 @@ export interface WimFile {
 export interface Machine {
   id?: number;
   mac: string;
+  /** MAC de l'adaptateur USB-Ethernet utilisé pour CE déploiement. Facultative, et
+   *  oubliée automatiquement par OSIRIS en fin de déploiement (le dongle redevient
+   *  réutilisable sur une autre machine). Chaîne vide = libérer explicitement. */
+  deploy_mac?: string | null;
   client: string;
   os: string;
   hostname: string;
@@ -228,7 +232,7 @@ export function formatMac(mac: string): string {
   return mac.match(/.{1,2}/g)?.join(':').toUpperCase() ?? mac
 }
 
-export const EMPTY_FORM: Machine = { mac: '', client: '', os: 'windows', hostname: '', ou: '', organization_id: null, profile_id: null, driver_pack_id: null, hw_serial: '' }
+export const EMPTY_FORM: Machine = { mac: '', deploy_mac: '', client: '', os: 'windows', hostname: '', ou: '', organization_id: null, profile_id: null, driver_pack_id: null, hw_serial: '' }
 
 export function authHeader(token: string) {
   return { 'Authorization': `Bearer ${token}` }
