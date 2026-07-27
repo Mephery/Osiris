@@ -174,6 +174,14 @@ export default function App() {
   const [statusFilter, setStatusFilter] = useState('')
   const [osFilter, setOsFilter]         = useState('')
   const [smokeFilter, setSmokeFilter]   = useState(false)
+  const [sortKey, setSortKey]           = useState<'hostname' | 'mac' | 'client' | 'os' | 'status' | null>(null)
+  const [sortDir, setSortDir]           = useState<'asc' | 'desc'>('asc')
+
+  // Clic sur un en-tête de colonne : trie dessus, ou inverse le sens si déjà actif.
+  const toggleSort = (key: 'hostname' | 'mac' | 'client' | 'os' | 'status') => {
+    if (sortKey === key) { setSortDir(d => d === 'asc' ? 'desc' : 'asc') }
+    else { setSortKey(key); setSortDir('asc') }
+  }
 
   const resetFilters = () => { setSearch(''); setStatusFilter(''); setOsFilter(''); setSmokeFilter(false) }
   const hasActiveFilter = !!(search || statusFilter || osFilter || smokeFilter)
@@ -182,8 +190,44 @@ export default function App() {
   const [showSettingsModal, setShowSettingsModal] = useState(false)
 
   // Domaines AD par organisation
+  const EMPTY_DOMAIN_CONFIG = { organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '', wifi_ssid: '', wifi_password: '' }
   const [domainConfigs, setDomainConfigs] = useState<any[]>([])
-  const [newDomainConfig, setNewDomainConfig] = useState({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '', wifi_ssid: '', wifi_password: '' })
+  const [newDomainConfig, setNewDomainConfig] = useState(EMPTY_DOMAIN_CONFIG)
+  // id de la config AD en cours d'édition (null = mode création)
+  const [editingDcId, setEditingDcId] = useState<number | null>(null)
+
+  const startEditDomainConfig = (dc: any) => {
+    setEditingDcId(dc.id)
+    // les mots de passe ne sont jamais renvoyés par l'API → champs laissés vides = « inchangé »
+    setNewDomainConfig({
+      organization_id: dc.organization_id, name: dc.name ?? '', domain: dc.domain ?? '',
+      join_user: dc.join_user ?? '', join_password: '', default_ou: dc.default_ou ?? '',
+      wifi_ssid: dc.wifi_ssid ?? '', wifi_password: '',
+    })
+  }
+
+  const cancelEditDomainConfig = () => { setEditingDcId(null); setNewDomainConfig(EMPTY_DOMAIN_CONFIG) }
+
+  const submitDomainConfig = () => {
+    if (!auth) return
+    if (!newDomainConfig.organization_id || !newDomainConfig.name || !newDomainConfig.domain) { toast.error('Organisation, nom et domaine requis'); return }
+    if (editingDcId !== null) {
+      // PATCH : on n'envoie les mots de passe que s'ils ont été saisis (vide = conserver l'existant, sinon on les effacerait)
+      const body: any = {
+        name: newDomainConfig.name, domain: newDomainConfig.domain, join_user: newDomainConfig.join_user,
+        default_ou: newDomainConfig.default_ou, wifi_ssid: newDomainConfig.wifi_ssid,
+      }
+      if (newDomainConfig.join_password) body.join_password = newDomainConfig.join_password
+      if (newDomainConfig.wifi_password) body.wifi_password = newDomainConfig.wifi_password
+      fetch(`${API_URL}/domain-configs/${editingDcId}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => { if (r.ok) { fetchDomainConfigs(auth.token); cancelEditDomainConfig(); toast.success('Configuration AD mise à jour') } else throw new Error() })
+        .catch(() => toast.error('Erreur'))
+    } else {
+      fetch(`${API_URL}/domain-configs`, { method: 'POST', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify(newDomainConfig) })
+        .then(r => { if (r.ok) { fetchDomainConfigs(auth.token); setNewDomainConfig(EMPTY_DOMAIN_CONFIG); toast.success('Configuration AD ajoutée') } else throw new Error() })
+        .catch(() => toast.error('Erreur'))
+    }
+  }
 
   // Tunnels VPN clients (routage site-à-site)
   const [vpnTunnels, setVpnTunnels] = useState<VpnTunnel[]>([])
@@ -198,6 +242,7 @@ export default function App() {
 
   const fetchAll = (token: string, orgFilter: number | null = null) => {
     setLoading(true)
+    setError(null)  // repart propre : sinon une erreur précédente (ex. « Session expirée » sur token périmé) reste affichée après une reconnexion réussie
     const url = orgFilter ? `${API_URL}/machines?org_id=${orgFilter}` : `${API_URL}/machines`
     fetch(url, { headers: authHeader(token) })
       .then((res) => { if (res.status === 401) { setAuth(null); throw new Error("Session expirée") } if (!res.ok) throw new Error("Erreur API"); return res.json() })
@@ -696,6 +741,16 @@ export default function App() {
     return matchSearch && matchStatus && matchOs && matchSmoke
   })
 
+  // Tri d'affichage (ne touche ni aux compteurs ni à la sélection, qui restent sur filteredMachines).
+  const sortedMachines = sortKey
+    ? [...filteredMachines].sort((a, b) => {
+        const va = (a[sortKey] ?? '').toString().toLowerCase()
+        const vb = (b[sortKey] ?? '').toString().toLowerCase()
+        const cmp = va.localeCompare(vb, undefined, { numeric: true })
+        return sortDir === 'asc' ? cmp : -cmp
+      })
+    : filteredMachines
+
   const statCounts = {
     deployed:  machines.filter(m => m.status === 'deployed').length,
     deploying: machines.filter(m => m.status === 'deploying').length,
@@ -957,36 +1012,43 @@ export default function App() {
             {domainConfigs.length > 0 && (
               <div className="space-y-1">
                 {domainConfigs.map((dc: any) => (
-                  <div key={dc.id} className="flex items-center justify-between py-1.5 px-3 border border-slate-800/60 rounded text-xs">
+                  <div key={dc.id} className={`flex items-center justify-between py-1.5 px-3 border rounded text-xs ${editingDcId === dc.id ? 'border-blue-700/70 bg-blue-950/20' : 'border-slate-800/60'}`}>
                     <div>
                       <span className="text-white font-medium">{dc.name}</span>
                       <span className="text-slate-500 ml-3 font-mono">{dc.domain}</span>
                       {dc.join_user && <span className="text-slate-600 ml-2">({dc.join_user})</span>}
                       {dc.default_ou && <span className="text-slate-700 ml-2 font-mono text-[9px]">{dc.default_ou}</span>}
+                      {dc.wifi_ssid && <span className="text-slate-700 ml-2 font-mono text-[9px]">WiFi {dc.wifi_ssid}</span>}
                     </div>
-                    <button onClick={() => fetch(`${API_URL}/domain-configs/${dc.id}`, { method: 'DELETE', headers: authHeader(auth.token) }).then(r => { if (r.ok) fetchDomainConfigs(auth.token) })} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
+                    <div className="flex items-center gap-1.5">
+                      <button onClick={() => startEditDomainConfig(dc)} className="osiris-action-btn" title="Modifier"><IcoPencil /></button>
+                      <button onClick={() => fetch(`${API_URL}/domain-configs/${dc.id}`, { method: 'DELETE', headers: authHeader(auth.token) }).then(r => { if (r.ok) { fetchDomainConfigs(auth.token); if (editingDcId === dc.id) cancelEditDomainConfig() } })} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
+                    </div>
                   </div>
                 ))}
               </div>
             )}
+            {editingDcId !== null && (
+              <p className="text-[10px] text-blue-400 font-mono">Édition de « {newDomainConfig.name} » — laissez les mots de passe vides pour les conserver.</p>
+            )}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-2 border-t border-slate-800/40">
-              <select value={newDomainConfig.organization_id} onChange={e => setNewDomainConfig({...newDomainConfig, organization_id: parseInt(e.target.value)})} className="osiris-input text-xs">
+              <select value={newDomainConfig.organization_id} onChange={e => setNewDomainConfig({...newDomainConfig, organization_id: parseInt(e.target.value)})} disabled={editingDcId !== null} className="osiris-input text-xs disabled:opacity-50">
                 <option value={0}>-- Organisation --</option>
                 {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
               </select>
               <input placeholder="Nom (ex: Siege principal)" value={newDomainConfig.name} onChange={e => setNewDomainConfig({...newDomainConfig, name: e.target.value})} className="osiris-input text-xs font-mono" />
               <input placeholder="Domaine (ex: corp.local)" value={newDomainConfig.domain} onChange={e => setNewDomainConfig({...newDomainConfig, domain: e.target.value})} className="osiris-input text-xs font-mono" />
               <input placeholder="Compte jonction AD" value={newDomainConfig.join_user} onChange={e => setNewDomainConfig({...newDomainConfig, join_user: e.target.value})} className="osiris-input text-xs font-mono" />
-              <input type="password" placeholder="Mot de passe jonction" value={newDomainConfig.join_password} onChange={e => setNewDomainConfig({...newDomainConfig, join_password: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input type="password" placeholder={editingDcId !== null ? 'Mot de passe jonction (inchangé)' : 'Mot de passe jonction'} value={newDomainConfig.join_password} onChange={e => setNewDomainConfig({...newDomainConfig, join_password: e.target.value})} className="osiris-input text-xs font-mono" />
               <input placeholder="OU par defaut (optionnel)" value={newDomainConfig.default_ou} onChange={e => setNewDomainConfig({...newDomainConfig, default_ou: e.target.value})} className="osiris-input text-xs font-mono" />
               <input placeholder="SSID WiFi (optionnel)" value={newDomainConfig.wifi_ssid} onChange={e => setNewDomainConfig({...newDomainConfig, wifi_ssid: e.target.value})} className="osiris-input text-xs font-mono" />
-              <input type="password" placeholder="Mot de passe WiFi" value={newDomainConfig.wifi_password} onChange={e => setNewDomainConfig({...newDomainConfig, wifi_password: e.target.value})} className="osiris-input text-xs font-mono" />
-              <button onClick={() => {
-                if (!newDomainConfig.organization_id || !newDomainConfig.name || !newDomainConfig.domain) { toast.error('Organisation, nom et domaine requis'); return }
-                fetch(`${API_URL}/domain-configs`, { method: 'POST', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify(newDomainConfig) })
-                  .then(r => { if (r.ok) { fetchDomainConfigs(auth.token); setNewDomainConfig({ organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '', wifi_ssid: '', wifi_password: '' }); toast.success('Configuration AD ajoutee') } else throw new Error() })
-                  .catch(() => toast.error('Erreur'))
-              }} className="osiris-btn text-xs col-span-2 sm:col-span-1">Ajouter</button>
+              <input type="password" placeholder={editingDcId !== null ? 'Mot de passe WiFi (inchangé)' : 'Mot de passe WiFi'} value={newDomainConfig.wifi_password} onChange={e => setNewDomainConfig({...newDomainConfig, wifi_password: e.target.value})} className="osiris-input text-xs font-mono" />
+              <div className={`flex gap-2 col-span-2 ${editingDcId !== null ? 'sm:col-span-3' : 'sm:col-span-1'}`}>
+                <button onClick={submitDomainConfig} className="osiris-btn text-xs flex-1">{editingDcId !== null ? 'Enregistrer' : 'Ajouter'}</button>
+                {editingDcId !== null && (
+                  <button onClick={cancelEditDomainConfig} className="osiris-btn-ghost text-xs">Annuler</button>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -1187,8 +1249,26 @@ export default function App() {
                       onChange={toggleSelectAll}
                       className="accent-blue-500 cursor-pointer" />
                   </th>
-                  {["Nom d'hôte", "Adresse MAC", "Client / Org", "OS", "Statut", "OU / Actions"].map(h => (
-                    <th key={h} className="osiris-table-sticky-th text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-widest text-slate-600 whitespace-nowrap">{h}</th>
+                  {([
+                    { label: "Nom d'hôte",   key: 'hostname' as const },
+                    { label: "Adresse MAC",  key: 'mac'      as const },
+                    { label: "Client / Org", key: 'client'   as const },
+                    { label: "OS",           key: 'os'       as const },
+                    { label: "Statut",       key: 'status'   as const },
+                    { label: "OU / Actions", key: null },
+                  ]).map(col => (
+                    <th key={col.label} className="osiris-table-sticky-th text-left px-4 py-3 text-[10px] font-semibold uppercase tracking-widest text-slate-600 whitespace-nowrap">
+                      {col.key ? (
+                        <button
+                          onClick={() => toggleSort(col.key!)}
+                          className={`inline-flex items-center gap-1 uppercase tracking-widest transition-colors cursor-pointer hover:text-slate-300 ${sortKey === col.key ? 'text-slate-300' : ''}`}
+                          title={`Trier par ${col.label}`}
+                        >
+                          {col.label}
+                          <span className="text-[8px] w-2 inline-block">{sortKey === col.key ? (sortDir === 'asc' ? '▲' : '▼') : ''}</span>
+                        </button>
+                      ) : col.label}
+                    </th>
                   ))}
                 </tr>
               </thead>
@@ -1197,7 +1277,7 @@ export default function App() {
                   <tr><td colSpan={7} className="px-4 py-16 text-center text-slate-700 font-mono text-xs">
                     {machines.length === 0 ? 'Aucune machine enregistrée' : 'Aucun résultat pour cette recherche'}
                   </td></tr>
-                ) : filteredMachines.map((machine, i) => (
+                ) : sortedMachines.map((machine, i) => (
                   <React.Fragment key={machine.id}>
                   <tr className={`osiris-row osiris-row-in transition-colors ${selectedMacs.has(machine.mac) ? 'bg-blue-950/20' : ''}`} style={{ animationDelay: `${Math.min(i, 18) * 40}ms` }}>
                     <td className="px-4 py-3 w-8">
