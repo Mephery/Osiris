@@ -977,16 +977,23 @@ def _profile_dict(p: Profile) -> dict:
 
 def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
     """Profil avec secrets déchiffrés — uniquement pour les templates Jinja2, jamais renvoyé au client."""
-    # Résolution du domaine AD : DomainConfig en priorité sur les champs inline
+    # Résolution du domaine AD : la DomainConfig liée fournit des valeurs, mais ne doit
+    # écraser un champ du profil QUE si elle le renseigne réellement — sinon on efface
+    # silencieusement le compte de jonction du profil (footgun : jonction avec creds vides).
     domain = p.domain
     domain_join_user = p.domain_join_user
     domain_join_password = decrypt(p.domain_join_password or "")
     if p.domain_config_id and session:
         dc = session.get(DomainConfig, p.domain_config_id)
         if dc:
-            domain = dc.domain
-            domain_join_user = dc.join_user
-            domain_join_password = decrypt(dc.join_password or "")
+            if dc.domain:
+                domain = dc.domain
+            # Le compte de jonction est un couple user+password : on ne prend celui de la
+            # DomainConfig que si elle définit un utilisateur, sinon on conserve celui du profil
+            # (évite de mélanger l'user de la DomainConfig avec le mot de passe du profil).
+            if dc.join_user:
+                domain_join_user = dc.join_user
+                domain_join_password = decrypt(dc.join_password or "")
     # WiFi : porte par la DomainConfig. On la retrouve via domain_config_id, sinon
     # (profil a domaine inline) via correspondance sur le nom de domaine resolu.
     wifi_ssid = ""
