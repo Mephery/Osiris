@@ -79,6 +79,19 @@ export default function App() {
   // ── Navigation par onglets ─────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState<'machines' | 'admin' | 'drivers' | 'journal' | 'capture' | 'dashboard' | 'infrastructure'>('machines')
 
+  // Sous-onglets de la section Administration (une seule section affichée à la fois → page moins longue + chargement paresseux)
+  type AdminSubTab = 'orgs' | 'users' | 'apps' | 'profiles' | 'images' | 'domains' | 'vpn'
+  const ADMIN_SUBTABS: { id: AdminSubTab; label: string }[] = [
+    { id: 'orgs',     label: 'Organisations' },
+    { id: 'users',    label: 'Utilisateurs' },
+    { id: 'apps',     label: 'Applications' },
+    { id: 'profiles', label: 'Profils' },
+    { id: 'images',   label: 'Images OS' },
+    { id: 'domains',  label: 'Domaines AD' },
+    { id: 'vpn',      label: 'Tunnels VPN' },
+  ]
+  const [adminSubTab, setAdminSubTab] = useState<AdminSubTab>('orgs')
+
   // ── Section admin : gestion des orgs et users ──────────────────────────────
   // Signal de rafraîchissement pour l'onglet Capture (incrémenté quand une capture se termine, cf. WebSocket)
   const [captureRefresh, setCaptureRefresh] = useState(0)
@@ -372,9 +385,13 @@ export default function App() {
   useEffect(() => {
     if (!auth) return
     if (auth.role !== 'admin') return
-    if (activeTab === 'admin') { fetchDomainConfigs(auth.token); fetchVpnTunnels(auth.token) }
+    // Chargement paresseux : on ne récupère les données d'une section que quand son sous-onglet est ouvert
+    if (activeTab === 'admin') {
+      if (adminSubTab === 'domains') fetchDomainConfigs(auth.token)
+      else if (adminSubTab === 'vpn') fetchVpnTunnels(auth.token)
+    }
     else if (activeTab === 'infrastructure') fetchHypervisors(auth.token)
-  }, [activeTab])
+  }, [activeTab, adminSubTab])
 
   // Auto-refresh des images en cours de téléchargement/extraction
   useEffect(() => {
@@ -812,9 +829,22 @@ export default function App() {
 
         {/* ── Onglet Administration ────────────────────────────────────────── */}
         {activeTab === 'admin' && auth.role === 'admin' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-6">
+
+            {/* Barre de sous-onglets Administration */}
+            <div className="flex items-center gap-1 flex-wrap border-b border-slate-800/60 overflow-x-auto">
+              {ADMIN_SUBTABS.map(st => (
+                <button key={st.id} onClick={() => setAdminSubTab(st.id)}
+                  className={`flex-shrink-0 whitespace-nowrap px-4 py-2 text-xs font-semibold tracking-wide border-b-2 -mb-px transition-colors cursor-pointer ${
+                    adminSubTab === st.id ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-600 hover:text-slate-300 hover:border-slate-600'
+                  }`}>
+                  {st.label}
+                </button>
+              ))}
+            </div>
 
             {/* Organisations */}
+            {adminSubTab === 'orgs' && (
             <div className="osiris-table-wrap p-5 space-y-4">
               <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Organisations clients</h2>
               <ul className="space-y-2">
@@ -847,8 +877,10 @@ export default function App() {
                 </div>
               </form>
             </div>
+            )}
 
             {/* Utilisateurs */}
+            {adminSubTab === 'users' && (
             <div className="osiris-table-wrap p-5 space-y-4">
               <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Utilisateurs</h2>
               <ul className="space-y-1">
@@ -876,8 +908,10 @@ export default function App() {
                 </div>
               </form>
             </div>
+            )}
 
             {/* Catalogue d'applications (winget / apt) */}
+            {adminSubTab === 'apps' && (
             <div className="osiris-table-wrap p-5 space-y-4">
               <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Applications</h2>
               <ul className="space-y-1 max-h-64 overflow-y-auto">
@@ -916,16 +950,21 @@ export default function App() {
                 </div>
               </form>
             </div>
+            )}
 
             {/* Profils de déploiement (liste + création + modales) */}
+            {adminSubTab === 'profiles' && (
             <ProfilesSection
               token={auth.token}
               profiles={profiles}
               apps={apps}
               onProfilesChanged={() => fetchProfiles(auth.token)}
             />
-            {/* Images OS ── col-span-2 */}
-            <div className="osiris-table-wrap p-5 space-y-4 md:col-span-2">
+            )}
+
+            {/* Images OS */}
+            {adminSubTab === 'images' && (
+            <div className="osiris-table-wrap p-5 space-y-4">
               <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Images OS</h2>
 
               <div className="space-y-2">
@@ -978,6 +1017,7 @@ export default function App() {
                 </div>
               </form>
             </div>
+            )}
 
           </div>
         )}
@@ -1005,8 +1045,8 @@ export default function App() {
         )}
 
         {/* ── Domaines AD (dans onglet Admin, section separee) ─────────────── */}
-        {activeTab === 'admin' && auth.role === 'admin' && (
-          <div className="max-w-7xl mx-auto px-6 py-4 border-t border-slate-800/40 space-y-3">
+        {activeTab === 'admin' && auth.role === 'admin' && adminSubTab === 'domains' && (
+          <div className="osiris-table-wrap p-5 space-y-3">
             <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Domaines AD par organisation</h2>
             <p className="text-[10px] text-slate-600">Configurez les credentials AD au niveau de l'organisation. Les profils peuvent utiliser ces configs au lieu de saisir le domaine manuellement.</p>
             {domainConfigs.length > 0 && (
@@ -1054,8 +1094,8 @@ export default function App() {
         )}
 
         {/* ── Tunnels VPN clients (dans onglet Admin, section separee) ──────── */}
-        {activeTab === 'admin' && auth.role === 'admin' && (
-          <div className="max-w-7xl mx-auto px-6 py-4 border-t border-slate-800/40 space-y-3">
+        {activeTab === 'admin' && auth.role === 'admin' && adminSubTab === 'vpn' && (
+          <div className="osiris-table-wrap p-5 space-y-3">
             <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Tunnels VPN clients</h2>
             <p className="text-[10px] text-slate-600">Un tunnel OpenVPN permanent par client. OSIRIS route automatiquement les machines déployées vers le bon domaine AD (DNS split-horizon + route classless), sans bascule manuelle.</p>
             {vpnTunnels.length > 0 && (
