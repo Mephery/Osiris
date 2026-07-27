@@ -168,7 +168,7 @@ if ($csDom -and $csDom.PartOfDomain) {
         $djUser = @'
 {{ profile.domain_join_user }}
 '@.Trim()
-        # Qualification OBLIGATOIRE du domaine : un nom nu ("svc_osiris_join") est
+        # Qualification OBLIGATOIRE du domaine : un nom nu ("m2smasterisation") est
         # interprete comme un compte LOCAL depuis une machine en WORKGROUP, et la
         # jonction echoue en 0x52e "nom d'utilisateur ou mot de passe incorrect"
         # MEME avec le bon mot de passe (constate en prod chez midi2i le 24/07 :
