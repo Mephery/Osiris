@@ -56,6 +56,8 @@ export default function App() {
   const [isModalOpen, setIsModalOpen]   = useState(false)
   const [editingMac, setEditingMac]     = useState<string | null>(null)
   const [formData, setFormData]         = useState<Machine>(EMPTY_FORM)
+  // Fiche telle qu'elle était à l'ouverture de la modale (cf. openEdit).
+  const [formSnapshot, setFormSnapshot] = useState<Machine>(EMPTY_FORM)
   const [submitError, setSubmitError]   = useState<string | null>(null)
   const [driverPacks, setDriverPacks]   = useState<any[]>([])
 
@@ -477,6 +479,12 @@ export default function App() {
   const openEdit = (machine: Machine) => {
     setEditingMac(machine.mac)
     setFormData({ ...machine })
+    // Photo de la fiche telle qu'ouverte. À l'enregistrement on ne renvoie que
+    // les champs qui en diffèrent : sans ça, un PATCH réécrivait TOUS les champs
+    // avec les valeurs chargées à l'ouverture, écrasant en silence ce qui avait
+    // changé entre-temps (le 2026-07-16, un driver_pack_id corrigé côté serveur
+    // est ainsi revenu à l'ancienne valeur).
+    setFormSnapshot({ ...machine })
     setSubmitError(null)
     setIsModalOpen(true)
   }
@@ -498,10 +506,28 @@ export default function App() {
     const isEdit = editingMac !== null
     const url    = isEdit ? `${API_URL}/machines/${editingMac}` : `${API_URL}/machines`
     const method = isEdit ? 'PATCH' : 'POST'
+
+    // En édition, on n'envoie QUE les champs réellement modifiés. Renvoyer le
+    // formulaire entier réécrivait des champs auxquels on n'avait pas touché,
+    // avec les valeurs lues à l'ouverture de la modale — donc périmées dès que
+    // le serveur ou quelqu'un d'autre les avait changées entre-temps.
+    const payload = isEdit
+      ? Object.fromEntries(
+          (Object.keys(formData) as (keyof Machine)[])
+            .filter((k) => formData[k] !== formSnapshot[k])
+            .map((k) => [k, formData[k]]),
+        )
+      : formData
+
+    if (isEdit && Object.keys(payload).length === 0) {
+      closeModal()
+      return
+    }
+
     fetch(url, {
       method,
       headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
-      body: JSON.stringify(formData),
+      body: JSON.stringify(payload),
     })
       .then(async (res) => {
         if (!res.ok) { const err = await res.json(); throw new Error(err.detail || "Erreur") }

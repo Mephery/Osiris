@@ -1679,6 +1679,11 @@ def get_all_machines(org_id: Optional[int] = None):
         ]
 
 
+# Champs de la fiche machine qu'un PATCH peut remettre à null (nullable en base).
+# `deploy_mac` a son propre traitement, la chaîne vide y valant aussi libération.
+_MACHINE_NULLABLE_FIELDS = {"organization_id", "profile_id", "driver_pack_id", "deploy_mac"}
+
+
 @app.patch("/machines/{mac}")
 def update_machine(mac: str, patch: MachinePatch, current_user: User = Depends(get_current_user)):
     clean_mac = validate_mac(mac)
@@ -1686,10 +1691,20 @@ def update_machine(mac: str, patch: MachinePatch, current_user: User = Depends(g
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
-        changes = patch.model_dump(exclude_none=True)
-        # `deploy_mac` est le seul champ qu'on doit pouvoir REMETTRE À VIDE depuis l'UI
-        # (libérer le dongle à la main, sans attendre la fin d'un déploiement). Comme
-        # le PATCH ignore les None, on prend la chaîne vide comme demande de libération.
+        # exclude_unset (et non exclude_none) : seuls les champs RÉELLEMENT présents
+        # dans le corps de la requête sont pris en compte. Un `null` explicite devient
+        # donc une demande de vidage, là où il était auparavant ignoré — retirer le
+        # pack de pilotes d'une machine n'avait aucun effet et échouait en silence.
+        # L'UI n'envoie que les champs modifiés, la sémantique se rejoint.
+        changes = patch.model_dump(exclude_unset=True)
+        # Un `null` n'a de sens que sur les champs qui l'acceptent en base (les
+        # clés étrangères) : ailleurs il ferait échouer la mise à jour. Sur les
+        # champs texte, on l'ignore comme avant.
+        for field in [f for f, v in changes.items() if v is None]:
+            if field not in _MACHINE_NULLABLE_FIELDS:
+                changes.pop(field)
+        # `deploy_mac` accepte en plus la chaîne vide comme demande de libération
+        # (libérer le dongle à la main, sans attendre la fin d'un déploiement).
         audit_extra = {}
         if "deploy_mac" in changes:
             raw = (changes.pop("deploy_mac") or "").strip()
