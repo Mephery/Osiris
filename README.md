@@ -675,6 +675,30 @@ donc actif au boot suivant, sans régénérer la moindre image.
 avoir de fichiers de même nom. OSIRIS ignore le doublon et le signale dans les logs
 de l'API.
 
+### Choix du pack de pilotes par identifiant matériel
+
+Le nom commercial ne désigne pas une machine sans ambiguïté : un **ThinkPad T15**
+(Machine Type 20S6/20S7) et un **ThinkPad T15g** (20UR/20US) sont deux machines
+différentes que sépare une seule lettre — et se tromper de pack, c'est un poste
+livré sans pavé tactile ni WiFi.
+
+Les trois constructeurs publient un identifiant matériel, que OSIRIS enregistre sur
+chaque pack (colonne `hw_ids`, remplie à la synchro du catalogue) :
+
+| constructeur | champ du catalogue | exemple |
+|---|---|---|
+| Dell   | `systemID`  | `092f` |
+| HP     | `SystemId` (carte mère) | `81c3,8396` |
+| Lenovo | `Types` (Machine Type)  | `20s6,20s7` |
+
+Côté machine, WinPE remonte `Win32_ComputerSystemProduct.Name` (chez Lenovo, le MTM
+`20S6CTO1WW` dont les 4 premiers caractères sont le Machine Type) au moment de
+l'identification. Quand aucun pack n'a été choisi à la main sur la fiche machine,
+OSIRIS s'en sert pour injecter le bon pack — au lieu de déverser les ~15 Go du
+dossier `drivers/` complet comme il le faisait auparavant.
+
+Un pack explicitement choisi dans l'UI reste toujours prioritaire.
+
 ---
 
 ## Caddyfile - routes requises

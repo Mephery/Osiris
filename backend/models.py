@@ -163,6 +163,12 @@ class Machine(SQLModel, table=True):
     # n'identifiant plus la machine dès qu'on passe par un adaptateur USB-Ethernet.
     hw_serial: str = Field(default="", index=True)
     hw_model: str = Field(default="")
+    # Identifiant matériel constructeur (Win32_ComputerSystemProduct.Name). Chez
+    # Lenovo c'est le MTM ("20S6CTO1WW") dont les 4 premiers caractères désignent
+    # le Machine Type — la seule façon fiable de distinguer un T15 d'un T15g, que
+    # le nom commercial confond. Chez Dell/HP il vaut le nom commercial, sans mal :
+    # le rapprochement par nom y fonctionne déjà.
+    hw_sysid: str = Field(default="", index=True)
     hw_ram_gb: int = Field(default=0)
     hw_disk_gb: int = Field(default=0)     # taille du disque systeme (Go)
     hw_disk_type: str = Field(default="")  # type de disque (SSD NVMe, SSD (SATA), HDD...)
@@ -221,6 +227,11 @@ class DriverPack(SQLModel, table=True):
     local_path: str = Field(default="")  # /srv/data/windows/drivers/dell/optiplex7090/
     status: str = Field(default="available")  # available / downloading / ready / error
     error: str = Field(default="")        # raison de l'échec quand status == "error"
+    # Identifiants matériel publiés par le constructeur, en minuscules, séparés par
+    # des virgules. Dell = systemID ("092f") ; HP = SystemId carte mère ("81c3,8396") ;
+    # Lenovo = Machine Type ("20s6,20s7"). Permet de désigner le bon pack sans passer
+    # par le nom commercial — c'est une lettre qui sépare un T15 d'un T15g.
+    hw_ids: str = Field(default="", index=True)
     catalog_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

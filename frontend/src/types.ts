@@ -82,6 +82,7 @@ export interface DriverPack {
   status: string;
   local_path: string;
   error: string;
+  hw_ids: string;
   download_url: string;
   catalog_updated: string;
 }

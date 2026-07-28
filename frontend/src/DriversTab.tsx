@@ -93,7 +93,14 @@ export function DriversTab({ token }: { token: string }) {
 
         const DriverRow = ({ d }: { d: DriverPack }) => (
           <tr className="osiris-row">
-            <td className="px-4 py-2 font-mono text-xs text-white">{d.model}</td>
+            <td className="px-4 py-2 font-mono text-xs text-white">
+              {d.model}
+              {/* Identifiant matériel du constructeur : c'est lui qui sépare un
+                  ThinkPad T15 (20S6/20S7) d'un T15g (20UR/20US), que le nom confond. */}
+              {d.hw_ids && (
+                <span className="ml-2 font-mono text-[10px] uppercase text-slate-500" title="Identifiant matériel constructeur">{d.hw_ids}</span>
+              )}
+            </td>
             <td className="px-4 py-2 font-mono text-xs text-slate-500">{d.os_code}</td>
             <td className="px-4 py-2 font-mono text-xs text-slate-600 whitespace-nowrap">{d.size_mb ? `${d.size_mb} MB` : '—'}</td>
             <td className="px-4 py-2">

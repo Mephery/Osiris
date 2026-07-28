@@ -146,10 +146,29 @@ def _make_startnet_cmd() -> bytes:
         "if not defined OSSERIAL echo [OSIRIS] Numero de serie illisible - repli sur l'identification par MAC",
         "if defined OSSERIAL echo [OSIRIS] Numero de serie : %OSSERIAL%",
         "",
+        "REM -- Identifiant materiel constructeur, pour choisir le bon pack de pilotes.",
+        "REM Chez Lenovo c'est le MTM ('20S6CTO1WW') : ses 4 premiers caracteres sont",
+        "REM le Machine Type, seule facon fiable de distinguer un T15 (20S6/20S7) d'un",
+        "REM T15g (20UR/20US) - le nom commercial, lui, les confond a une lettre pres.",
+        "REM Chez Dell/HP il vaut le nom commercial, ce qui ne gene pas : le",
+        "REM rapprochement par nom y fonctionne deja.",
+        "REM Best-effort comme le serial : en cas d'echec OSSYSID reste vide.",
+        "set OSSYSID=",
+        "wmic csproduct get name /value 2>nul | find \"Name=\" > X:\\osiris-sid.txt 2>nul",
+        "if exist X:\\osiris-sid.txt for /f \"usebackq tokens=2 delims==\" %%s in (\"X:\\osiris-sid.txt\") do if not defined OSSYSID set OSSYSID=%%s",
+        "del X:\\osiris-sid.txt >nul 2>&1",
+        ":trimsid",
+        "if not defined OSSYSID goto sidready",
+        "if not \"%OSSYSID:~-1%\"==\" \" goto sidready",
+        "set OSSYSID=%OSSYSID:~0,-1%",
+        "goto trimsid",
+        ":sidready",
+        "if defined OSSYSID echo [OSIRIS] Identifiant materiel : %OSSYSID%",
+        "",
         "REM -- Identification de la machine (script personnalise par machine)",
         "REM Le serial prime cote serveur ; a defaut OSIRIS retombe sur le lookup IP->MAC.",
         "echo [OSIRIS] Identification de la machine...",
-        f"X:\\curl.exe -sf --connect-timeout 15 -o X:\\osiris-machine.cmd \"{OSIRIS_BASE_URL}/winpe-auto?serial=%OSSERIAL%\" 2>nul",
+        f"X:\\curl.exe -sf --connect-timeout 15 -o X:\\osiris-machine.cmd \"{OSIRIS_BASE_URL}/winpe-auto?serial=%OSSERIAL%&sysid=%OSSYSID%\" 2>nul",
         "if not errorlevel 1 (",
         "    echo [OSIRIS] Script personnalise recu - lancement...",
         "    call X:\\osiris-machine.cmd",
@@ -526,6 +545,22 @@ async def _extract_driver_archive(archive_path: str, dest_dir: str, label: str):
         )
 
 
+def _hw_ids(values) -> str:
+    """Normalise des identifiants matériel en chaîne triée, minuscule, sans doublon.
+
+    Les trois constructeurs publient un identifiant qui désigne le matériel sans
+    ambiguïté, là où le nom commercial en laisse (ThinkPad T15 = 20S6/20S7,
+    T15**g** = 20UR/20US : une lettre d'écart pour deux machines différentes).
+    """
+    out = set()
+    for v in values:
+        for part in str(v or "").replace(";", ",").split(","):
+            part = part.strip().lower()
+            if part:
+                out.add(part)
+    return ",".join(sorted(out))
+
+
 async def sync_dell_catalog(ctx):
     """
     Télécharge le catalogue Dell (fichier CAB ~300 KB), l'extrait, parse le XML,
@@ -593,6 +628,7 @@ async def sync_dell_catalog(ctx):
                     "os_code":      os_code,
                     "download_url": url,
                     "size_mb":      size_mb,
+                    "hw_ids":       _hw_ids([model_el.get("systemID")]),
                 })
 
     # ── 4. Upsert : mettre à jour les fiches existantes, insérer les nouvelles ──
@@ -611,6 +647,7 @@ async def sync_dell_catalog(ctx):
                 existing.model           = p["model"]
                 existing.download_url    = p["download_url"]
                 existing.size_mb         = p["size_mb"]
+                existing.hw_ids          = p["hw_ids"]
                 existing.catalog_updated = datetime.now(timezone.utc)
                 # status et local_path intentionnellement préservés
                 session.add(existing)
@@ -739,6 +776,20 @@ async def sync_hp_catalog(ctx):
     catalog  = root.find("HPClientDriverPackCatalog")
     softpaqs = catalog.find("SoftPaqList") if catalog is not None else None
 
+    # HP publie les identifiants de carte mère dans une liste séparée, reliée aux
+    # SoftPaq par leur id. On la replie en table SoftPaqId -> {SystemId}.
+    sysid_by_softpaq: dict[str, set[str]] = {}
+    pack_list = catalog.find("ProductOSDriverPackList") if catalog is not None else None
+    for entry in (pack_list or []):
+        sp_id = (entry.findtext("SoftPaqId") or "").strip()
+        if not sp_id:
+            continue
+        sysid_by_softpaq.setdefault(sp_id, set()).update(
+            p.strip().lower()
+            for p in (entry.findtext("SystemId") or "").split(",")
+            if p.strip()
+        )
+
     packs: list[dict] = []
     os_re     = re.compile(r"[Ww]in(?:dows)?\s*(10|11)", re.IGNORECASE)
     suffix_re = re.compile(r"\s+[Ww]in(?:dows)?.*$", re.IGNORECASE)
@@ -766,6 +817,7 @@ async def sync_hp_catalog(ctx):
             "os_code":      os_code,
             "download_url": url,
             "size_mb":      size // 1024 // 1024,
+            "hw_ids":       _hw_ids(sysid_by_softpaq.get(sp.findtext("Id", "").strip(), [])),
         })
 
     with Session(engine) as session:
@@ -783,6 +835,7 @@ async def sync_hp_catalog(ctx):
                 existing.model           = p["model"]
                 existing.download_url    = p["download_url"]
                 existing.size_mb         = p["size_mb"]
+                existing.hw_ids          = p["hw_ids"]
                 existing.catalog_updated = datetime.now(timezone.utc)
                 session.add(existing)
             else:
@@ -823,6 +876,10 @@ async def sync_lenovo_catalog(ctx):
         model_name = model_el.get("name", "").strip()
         if not model_name:
             continue
+        # <Types><Type>20S6</Type><Type>20S7</Type></Types> = Machine Types Lenovo,
+        # les 4 premiers caractères du MTM lu sur la machine.
+        types_el = model_el.find("Types")
+        hw_ids   = _hw_ids([t.text for t in types_el] if types_el is not None else [])
         for pack_el in model_el.findall(".//SCCM"):
             os_attr  = pack_el.get("os", "")
             os_code  = "Windows11" if "11" in os_attr else "Windows10" if "10" in os_attr else None
@@ -838,6 +895,7 @@ async def sync_lenovo_catalog(ctx):
                 "os_code":      os_code,
                 "download_url": url,
                 "size_mb":      0,
+                "hw_ids":       hw_ids,
             })
 
     with Session(engine) as session:
@@ -854,6 +912,7 @@ async def sync_lenovo_catalog(ctx):
             if existing:
                 existing.model           = p["model"]
                 existing.download_url    = p["download_url"]
+                existing.hw_ids          = p["hw_ids"]
                 existing.catalog_updated = datetime.now(timezone.utc)
                 session.add(existing)
             else:

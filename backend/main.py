@@ -2318,7 +2318,7 @@ def _mac_from_wire_mac(wire_mac: Optional[str]) -> Optional[str]:
 
 
 @app.get("/winpe-auto")
-def get_winpe_script_auto(request: Request, serial: str = ""):
+def get_winpe_script_auto(request: Request, serial: str = "", sysid: str = ""):
     """Identifie la machine et retourne son script de déploiement.
 
     Trois voies, dans cet ordre :
@@ -2352,6 +2352,16 @@ def get_winpe_script_auto(request: Request, serial: str = ""):
     # reste en mode capture. Ne JAMAIS retomber sur le deploiement normal, qui
     # repartitionnerait le disque de la machine de reference. La seule sortie du
     # mode capture est la suppression explicite du job (bouton dans l'UI).
+    # Identifiant matériel : mémorisé dès WinPE, donc disponible pour choisir le
+    # pack de pilotes de CE déploiement — pas seulement du suivant.
+    if sysid.strip():
+        with Session(engine) as session:
+            machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+            if machine and machine.hw_sysid != sysid.strip():
+                machine.hw_sysid = sysid.strip()[:100]
+                session.add(machine)
+                session.commit()
+
     if mac in _capture_jobs:
         return _build_capture_script(mac)
     return _build_winpe_script(mac)
@@ -2401,14 +2411,45 @@ def _build_winpe_script(mac: str) -> Response:
     return Response(content=content, media_type="text/plain")
 
 
+def _pack_for_sysid(session: Session, sysid: str) -> Optional[DriverPack]:
+    """Pack prêt dont le catalogue revendique cet identifiant matériel.
+
+    Les constructeurs publient un identifiant qui lève l'ambiguïté des noms
+    commerciaux : chez Lenovo, un ThinkPad T15 est un Machine Type 20S6/20S7 et
+    un T15**g** un 20UR/20US. Le MTM remonté par la machine ("20S6CTO1WW")
+    commence par ce code — on compare donc sur le préfixe de 4 caractères.
+    """
+    sysid = (sysid or "").strip().lower()
+    if not sysid:
+        return None
+    candidates = [sysid]
+    if len(sysid) > 4:
+        candidates.append(sysid[:4])   # MTM Lenovo -> Machine Type
+
+    packs = session.exec(
+        select(DriverPack)
+        .where(DriverPack.status == "ready", DriverPack.hw_ids != "")
+        .order_by(DriverPack.os_code.desc())   # Windows11 avant Windows10
+    ).all()
+    for pack in packs:
+        ids = {i for i in pack.hw_ids.split(",") if i}
+        if ids & set(candidates):
+            return pack
+    return None
+
+
 def _resolve_driver_dir(machine: Machine) -> str:
     """Chemin du dossier de drivers a injecter, relatif au partage SMB (Z:), en
     notation Windows (backslashes). 'drivers' = tout le dossier (fallback historique) ;
     'drivers\\<vendor>\\<key>' = injection ciblee du pack explicite de la machine."""
-    if not machine.driver_pack_id:
-        return "drivers"
     with Session(engine) as session:
-        pack = session.get(DriverPack, machine.driver_pack_id)
+        pack = (
+            session.get(DriverPack, machine.driver_pack_id)
+            if machine.driver_pack_id
+            # Aucun pack choisi a la main : plutot que de deverser les ~15 GB du
+            # dossier entier, on tente l'identifiant materiel remonte par WinPE.
+            else _pack_for_sysid(session, machine.hw_sysid)
+        )
     if not pack or pack.status != "ready" or not pack.local_path:
         return "drivers"
     share = WIN_SHARE_PATH.rstrip("/")
@@ -2593,7 +2634,7 @@ def list_driver_packs(vendor: Optional[str] = None, os_code: Optional[str] = Non
                 "id": p.id, "vendor": p.vendor, "model": p.model,
                 "os_code": p.os_code, "size_mb": p.size_mb,
                 "status": p.status, "local_path": p.local_path,
-                "error": p.error,
+                "error": p.error, "hw_ids": p.hw_ids,
                 "download_url": p.download_url,
                 "catalog_updated": p.catalog_updated.isoformat(),
             }
@@ -2638,14 +2679,25 @@ async def download_pack(pack_id: int, current_user: User = Depends(require_admin
 
 
 @app.get("/drivers/suggest")
-def suggest_driver(vendor: str, model: str):
+def suggest_driver(vendor: str, model: str, sysid: str = ""):
     """
     Retourne le meilleur pack de drivers pour un couple vendeur+modèle.
     Appelé par osiris-firstboot.ps1 avec les infos matériel détectées par Windows.
     Préfère Windows 11 à Windows 10, et les packs déjà téléchargés (ready).
+
+    `sysid` (identifiant matériel constructeur) prime sur le nom quand il est
+    fourni : c'est le seul critère qui distingue un ThinkPad T15 d'un T15g.
     """
     key = normalize_model(model)
     with Session(engine) as session:
+        exact = _pack_for_sysid(session, sysid)
+        if exact:
+            return {
+                "id": exact.id, "vendor": exact.vendor, "model": exact.model,
+                "os_code": exact.os_code, "size_mb": exact.size_mb,
+                "status": exact.status, "download_url": exact.download_url,
+                "local_path": exact.local_path, "matched_on": "hw_id",
+            }
         # Stratégie de recherche bidirectionnelle :
         # 1. catalog_key.startswith(query)  → "optiplex7090tower" pour query "optiplex7090"
         # 2. query.startswith(catalog_key)  → "optiplex7090" pour query "optiplex7090tower"
@@ -2678,7 +2730,7 @@ def suggest_driver(vendor: str, model: str):
             "id": p.id, "vendor": p.vendor, "model": p.model,
             "os_code": p.os_code, "size_mb": p.size_mb,
             "status": p.status, "download_url": p.download_url,
-            "local_path": p.local_path,
+            "local_path": p.local_path, "matched_on": "model_name",
         }
 
 
