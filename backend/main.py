@@ -2545,6 +2545,7 @@ def list_driver_packs(vendor: Optional[str] = None, os_code: Optional[str] = Non
                 "id": p.id, "vendor": p.vendor, "model": p.model,
                 "os_code": p.os_code, "size_mb": p.size_mb,
                 "status": p.status, "local_path": p.local_path,
+                "error": p.error,
                 "download_url": p.download_url,
                 "catalog_updated": p.catalog_updated.isoformat(),
             }

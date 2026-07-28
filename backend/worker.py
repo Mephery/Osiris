@@ -446,6 +446,85 @@ DELL_BASE_URL     = "https://downloads.dell.com/"
 DELL_TARGET_OS    = {"Windows10", "Windows11"}
 DRIVERS_BASE_PATH = "/srv/data/windows/drivers"
 
+# Dossiers pseudo-racines produits par innoextract : ils correspondent aux
+# constantes Inno Setup ({app}, {tmp}, {code:GetExtractPath}...) et non a une
+# vraie arborescence de pilotes. On remonte leur contenu d'un cran pour obtenir
+# la meme forme que les packs Dell/HP : <model_key>/Audio/, /Chipset/, /Network/...
+_INNO_PSEUDO_DIRS = {"app", "tmp"}
+
+
+def _is_inno_setup(path: str) -> bool:
+    """Detecte un installeur Inno Setup (cas de TOUS les packs Lenovo).
+
+    7z n'a aucun handler Inno : il ouvre le .exe comme un simple binaire PE et
+    en ressort les ressources ([0], CERTIFICATE...) sans jamais toucher au
+    payload. Le pack parait extrait alors qu'il ne contient aucun pilote.
+    """
+    with open(path, "rb") as f:
+        head = f.read(512 * 1024)
+    return b"Inno Setup" in head
+
+
+def _move_merge(src: str, dst: str):
+    """Deplace src vers dst en fusionnant les dossiers deja presents.
+
+    shutil.move() seul ne suffit pas : si dst existe deja, il deposerait src
+    *a l'interieur* (dest/Audio/Audio) au lieu de fusionner les deux.
+    """
+    if not os.path.exists(dst):
+        shutil.move(src, dst)
+    elif os.path.isdir(src) and os.path.isdir(dst):
+        for child in os.listdir(src):
+            _move_merge(os.path.join(src, child), os.path.join(dst, child))
+        os.rmdir(src)
+    else:
+        os.replace(src, dst)
+
+
+def _flatten_inno_output(staging_dir: str, dest_dir: str):
+    """Deplace le contenu de staging_dir vers dest_dir en sautant les pseudo-racines."""
+    os.makedirs(dest_dir, exist_ok=True)
+    for entry in os.listdir(staging_dir):
+        src = os.path.join(staging_dir, entry)
+        # "code$GetExtractPath$" (constante {code:...}), "app", "tmp" : on remonte
+        # leur contenu. Tout le reste est deplace tel quel.
+        if os.path.isdir(src) and ("$" in entry or entry in _INNO_PSEUDO_DIRS):
+            for child in os.listdir(src):
+                _move_merge(os.path.join(src, child), os.path.join(dest_dir, child))
+        else:
+            _move_merge(src, os.path.join(dest_dir, entry))
+
+
+def _count_inf(path: str) -> int:
+    """Compte les .inf d'une arborescence — un pack sans .inf n'installe rien."""
+    total = 0
+    for _, _, files in os.walk(path):
+        total += sum(1 for f in files if f.lower().endswith(".inf"))
+    return total
+
+
+async def _extract_driver_archive(archive_path: str, dest_dir: str, label: str):
+    """Extrait un pack de pilotes vers dest_dir, en choisissant l'outil selon le format."""
+    if _is_inno_setup(archive_path):
+        staging_dir = f"{archive_path}.d"
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        os.makedirs(staging_dir, exist_ok=True)
+        try:
+            await _run(
+                ["/usr/bin/innoextract", "-e", "-s", "--collisions=overwrite",
+                 "-d", staging_dir, archive_path],
+                f"innoextract {label}",
+            )
+            _flatten_inno_output(staging_dir, dest_dir)
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+    else:
+        os.makedirs(dest_dir, exist_ok=True)
+        await _run(
+            ["/usr/bin/7z", "x", archive_path, f"-o{dest_dir}", "-y"],
+            f"7z {label}",
+        )
+
 
 async def sync_dell_catalog(ctx):
     """
@@ -554,7 +633,10 @@ async def sync_dell_catalog(ctx):
 async def download_driver_pack(ctx, pack_id: int):
     """
     Télécharge et extrait le pack de drivers d'un modèle précis
-    dans le dossier Samba /srv/data/windows/drivers/dell/<model_key>/.
+    dans le dossier Samba /srv/data/windows/drivers/<vendor>/<model_key>/.
+
+    Le format varie selon le constructeur : CAB auto-extractible chez Dell et HP,
+    installeur Inno Setup chez Lenovo. _extract_driver_archive choisit l'outil.
 
     Analogie : on emprunte enfin le livre et on le range dans notre étagère locale,
     prêt à être consulté par WinPE pendant les déploiements.
@@ -571,44 +653,60 @@ async def download_driver_pack(ctx, pack_id: int):
         vendor        = pack.vendor
         model_key     = pack.model_key
 
-    dest_dir = os.path.join(DRIVERS_BASE_PATH, vendor, model_key)
-    cab_path = f"/tmp/osiris_drivers_{pack_id_}.cab"
+    dest_dir     = os.path.join(DRIVERS_BASE_PATH, vendor, model_key)
+    staging_dest = f"{dest_dir}.new"   # voisin de dest_dir => rename atomique
+    archive_path = f"/tmp/osiris_drivers_{pack_id_}.bin"   # CAB (Dell/HP) ou EXE (Lenovo)
 
-    def _set_status(status: str, local_path: str = ""):
+    def _set_status(status: str, local_path: str = "", error: str = ""):
         with Session(engine) as s:
             p = s.get(DriverPack, pack_id_)
             p.status = status
+            p.error  = error[:300]
             if local_path:
                 p.local_path = local_path
             s.add(p)
             s.commit()
 
     try:
-        # ── 1. Télécharger le CAB (peut être 1-3 GB, patience) ───────────────
+        # ── 1. Télécharger l'archive (peut être 1-3 GB, patience) ────────────
         async with aiohttp.ClientSession() as http:
             async with http.get(download_url) as resp:
                 resp.raise_for_status()
-                with open(cab_path, "wb") as f:
+                with open(archive_path, "wb") as f:
                     async for chunk in resp.content.iter_chunked(4 * 1024 * 1024):
                         f.write(chunk)
 
-        # ── 2. Extraire les INF/SYS dans le dossier Samba ────────────────────
-        # 7z extrait le CAB Dell — les sous-dossiers par type de composant
-        # (audio, network, video...) sont conservés grâce à l'option 'x'.
-        os.makedirs(dest_dir, exist_ok=True)
-        await _run(
-            ["/usr/bin/7z", "x", cab_path, f"-o{dest_dir}", "-y"],
-            f"extract driver pack {pack_id_}",
-        )
+        # ── 2. Extraire dans un dossier voisin, jamais directement dans dest ──
+        # Un re-telechargement ne doit pas pouvoir casser un pack qui marche :
+        # on extrait a cote, on valide, et on ne permute qu'a la fin. Si quoi que
+        # ce soit echoue en route, l'ancien pack reste intact et utilisable.
+        shutil.rmtree(staging_dest, ignore_errors=True)
+        await _extract_driver_archive(archive_path, staging_dest, f"driver pack {pack_id_}")
 
-        os.unlink(cab_path)
+        # ── 3. Valider : un pack sans .inf n'installe aucun pilote ───────────
+        # Sans ce garde-fou, un pack vide passe "ready", le deploiement se
+        # deroule normalement et la machine arrive sans reseau ni chipset.
+        inf_count = _count_inf(staging_dest)
+        if inf_count == 0:
+            raise RuntimeError(
+                "extraction sans aucun fichier .inf — pack inutilisable"
+            )
+
+        # ── 4. Permuter : rename sur le meme filesystem, donc atomique ────────
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        os.makedirs(os.path.dirname(dest_dir), exist_ok=True)
+        os.rename(staging_dest, dest_dir)
+
+        os.unlink(archive_path)
         _set_status("ready", local_path=dest_dir)
-        return {"status": "ready", "path": dest_dir}
+        return {"status": "ready", "path": dest_dir, "inf_count": inf_count}
 
     except Exception as exc:
-        if os.path.exists(cab_path):
-            os.unlink(cab_path)
-        _set_status("error")
+        if os.path.exists(archive_path):
+            os.unlink(archive_path)
+        shutil.rmtree(f"{archive_path}.d", ignore_errors=True)
+        shutil.rmtree(staging_dest, ignore_errors=True)
+        _set_status("error", error=str(exc))
         return {"error": str(exc)[:300]}
 
 

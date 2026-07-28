@@ -81,6 +81,7 @@ export interface DriverPack {
   size_mb: number;
   status: string;
   local_path: string;
+  error: string;
   download_url: string;
   catalog_updated: string;
 }

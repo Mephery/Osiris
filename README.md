@@ -132,6 +132,17 @@ Au premier démarrage, le backend applique automatiquement les migrations Alembi
 
 Prérequis : Python 3.11+, Node.js 22+, PostgreSQL 14+, Redis.
 
+Outils système utilisés par le worker :
+
+```bash
+sudo apt install p7zip-full innoextract xorriso wimtools
+```
+
+`innoextract` est indispensable aux packs de pilotes **Lenovo** : ils sont livrés
+en installeurs Inno Setup, que 7-Zip ne sait pas ouvrir. Sans lui, l'extraction
+ne produit que les ressources du binaire Windows et le pack ne contient aucun
+pilote (le worker le refuse alors explicitement, cf. contrôle « 0 fichier .inf »).
+
 ```bash
 git clone https://github.com/Mephery/Osiris.git
 cd osiris/backend

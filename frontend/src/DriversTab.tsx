@@ -100,9 +100,13 @@ export function DriversTab({ token }: { token: string }) {
               <span className={`osiris-status-badge ${
                 d.status === 'ready'       ? 'osiris-status--deployed' :
                 d.status === 'downloading' ? 'osiris-status--deploying' :
+                d.status === 'error'       ? 'osiris-status--failed' :
                 d.status === 'failed'      ? 'osiris-status--failed' :
                                              'osiris-status--pending'
               }`}>{d.status}</span>
+              {d.error && (
+                <p className="mt-1 max-w-xs font-mono text-[10px] leading-tight text-rose-400" title={d.error}>{d.error}</p>
+              )}
             </td>
             <td className="px-4 py-2">
               {d.status !== 'ready' && d.status !== 'downloading' && (

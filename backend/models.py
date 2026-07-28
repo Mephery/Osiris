@@ -219,7 +219,8 @@ class DriverPack(SQLModel, table=True):
     download_url: str                     # URL complète chez Dell
     size_mb: int = Field(default=0)
     local_path: str = Field(default="")  # /srv/data/windows/drivers/dell/optiplex7090/
-    status: str = Field(default="available")  # available / downloading / ready
+    status: str = Field(default="available")  # available / downloading / ready / error
+    error: str = Field(default="")        # raison de l'échec quand status == "error"
     catalog_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
