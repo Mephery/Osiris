@@ -22,19 +22,21 @@ from models import DriverPack, OsImage, engine, normalize_model  # noqa: E402
 OSIRIS_BASE_URL = os.environ.get("OSIRIS_BASE_URL", "http://10.0.0.1")
 OSIRIS_IP       = os.environ.get("OSIRIS_IP", "10.0.0.1")
 
-# Pilotes rebakes dans CHAQUE boot.wim regenere (arborescence : <path>/net/<pilote>/*.inf).
-# Monte en X:\drivers\ dans WinPE — startnet.cmd charge X:\drivers\net au demarrage.
+# Pilotes reseau supplementaires pour WinPE (arborescence : <path>/net/<pilote>/*.inf).
+#
+# Ils ne sont PLUS bakes dans boot.wim. Historique : bakes a la main le 2026-07-16,
+# puis reinjectes automatiquement le 2026-07-21 — et le 2026-07-22 on a constate que
+# le WIM ainsi produit ne demarre plus (le poste telecharge tout puis revient au
+# Startup Menu, sur ZBook Firefly G8), alors qu'il passe 'wimlib verify' et garde son
+# Boot Index. Le seul ecart avec un WIM sain etait le dossier racine \drivers\, et
+# wimboot patche justement le repertoire du WIM pour y injecter ses fichiers.
+#
+# Desormais c'est wimboot qui les livre : tout fichier 'initrd' supplementaire est
+# depose dans \Windows\System32\ de l'image demarree, sans modifier boot.wim (voir
+# _winpe_driver_initrd_lines dans main.py). startnet.cmd fait ensuite le drvload.
+# Pour ajouter un pilote : le deposer dans WINPE_DRIVERS_PATH/net/<nom>/ (INF+SYS+CAT),
+# il est servi au prochain boot PXE — plus aucune regeneration de WIM necessaire.
 WINPE_DRIVERS_PATH = os.environ.get("WINPE_DRIVERS_PATH", "/srv/data/windows/winpe-drivers")
-
-# DESACTIVE le 2026-07-22. La reinjection produit un boot.wim que wimboot n'arrive
-# plus a demarrer : le poste telecharge tous les fichiers puis revient au Startup
-# Menu sans lancer WinPE (constate sur ZBook Firefly G8). Le MEME boot.wim sans
-# injection demarre normalement, et le WIM injecte passe pourtant 'wimlib verify'
-# et garde son Boot Index — la cause reste a identifier.
-# Consequence assumee : les machines dont la carte reseau n'est pas inbox (ThinkPad
-# T15...) reperdent le reseau en WinPE tant que ce n'est pas resolu.
-# Mettre WINPE_INJECT_DRIVERS=1 pour retester une fois une piste trouvee.
-WINPE_INJECT_DRIVERS = os.environ.get("WINPE_INJECT_DRIVERS", "0") == "1"
 
 
 def _make_startnet_cmd() -> bytes:
@@ -50,14 +52,22 @@ def _make_startnet_cmd() -> bytes:
     lines = [
         "@echo off",
         "",
-        "REM -- Chargement des pilotes reseau bakes dans le WIM (X:\\drivers\\net)",
+        "REM -- Chargement des pilotes reseau supplementaires",
         "REM WinPE ne dispose que des pilotes *inbox* de l'ISO Windows. Sur les",
         "REM machines dont la carte n'est pas reconnue (Realtek, Intel recentes...),",
         "REM il n'y a AUCUN reseau => blocage total. On ne peut pas aller chercher le",
         "REM pilote sur le partage : il faut le reseau pour ca (oeuf et poule).",
-        "REM => les pilotes reseau sont bakes dans boot.wim et charges ici.",
+        "REM",
+        "REM Les pilotes sont livres par wimboot, qui injecte les fichiers passes en",
+        "REM 'initrd' supplementaires dans \\Windows\\System32\\ de l'image demarree.",
+        "REM On ne touche donc PLUS au boot.wim : l'y avoir ajoute un dossier racine",
+        "REM \\drivers\\ (2026-07-22) produisait un WIM que wimboot ne demarrait plus.",
+        "REM WinPE n'a qu'un seul .inf d'origine ici (wdscapture.inf) : balayer le",
+        "REM dossier est donc sans risque, un drvload qui echoue est silencieux.",
+        "echo [OSIRIS] Chargement des pilotes reseau...",
+        "for %%i in (X:\\Windows\\System32\\*.inf) do drvload \"%%i\" >nul 2>&1",
+        "REM Repli : anciens boot.wim ou les pilotes avaient ete bakes sous \\drivers\\net",
         "if exist X:\\drivers\\net (",
-        "    echo [OSIRIS] Chargement des pilotes reseau...",
         "    for /r X:\\drivers\\net %%i in (*.inf) do drvload \"%%i\" >nul 2>&1",
         ")",
         "wpeinit",
@@ -266,20 +276,10 @@ async def _process_windows(iso_path: str, _update, wim_name: str = ""):
     os.unlink(startnet)
     os.unlink(winpeshl)
 
-    # ── 2bis. Reinjection des pilotes WinPE persistants ─────────────────────
-    # WinPE ne dispose que des pilotes *inbox* de l'ISO. Sur les machines dont la
-    # carte reseau n'est pas reconnue, il n'y a AUCUN reseau => blocage total
-    # (cf. startnet.cmd, qui charge X:\drivers\net au demarrage).
-    # Ces pilotes etaient bakes A LA MAIN : toute regeneration de boot.wim (ajout
-    # d'une nouvelle ISO Windows) les faisait disparaitre silencieusement. On les
-    # reinjecte donc systematiquement depuis un dossier persistant.
-    # Pour ajouter un pilote : le deposer dans WINPE_DRIVERS_PATH/net/<nom>/ (INF+SYS+CAT).
-    if WINPE_INJECT_DRIVERS and os.path.isdir(WINPE_DRIVERS_PATH) and os.listdir(WINPE_DRIVERS_PATH):
-        await _run(
-            ["/usr/bin/wimlib-imagex", "update", boot_wim, "2",
-             "--command", f"add {WINPE_DRIVERS_PATH} /drivers"],
-            "wimlib inject persistent WinPE drivers",
-        )
+    # NOTE : on n'injecte PLUS les pilotes reseau dans boot.wim. Ils sont livres
+    # au demarrage par wimboot (cf. _winpe_driver_initrd_lines dans main.py), qui
+    # les depose dans \Windows\System32\ sans toucher au WIM. Y ajouter un dossier
+    # racine \drivers\ produisait un WIM que wimboot ne demarrait plus.
 
     os.replace(boot_wim, f"{winpe_dir}/sources/boot.wim")
 

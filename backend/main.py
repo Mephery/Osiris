@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 from typing import Optional
+from urllib.parse import quote
 from xml.sax.saxutils import escape
 from passlib.hash import sha512_crypt
 from fastapi import HTTPException, FastAPI, Request, Response, Depends, WebSocket, WebSocketDisconnect, BackgroundTasks
@@ -111,6 +112,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Pilotes réseau WinPE : servis à wimboot au démarrage PXE (voir _winpe_chain_lines).
+# Monté AVANT /static, sinon le mount le plus générique capterait le chemin.
+WINPE_DRIVERS_PATH = os.environ.get("WINPE_DRIVERS_PATH", "/srv/data/windows/winpe-drivers")
+if os.path.isdir(WINPE_DRIVERS_PATH):
+    app.mount("/static/winpe-drivers",
+              StaticFiles(directory=WINPE_DRIVERS_PATH), name="winpe-drivers")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -1234,6 +1242,45 @@ def health():
 
 # ── Boot iPXE ──────────────────────────────────────────────────────────────────
 
+_winpe_log = logging.getLogger("osiris.winpe")
+
+
+def _winpe_driver_initrd_lines() -> str:
+    """Lignes iPXE livrant les pilotes réseau WinPE à wimboot.
+
+    wimboot injecte tout fichier `initrd` supplémentaire dans `\\Windows\\System32\\`
+    de l'image démarrée, sans jamais modifier boot.wim. C'est ce qui remplace
+    l'ancienne cuisson des pilotes dans le WIM : y ajouter un dossier racine
+    `\\drivers\\` produisait un WIM que wimboot ne démarrait plus (constaté le
+    2026-07-22 sur ZBook Firefly G8), tout en obligeant à réécrire 600 Mo à
+    chaque import d'ISO. startnet.cmd fait ensuite `drvload` sur ces .inf.
+
+    Les fichiers sont aplatis (System32 est un espace de noms plat) : un .inf et
+    ses .sys/.cat se retrouvent donc côte à côte, ce dont drvload a besoin.
+    """
+    if not os.path.isdir(WINPE_DRIVERS_PATH):
+        return ""
+
+    lines: list[str] = []
+    seen: dict[str, str] = {}
+    for root, _, files in os.walk(WINPE_DRIVERS_PATH):
+        for name in sorted(files):
+            full = os.path.join(root, name)
+            rel  = os.path.relpath(full, WINPE_DRIVERS_PATH)
+            # Collision de noms : System32 étant plat, deux pilotes homonymes
+            # s'écraseraient en silence. On garde le premier et on le signale.
+            if name.lower() in seen:
+                _winpe_log.warning(
+                    "Pilote WinPE ignoré (nom déjà utilisé par %s) : %s",
+                    seen[name.lower()], rel,
+                )
+                continue
+            seen[name.lower()] = rel
+            url = f"{OSIRIS_BASE_URL}/static/winpe-drivers/{quote(rel)}"
+            lines.append(f"initrd --name {name} {url} {name}\n")
+    return "".join(lines)
+
+
 def _winpe_chain_lines() -> str:
     """Lignes iPXE qui chargent WinPE via wimboot (identiques pour toute machine)."""
     return (
@@ -1242,6 +1289,7 @@ def _winpe_chain_lines() -> str:
         f"initrd --name BCD {OSIRIS_BASE_URL}/static/winpe/boot/bcd BCD\n"
         f"initrd --name boot.sdi {OSIRIS_BASE_URL}/static/winpe/boot/boot.sdi boot.sdi\n"
         f"initrd --name boot.wim {OSIRIS_BASE_URL}/static/winpe/sources/boot.wim boot.wim\n"
+        + _winpe_driver_initrd_lines()
     )
 
 

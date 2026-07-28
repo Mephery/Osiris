@@ -652,6 +652,29 @@ Les fichiers Windows sont servis via Samba (requis : protocole NT1 pour WinPE) :
    ntlm auth = yes
 ```
 
+### Pilotes réseau pour WinPE
+
+WinPE ne dispose que des pilotes *inbox* de l'ISO Windows. Sur une machine dont la
+carte réseau n'est pas reconnue (ThinkPad T15, Realtek récentes…), WinPE démarre
+**sans réseau** et le déploiement se bloque — sans pouvoir aller chercher le pilote
+sur le partage, puisqu'il faut justement le réseau pour ça.
+
+Pour ajouter un pilote, déposer ses fichiers (INF + SYS + CAT) dans :
+
+```
+/srv/data/windows/winpe-drivers/net/<nom-du-pilote>/
+```
+
+Rien d'autre à faire : OSIRIS les passe à wimboot au démarrage PXE, qui les dépose
+dans `\Windows\System32\` de l'image démarrée, et `startnet.cmd` fait le `drvload`
+avant `wpeinit`. **`boot.wim` n'est jamais modifié** — l'y avoir baké un dossier
+`\drivers\` produisait un WIM que wimboot ne démarrait plus. Un pilote ajouté est
+donc actif au boot suivant, sans régénérer la moindre image.
+
+⚠️ `\Windows\System32` est un espace de noms plat : deux pilotes ne peuvent pas
+avoir de fichiers de même nom. OSIRIS ignore le doublon et le signale dans les logs
+de l'API.
+
 ---
 
 ## Caddyfile - routes requises
