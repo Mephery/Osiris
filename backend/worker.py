@@ -167,8 +167,15 @@ def _make_startnet_cmd() -> bytes:
         "",
         "REM -- Identification de la machine (script personnalise par machine)",
         "REM Le serial prime cote serveur ; a defaut OSIRIS retombe sur le lookup IP->MAC.",
+        "REM ATTENTION : ne JAMAIS coller ces valeurs dans l'URL a la main. L'identifiant",
+        "REM materiel contient des espaces des que ce n'est pas du Lenovo ('Latitude 5420',",
+        "REM 'Standard PC (Q35 + ICH9, 2009)'...) : l'URL devient malformee, curl sort en",
+        "REM erreur 3 et la machine bascule sur le script generique sans etre reconnue.",
+        "REM --get + --data-urlencode laissent curl encoder proprement chaque valeur.",
         "echo [OSIRIS] Identification de la machine...",
-        f"X:\\curl.exe -sf --connect-timeout 15 -o X:\\osiris-machine.cmd \"{OSIRIS_BASE_URL}/winpe-auto?serial=%OSSERIAL%&sysid=%OSSYSID%\" 2>nul",
+        f"X:\\curl.exe -sf --connect-timeout 15 -o X:\\osiris-machine.cmd --get "
+        f"--data-urlencode \"serial=%OSSERIAL%\" --data-urlencode \"sysid=%OSSYSID%\" "
+        f"\"{OSIRIS_BASE_URL}/winpe-auto\" 2>nul",
         "if not errorlevel 1 (",
         "    echo [OSIRIS] Script personnalise recu - lancement...",
         "    call X:\\osiris-machine.cmd",

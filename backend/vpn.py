@@ -69,6 +69,20 @@ def render_auth_file(username: str, password: str) -> str:
     return f"{username}\n{password}\n"
 
 
+def lan_gateway() -> str:
+    """Passerelle par défaut du réseau de déploiement.
+
+    Doit correspondre au `dhcp-option=3` de la configuration dnsmasq principale.
+    À défaut d'être déclarée, on la déduit du réseau d'OSIRIS en .1, convention
+    quasi universelle — mais mieux vaut la poser explicitement dans .env.
+    """
+    gw = os.environ.get("OSIRIS_LAN_GATEWAY", "").strip()
+    if gw:
+        return gw
+    server_ip = os.environ.get("OSIRIS_IP", "10.0.0.1")
+    return ".".join(server_ip.split(".")[:3] + ["1"])
+
+
 def render_dnsmasq_snippet(session: Session) -> str:
     """Construit le snippet dnsmasq qui route les domaines AD des clients vers
     leur DNS interne via le bon tunnel, et pousse les routes classless (option
@@ -89,7 +103,15 @@ def render_dnsmasq_snippet(session: Session) -> str:
             routes.append(tunnel.route_cidr)
     if routes:
         server_ip = os.environ.get("OSIRIS_IP", "10.0.0.1")
-        pairs = ",".join(f"{cidr},{server_ip}" for cidr in routes)
+        # ⚠️ RFC 3442 : un client qui reçoit l'option 121 DOIT ignorer l'option 3
+        # (routeur). Pousser les seules routes VPN prive donc les machines de leur
+        # passerelle par défaut — plus d'Internet, et en PXE un « Network
+        # unreachable » dès que le serveur n'est pas sur le même sous-réseau.
+        # La route par défaut doit donc être RÉPÉTÉE ici, systématiquement.
+        pairs = ",".join(
+            [f"0.0.0.0/0,{lan_gateway()}"]
+            + [f"{cidr},{server_ip}" for cidr in routes]
+        )
         lines.append(f"dhcp-option=121,{pairs}")
     return "\n".join(lines) + "\n"
 
