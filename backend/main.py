@@ -1243,6 +1243,7 @@ def health():
 # ── Boot iPXE ──────────────────────────────────────────────────────────────────
 
 _winpe_log = logging.getLogger("osiris.winpe")
+_hv_log    = logging.getLogger("osiris.hypervisor")
 
 
 def _winpe_driver_initrd_lines() -> str:
@@ -1286,6 +1287,9 @@ def _winpe_chain_lines() -> str:
     return (
         f"kernel {OSIRIS_BASE_URL}/static/wimboot\n"
         f"initrd --name bootmgr {OSIRIS_BASE_URL}/static/winpe/bootmgr bootmgr\n"
+        # bootmgr.efi est le chargeur UEFI. L'exemple de référence de wimboot passe
+        # LES DEUX chargeurs ; on ne servait que celui du BIOS.
+        f"initrd --name bootmgr.efi {OSIRIS_BASE_URL}/static/winpe/bootmgr.efi bootmgr.efi\n"
         f"initrd --name BCD {OSIRIS_BASE_URL}/static/winpe/boot/bcd BCD\n"
         f"initrd --name boot.sdi {OSIRIS_BASE_URL}/static/winpe/boot/boot.sdi boot.sdi\n"
         f"initrd --name boot.wim {OSIRIS_BASE_URL}/static/winpe/sources/boot.wim boot.wim\n"
@@ -3141,6 +3145,29 @@ class VmCreateBody(SQLModel):
     cloud_template_id: Optional[int] = None
 
 
+async def _destroy_vm_quietly(h: Hypervisor, node: str, vm_id: int) -> None:
+    """Détruit une VM après un échec, sans jamais masquer l'erreur d'origine.
+
+    Utilisé pour ne pas laisser de VM à moitié configurée sur l'hyperviseur : ses
+    volumes bloqueraient la réutilisation de l'identifiant par `nextid`.
+    """
+    try:
+        await _proxmox_post(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/status/stop")
+    except Exception:
+        pass   # la VM n'était probablement pas démarrée
+    try:
+        await _proxmox_request(h, "DELETE", f"/api2/json/nodes/{node}/qemu/{vm_id}?purge=1")
+        _hv_log.warning("VM %s détruite après échec de sa configuration", vm_id)
+    except Exception as exc:
+        # Le nettoyage a échoué : on le signale fort, mais on laisse remonter
+        # l'erreur d'origine, qui est celle qui intéresse l'appelant.
+        _hv_log.error(
+            "VM %s laissée sur l'hyperviseur %s — la supprimer à la main et libérer "
+            "ses volumes (« pvesm free <storage>:vm-%s-cloudinit ») : %s",
+            vm_id, node, vm_id, str(exc)[:200],
+        )
+
+
 @app.post("/hypervisors/{hv_id}/create-vm", status_code=201)
 async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends(require_admin)):
     """
@@ -3220,62 +3247,73 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
         upid = clone_result if isinstance(clone_result, str) else str(clone_result)
         await _proxmox_wait_task(h, body.node, upid)
 
-        # Résoudre le profil pour le user-data
-        with Session(engine) as session:
-            profile_obj = session.get(Profile, body.profile_id) if body.profile_id else None
-            if not profile_obj:
-                profile_obj = session.exec(select(Profile).where(Profile.os == body.os)).first()
-            if not profile_obj:
-                profile_obj = Profile(name="_fallback", os=body.os)
+        # Le clone EXISTE desormais sur l'hyperviseur. Toute erreur au-dela doit le
+        # detruire : sinon on laisse une VM fantome et ses volumes derriere soi, et
+        # `nextid` reattribue le meme identifiant a la tentative suivante — qui
+        # echoue alors sur « disk already exists ». Constate 3 fois le 2026-07-29.
+        try:
 
-        profile_tpl = _profile_for_template(profile_obj)
-        linux_apps  = []
-        if profile_obj.app_ids:
+            # Résoudre le profil pour le user-data
             with Session(engine) as session:
-                ids = [int(i) for i in profile_obj.app_ids.split(",") if i.strip().isdigit()]
-                linux_apps = [a for a in session.exec(select(Application)).all()
-                              if a.id in ids and a.apt_package]
+                profile_obj = session.get(Profile, body.profile_id) if body.profile_id else None
+                if not profile_obj:
+                    profile_obj = session.exec(select(Profile).where(Profile.os == body.os)).first()
+                if not profile_obj:
+                    profile_obj = Profile(name="_fallback", os=body.os)
 
-        # Générer le user-data cloud-init
-        osiris_url = os.environ.get("OSIRIS_BASE_URL", "http://osiris:8000")
-        user_data_rendered = jinja_env.get_template("cloud-init-user-data.j2").render(
-            machine={"hostname": body.hostname, "password_hash": "", "mac": mac_plain},
-            profile=profile_tpl,
-            linux_apps=linux_apps,
-            mac=mac_plain,
-            osiris_url=osiris_url,
-        )
+            profile_tpl = _profile_for_template(profile_obj)
+            linux_apps  = []
+            if profile_obj.app_ids:
+                with Session(engine) as session:
+                    ids = [int(i) for i in profile_obj.app_ids.split(",") if i.strip().isdigit()]
+                    linux_apps = [a for a in session.exec(select(Application)).all()
+                                  if a.id in ids and a.apt_package]
 
-        # Configurer le clone : MAC, cloud-init drive, redimensionner le disque
-        cloud_config: dict = {
-            "net0":   f"virtio={mac_colons},bridge={body.bridge}",
-            "cores":  body.vcpus,
-            "memory": body.ram_mb,
-            "agent":  "enabled=1",
-            "onboot": 1,
-            "boot":   "order=scsi0",
-            "ide2":   f"{body.storage}:cloudinit",
-        }
+            # Générer le user-data cloud-init
+            osiris_url = os.environ.get("OSIRIS_BASE_URL", "http://osiris:8000")
+            user_data_rendered = jinja_env.get_template("cloud-init-user-data.j2").render(
+                machine={"hostname": body.hostname, "password_hash": "", "mac": mac_plain},
+                profile=profile_tpl,
+                linux_apps=linux_apps,
+                mac=mac_plain,
+                osiris_url=osiris_url,
+            )
 
-        if h.snippets_storage:
-            snippet_name = f"osiris-{vm_id}-user-data.yaml"
-            await _proxmox_upload_snippet(h, body.node, h.snippets_storage, snippet_name, user_data_rendered)
-            cloud_config["cicustom"] = f"user={h.snippets_storage}:snippets/{snippet_name}"
-        else:
-            # Fallback : paramètres cloud-init basiques sans cicustom
-            cloud_config["ciuser"] = profile_tpl.get("default_user", "osiris")
-            ssh_keys = profile_tpl.get("ssh_authorized_keys", "")
-            if ssh_keys:
-                cloud_config["sshkeys"] = urllib.parse.quote(ssh_keys.strip(), safe="")
+            # Configurer le clone : MAC, cloud-init drive, redimensionner le disque
+            cloud_config: dict = {
+                "net0":   f"virtio={mac_colons},bridge={body.bridge}",
+                "cores":  body.vcpus,
+                "memory": body.ram_mb,
+                "agent":  "enabled=1",
+                "onboot": 1,
+                "boot":   "order=scsi0",
+                "ide2":   f"{body.storage}:cloudinit",
+            }
 
-        await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config", cloud_config)
+            if h.snippets_storage:
+                snippet_name = f"osiris-{vm_id}-user-data.yaml"
+                await _proxmox_upload_snippet(h, body.node, h.snippets_storage, snippet_name, user_data_rendered)
+                cloud_config["cicustom"] = f"user={h.snippets_storage}:snippets/{snippet_name}"
+            else:
+                # Fallback : paramètres cloud-init basiques sans cicustom
+                cloud_config["ciuser"] = profile_tpl.get("default_user", "osiris")
+                ssh_keys = profile_tpl.get("ssh_authorized_keys", "")
+                if ssh_keys:
+                    cloud_config["sshkeys"] = urllib.parse.quote(ssh_keys.strip(), safe="")
 
-        # Redimensionner le disque si nécessaire
-        await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/resize", {
-            "disk": "scsi0", "size": f"{body.disk_gb}G",
-        })
+            await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config", cloud_config)
 
-        await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
+            # Redimensionner le disque si nécessaire.
+            # ⚠️ resize est un PUT, PAS un POST : en POST, Proxmox répond
+            # « Method not implemented » (501) et toute création cloud-init échoue.
+            await _proxmox_request(h, "PUT", f"/api2/json/nodes/{body.node}/qemu/{vm_id}/resize", {
+                "disk": "scsi0", "size": f"{body.disk_gb}G",
+            })
+
+            await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
+        except Exception:
+            await _destroy_vm_quietly(h, body.node, vm_id)
+            raise
 
     # Enregistrer dans OSIRIS
     with Session(engine) as session:
