@@ -669,8 +669,26 @@ try {
     if ($sysMgr -notmatch 'Dell') {
         Write-Log "Materiel non-Dell ($sysMgr) : mot de passe BIOS ignore."
     } else {
+        # Module servi par OSIRIS, PAS installe depuis PSGallery. Le PowerShellGet
+        # livre en boite avec Windows 11 est en 1.0.0.1 : il ne connait pas
+        # -AcceptLicense (echec constate le 30/07 sur M2KL098 : "Impossible de
+        # trouver un parametre correspondant au nom AcceptLicense") et n'amorce pas
+        # le fournisseur NuGet en session non interactive. Un simple decompactage
+        # dans le chemin des modules suffit : Import-Module n'a besoin ni de
+        # PowerShellGet, ni d'un acces Internet depuis le poste du client.
         if (-not (Get-Module -ListAvailable -Name DellBIOSProvider)) {
-            Install-Module -Name DellBIOSProvider -Force -Scope AllUsers -AcceptLicense -EA Stop
+            $modDir = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules\DellBIOSProvider'
+            $modZip = Join-Path $env:TEMP 'DellBIOSProvider.zip'
+            Write-Log "Module DellBIOSProvider absent - recuperation depuis OSIRIS..."
+            Invoke-WebRequest -Uri "$osirisUrl/static/installers/DellBIOSProvider.zip" `
+                -OutFile $modZip -UseBasicParsing -TimeoutSec 120 -EA Stop
+            New-Item -ItemType Directory -Path $modDir -Force | Out-Null
+            Expand-Archive -Path $modZip -DestinationPath $modDir -Force -EA Stop
+            # Un fichier telecharge peut porter la marque "provenance Internet" ;
+            # le chargement d'une DLL bloquee echouerait.
+            Get-ChildItem $modDir -Recurse -File | Unblock-File -EA SilentlyContinue
+            Remove-Item $modZip -Force -EA SilentlyContinue
+            Write-Log "Module DellBIOSProvider installe."
         }
         Import-Module DellBIOSProvider -Force -Verbose:$false -EA Stop
 
@@ -689,6 +707,7 @@ try {
     }
 } catch {
     Write-Log "AVERTISSEMENT : Echec configuration mot de passe BIOS - $_"
+    Write-Log "  (si le module est introuvable : deposer DellBIOSProvider.zip dans backend/static/installers/)"
 }
 {% endif %}
 

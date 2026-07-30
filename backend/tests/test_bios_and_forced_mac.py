@@ -116,6 +116,21 @@ def test_le_mot_de_passe_bios_est_injecte_et_le_module_charge():
     assert "DellSmbios:\\Security\\AdminPassword" in script
 
 
+def test_le_module_vient_d_osiris_et_non_de_psgallery():
+    """Le PowerShellGet en boite de Windows 11 (1.0.0.1) ne connait pas
+    -AcceptLicense et n'amorce pas NuGet sans interaction : `Install-Module` a
+    echoue en production le 2026-07-30. On decompacte un zip servi par OSIRIS."""
+    script = _render(bios_password="x")
+    # On ignore les commentaires, qui documentent justement l'echec de -AcceptLicense.
+    code = [l for l in script.splitlines() if not l.lstrip().startswith("#")]
+    assert not any("Install-Module" in l for l in code)
+    assert not any("AcceptLicense" in l for l in code)
+    assert "/static/installers/DellBIOSProvider.zip" in script
+    assert "Expand-Archive" in script
+    # Une DLL portant la marque « provenance Internet » refuserait de se charger.
+    assert "Unblock-File" in script
+
+
 def test_apostrophe_du_mot_de_passe_echappee():
     """Une apostrophe non doublee terminerait la chaine PowerShell et casserait le script."""
     script = _render(bios_password="aujourd'hui")

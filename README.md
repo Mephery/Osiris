@@ -714,6 +714,24 @@ Les binaires et images ISO ne sont pas inclus dans le dépôt. A placer dans `ba
 |---|---|
 | `wimboot` | github.com/ipxe/wimboot/releases |
 | `curl.exe` (Windows 8.x) | curl.se/windows |
+| `installers/DellBIOSProvider.zip` | PowerShell Gallery — voir ci-dessous |
+
+### Module DellBIOSProvider (mot de passe BIOS Dell)
+
+Nécessaire seulement si une organisation a un mot de passe BIOS renseigné. Le module
+est **servi par OSIRIS** plutôt qu'installé depuis PSGallery sur chaque poste : le
+PowerShellGet livré en boîte avec Windows 11 est en 1.0.0.1, qui ne connaît pas
+`-AcceptLicense` et n'amorce pas le fournisseur NuGet en session non interactive.
+
+```bash
+curl -sSL -o /tmp/dbp.nupkg https://www.powershellgallery.com/api/v2/package/DellBIOSProvider
+mkdir -p /tmp/dbp && cd /tmp/dbp && unzip -q /tmp/dbp.nupkg
+rm -rf _rels package '[Content_Types].xml' *.nuspec     # metadonnees NuGet inutiles
+zip -qr backend/static/installers/DellBIOSProvider.zip .
+```
+
+Le firstboot le télécharge, le décompacte dans `%ProgramFiles%\WindowsPowerShell\Modules\`
+et l'importe — sans accès Internet depuis le poste du client.
 
 ### Images Ubuntu
 
