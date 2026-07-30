@@ -658,6 +658,76 @@ try {
     Write-Log "AVERTISSEMENT : Echec envoi rapport smoke tests - $_"
 }
 
+{% if bios_password %}
+# ── Mot de passe administrateur BIOS ──────────────────────────────────────────
+# Pose via DellBIOSProvider (module Dell, successeur de cctk.exe). Uniquement sur
+# du materiel Dell : ailleurs on passe silencieusement, ce n'est pas une erreur.
+# Place APRES les smoke tests : un echec ici ne doit pas faire echouer le rapport.
+Write-Log "Configuration du mot de passe administrateur BIOS..."
+try {
+    $sysMgr = (Get-CimInstance Win32_ComputerSystem -EA Stop).Manufacturer
+    if ($sysMgr -notmatch 'Dell') {
+        Write-Log "Materiel non-Dell ($sysMgr) : mot de passe BIOS ignore."
+    } else {
+        if (-not (Get-Module -ListAvailable -Name DellBIOSProvider)) {
+            Install-Module -Name DellBIOSProvider -Force -Scope AllUsers -AcceptLicense -EA Stop
+        }
+        Import-Module DellBIOSProvider -Force -Verbose:$false -EA Stop
+
+        $biosPwd = '{{ bios_password | replace("'", "''") }}'
+        $alreadySet = (Get-Item -Path DellSmbios:\Security\IsAdminPasswordSet).CurrentValue -eq 'True'
+        if ($alreadySet) {
+            # Deja pose (re-deploiement d'une machine du parc) : on ne connait pas
+            # forcement l'ancien, et le reappliquer a l'identique echouerait de toute
+            # facon. On laisse en place plutot que de casser quoi que ce soit.
+            Write-Log "Mot de passe BIOS deja defini - conserve tel quel."
+        } else {
+            Set-Item -Path DellSmbios:\Security\AdminPassword -Value $biosPwd -EA Stop
+            Write-Log "Mot de passe administrateur BIOS applique."
+        }
+        $biosPwd = $null
+    }
+} catch {
+    Write-Log "AVERTISSEMENT : Echec configuration mot de passe BIOS - $_"
+}
+{% endif %}
+
+{% if forced_mac %}
+# ── MAC imposee par la convention du client ───────────────────────────────────
+# ATTENTION : override NDIS cote Windows uniquement. Le firmware continue de
+# presenter la MAC gravee au boot PXE - ne JAMAIS compter dessus pour identifier
+# la machine dans OSIRIS (c'est le role du numero de serie).
+# En dernier car Set-NetAdapter redemarre l'interface : tout ce qui precede a
+# besoin du reseau (jonction AD, winget, smoke tests).
+$targetMac = '{{ forced_mac }}'
+$targetMacFmt = ($targetMac -split '(..)' -ne '') -join ':'
+Write-Log "Application de la MAC imposee : $targetMacFmt"
+try {
+    $adapters = @(Get-NetAdapter -Physical -EA Stop | Where-Object Status -eq 'Up')
+    if ($adapters.Count -eq 0) {
+        Write-Log "AVERTISSEMENT : aucun adaptateur physique actif - MAC non appliquee."
+    } elseif ($adapters.Count -gt 1) {
+        # Ambigu (dock + WiFi filaire, second dongle...) : on s'abstient plutot que
+        # de reecrire la MAC du mauvais adaptateur.
+        Write-Log "AVERTISSEMENT : $($adapters.Count) adaptateurs actifs ($($adapters.Name -join ', ')) - MAC non appliquee."
+    } elseif (($adapters[0].MacAddress -replace '-', '') -ieq $targetMac) {
+        Write-Log "MAC deja conforme."
+    } else {
+        Set-NetAdapter -Name $adapters[0].Name -MacAddress $targetMac -Confirm:$false -EA Stop
+        Start-Sleep -Seconds 10   # redemarrage de l'interface + bail DHCP
+        # Certains pilotes acceptent la commande sans honorer l'override : on relit.
+        $after = (Get-NetAdapter -Name $adapters[0].Name).MacAddress -replace '-', ''
+        if ($after -ieq $targetMac) {
+            Write-Log "MAC appliquee : $targetMacFmt"
+        } else {
+            Write-Log "AVERTISSEMENT : le pilote n'a pas honore l'override (MAC = $after)."
+        }
+    }
+} catch {
+    Write-Log "AVERTISSEMENT : Echec application de la MAC - $_"
+}
+{% endif %}
+
 # Progression a 100% : le deploiement (firstboot compris) est vraiment termine.
 if ($script:_mac) {
     try {

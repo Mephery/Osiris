@@ -26,6 +26,13 @@ class Organization(SQLModel, table=True):
     # vers cette adresse en TCP 10051, le collecteur n'a jamais à les joindre.
     # Vide = pas de supervision pour cette organisation.
     zabbix_server: str = Field(default="")
+    # Mot de passe administrateur BIOS pose sur les machines de cette organisation,
+    # chiffre Fernet comme DomainConfig.join_password. Vide = on ne touche pas au BIOS.
+    bios_password: str = Field(default="")
+    # Prefixe des 4 premiers octets de la MAC imposee par le client, en hexa sans
+    # separateur (ex. "02aabbcc"). Les 2 derniers octets sont derives des 3 derniers
+    # chiffres du hostname. Vide = on ne reecrit pas la MAC. Voir _mac_from_hostname().
+    mac_prefix: str = Field(default="")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

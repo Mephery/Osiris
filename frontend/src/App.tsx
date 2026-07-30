@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Toaster, toast } from 'sonner'
 import './App.css'
 import type {
-  AuthState, Organization, Machine, Profile, Application,
+  AuthState, Organization, OrganizationPatch, Machine, Profile, Application,
   DeploymentEvent, Hypervisor, OsImage, SnapshotEntry, LiveEvent, VpnTunnel,
 } from './types'
 import { IMAGE_STATUS, EMPTY_FORM, authHeader } from './types'
@@ -37,6 +37,34 @@ function loadAuth(): AuthState | null {
 function saveAuth(a: AuthState | null) {
   if (a) localStorage.setItem(AUTH_KEY, JSON.stringify(a))
   else localStorage.removeItem(AUTH_KEY)
+}
+
+/** Saisie du mot de passe BIOS d'une organisation.
+ *  Validation EXPLICITE (bouton ou Entrée) et non au `onBlur` des autres champs :
+ *  le champ se vide après envoi, donc sans bouton on ne sait pas si c'est parti. */
+function BiosPasswordField({ isSet, onSave }: { isSet: boolean; onSave: (v: string) => void }) {
+  const [value, setValue] = useState('')
+  const submit = () => { if (value) { onSave(value); setValue('') } }
+  return (
+    <div className="flex gap-2 flex-1">
+      <input
+        type="password"
+        autoComplete="new-password"
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); submit() } }}
+        placeholder={isSet ? 'Mot de passe BIOS (défini — saisir pour remplacer)' : 'Mot de passe BIOS (non défini)'}
+        className="osiris-input text-[10px] font-mono flex-1 min-w-0"
+      />
+      <button
+        type="button"
+        onClick={submit}
+        disabled={!value}
+        title="Enregistrer le mot de passe BIOS"
+        className="osiris-btn text-xs px-3 flex-shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
+      >✓</button>
+    </div>
+  )
 }
 
 export default function App() {
@@ -365,7 +393,7 @@ export default function App() {
     )
   }
 
-  const handlePatchOrg = (id: number, patch: Partial<Organization>, label: string) => {
+  const handlePatchOrg = (id: number, patch: OrganizationPatch, label: string) => {
     if (!auth) return
     fetch(`${API_URL}/organizations/${id}`, {
       method: 'PATCH',
@@ -910,6 +938,20 @@ export default function App() {
                         defaultValue={org.zabbix_server}
                         onBlur={e => { if (e.target.value !== org.zabbix_server) handlePatchOrg(org.id, { zabbix_server: e.target.value }, 'Collecteur Zabbix') }}
                         className="osiris-input text-[10px] font-mono flex-1"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        placeholder="Préfixe MAC imposé (ex: 02aabbcc) — vide = MAC inchangée"
+                        defaultValue={org.mac_prefix}
+                        onBlur={e => { if (e.target.value !== org.mac_prefix) handlePatchOrg(org.id, { mac_prefix: e.target.value }, 'Préfixe MAC') }}
+                        className="osiris-input text-[10px] font-mono flex-1"
+                      />
+                      {/* Champ en ecriture seule : l'API ne renvoie jamais le mot de passe.
+                          Ne rien saisir ne change rien, la valeur en base est conservee. */}
+                      <BiosPasswordField
+                        isSet={org.has_bios_password}
+                        onSave={v => handlePatchOrg(org.id, { bios_password: v }, 'Mot de passe BIOS')}
                       />
                     </div>
                   </li>

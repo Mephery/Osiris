@@ -14,7 +14,19 @@ export interface Organization {
   webhook_url: string;
   /** Adresse du serveur/proxy Zabbix de l'organisation. Vide = pas de supervision. */
   zabbix_server: string;
+  /** Préfixe MAC imposé par le client, 4 octets hexa sans séparateur (ex: "02aabbcc").
+   *  Vide = on ne réécrit pas la MAC des machines. */
+  mac_prefix: string;
+  /** Le mot de passe BIOS n'est jamais renvoyé en clair : on sait seulement s'il existe. */
+  has_bios_password: boolean;
 }
+
+/** Corps d'un PATCH d'organisation. `bios_password` est en ÉCRITURE SEULE : il
+ *  s'envoie mais ne fait pas partie d'`Organization`, que l'API ne renvoie jamais
+ *  avec le secret en clair. Champ absent = valeur en base conservée. */
+export type OrganizationPatch = Partial<Omit<Organization, 'has_bios_password'>> & {
+  bios_password?: string;
+};
 
 export interface VpnTunnel {
   id: number;

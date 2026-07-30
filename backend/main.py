@@ -178,6 +178,50 @@ def validate_mac(raw: str) -> str:
     return clean
 
 
+def _validate_mac_prefix(raw: str) -> str:
+    """Normalise un préfixe MAC d'organisation : 4 octets hexa, sans séparateur.
+
+    Vide = fonctionnalité désactivée. On refuse un préfixe multicast (bit de poids
+    faible du 1er octet à 1) : ce serait une adresse source invalide, la machine
+    perdrait le réseau.
+    """
+    clean = (raw or "").strip().lower().replace(":", "").replace("-", "")
+    if not clean:
+        return ""
+    if len(clean) != 8 or not all(c in "0123456789abcdef" for c in clean):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Préfixe MAC invalide : {raw!r} — attendu 4 octets hexa (ex: 02aabbcc)",
+        )
+    if int(clean[:2], 16) & 0x01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Préfixe MAC {raw!r} multicast — inutilisable comme adresse source",
+        )
+    return clean
+
+
+# Les 3 derniers chiffres du hostname portent le numéro de poste.
+HOSTNAME_SEQ_REGEX = re.compile(r"(\d{3})$")
+
+
+def mac_from_hostname(hostname: str, mac_prefix: str) -> str:
+    """MAC imposée par la convention du client, ou '' si elle ne s'applique pas.
+
+    Les 3 derniers chiffres du hostname sont RECOPIÉS TELS QUELS dans les deux
+    derniers octets, zéro-padés sur 4 — ce n'est pas une conversion décimale vers
+    hexa : le poste 095 donne '0095' -> ...:00:95 et le poste 100 donne '0100' ->
+    ...:01:00 (et non ...:00:64). Les chiffres 0-9 étant tous des caractères hexa
+    valides, la correspondance est bijective de 000 à 999 et ne peut pas déborder.
+    """
+    if not mac_prefix:
+        return ""
+    match = HOSTNAME_SEQ_REGEX.search((hostname or "").strip())
+    if not match:
+        return ""
+    return f"{mac_prefix}{match.group(1).rjust(4, '0')}"
+
+
 # ── Schémas de requête ─────────────────────────────────────────────────────────
 
 class WebhookNewMachine(SQLModel):
@@ -473,8 +517,10 @@ def change_password(body: PasswordChange, current_user: User = Depends(get_curre
 # ── Organisations ──────────────────────────────────────────────────────────────
 
 def _org_dict(o: Organization) -> dict:
+    # bios_password jamais renvoye en clair : seul un booleen dit s'il est defini.
     return {"id": o.id, "name": o.name, "slug": o.slug,
-            "webhook_url": o.webhook_url, "zabbix_server": o.zabbix_server}
+            "webhook_url": o.webhook_url, "zabbix_server": o.zabbix_server,
+            "mac_prefix": o.mac_prefix, "has_bios_password": bool(o.bios_password)}
 
 
 @app.get("/organizations", dependencies=[Depends(get_current_user)])
@@ -509,6 +555,12 @@ async def patch_organization(org_id: int, request: Request, current_user: User =
             org.webhook_url = data["webhook_url"]
         if "zabbix_server" in data:
             org.zabbix_server = (data["zabbix_server"] or "").strip()
+        if "mac_prefix" in data:
+            org.mac_prefix = _validate_mac_prefix(data["mac_prefix"])
+        # Chaine vide = effacement explicite du mot de passe BIOS (le champ n'est
+        # envoye par l'UI que s'il a ete modifie, cf. patch partiel des fiches).
+        if "bios_password" in data:
+            org.bios_password = encrypt(data["bios_password"]) if data["bios_password"] else ""
         if "name" in data:
             org.name = data["name"]
         session.add(org)
@@ -1631,6 +1683,11 @@ def get_windows_firstboot(mac: str):
             Application.id.in_(app_id_list),
             (Application.winget_id != "") | (Application.installer_file != ""),
         )).all() if app_id_list else []
+        # Reglages materiel imposes par le client (mot de passe BIOS, convention MAC).
+        # Portes par l'organisation : ils ne dependent ni du profil ni du domaine AD.
+        org = session.get(Organization, machine.organization_id) if machine.organization_id else None
+        bios_password = decrypt(org.bios_password or "") if org else ""
+        forced_mac = mac_from_hostname(machine.hostname, org.mac_prefix) if org else ""
     profile_ctx = _profile_for_template(profile, session)
     tv_suffix = profile_ctx.get("tv_suffix", "")
     tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
@@ -1641,6 +1698,8 @@ def get_windows_firstboot(mac: str):
         win_apps=list(win_apps),
         osiris_url=OSIRIS_BASE_URL,
         osiris_ip=OSIRIS_IP,
+        bios_password=bios_password,
+        forced_mac=forced_mac,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -2466,6 +2525,28 @@ def _build_winpe_script(mac: str) -> Response:
             return Response(
                 content=f"echo [OSIRIS] Machine {mac} inconnue\r\npause\r\nexit /b 1",
                 media_type="text/plain", status_code=404,
+            )
+        # Garde-fou anti-réinstallation. La route /boot en pose déjà un (une machine
+        # `deployed` repart sur son disque), mais il ne s'arme QUE si la MAC vue sur le
+        # fil correspond à `Machine.mac` — ce que ni un adaptateur USB-Ethernet ni
+        # l'option Dell « MAC Address Pass Through » ne garantissent. Dans ce cas WinPE
+        # démarre par le repli « un déploiement est en attente » puis identifie CETTE
+        # machine-ci par son numéro de série : sans ce test, on lui servirait un script
+        # qui repartitionne le disque d'un poste déjà en production.
+        # Redéployer reste possible : l'UI repasse explicitement la fiche en `pending`.
+        if machine.status == "deployed":
+            # 200 volontaire : `curl -sf` de startnet jette le corps d'une réponse >= 400
+            # et retomberait sur le script générique « machine non reconnue », message
+            # trompeur ici. On veut que l'opérateur lise la vraie raison à l'écran.
+            return Response(
+                content=(
+                    f"echo [OSIRIS] {machine.hostname} est deja deployee - DEPLOIEMENT REFUSE.\r\n"
+                    "echo [OSIRIS] Le disque n'a PAS ete modifie.\r\n"
+                    "echo [OSIRIS] Pour la reinstaller : bouton Redeployer dans OSIRIS,\r\n"
+                    "echo [OSIRIS] qui repasse la fiche en attente, puis redemarrer en PXE.\r\n"
+                    "pause\r\nexit /b 1"
+                ),
+                media_type="text/plain",
             )
         profile = _resolve_profile(session, machine)
 
