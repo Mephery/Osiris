@@ -150,12 +150,11 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
               </select>
               <input placeholder="Utilisateur local" value={newProfile.default_user ?? ''} onChange={e => setNewProfile({ ...newProfile, default_user: e.target.value })} className="osiris-input text-xs font-mono" />
               <input placeholder="Paquets supplémentaires (htop,vim,...)" value={newProfile.extra_packages ?? ''} onChange={e => setNewProfile({ ...newProfile, extra_packages: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
-              {newProfile.machine_type === 'server' && (
-                <div className="col-span-2 sm:col-span-3 space-y-1">
-                  <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
-                  <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" value={newProfile.ssh_authorized_keys ?? ''} onChange={e => setNewProfile({ ...newProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
-                </div>
-              )}
+              <div className="col-span-2 sm:col-span-3 space-y-1">
+                <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
+                <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" value={newProfile.ssh_authorized_keys ?? ''} onChange={e => setNewProfile({ ...newProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
+                <p className="text-[9px] text-slate-600">Le compte local est créé au premier démarrage s'il n'existe pas, et ces clés lui ouvrent le SSH. Sans clé, une VM clonée reste inaccessible.</p>
+              </div>
             </>
           )}
           {newProfile.os === 'windows' && (
@@ -357,10 +356,11 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                   </select>
                 </>)}
               </div>
-              {(editingProfile.os === 'ubuntu' || editingProfile.os === 'debian') && editingProfile.machine_type === 'server' && (
+              {(editingProfile.os === 'ubuntu' || editingProfile.os === 'debian') && (
                 <div className="pt-2 border-t border-slate-800/40 space-y-1">
                   <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
                   <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" defaultValue={editingProfile.ssh_authorized_keys} onChange={e => setEditingProfile({ ...editingProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
+                  <p className="text-[9px] text-slate-600">Le compte local est créé au premier démarrage s'il n'existe pas, et ces clés lui ouvrent le SSH. Sans clé, une VM clonée reste inaccessible.</p>
                 </div>
               )}
               {editingProfile.os === 'windows' && (() => {

@@ -114,6 +114,8 @@ export default function App() {
   const [newAppAptPackage, setNewAppAptPackage] = useState('')
   const [newAppCategory, setNewAppCategory]   = useState('tools')
   const [newAppIcon, setNewAppIcon]           = useState('📦')
+  // Application dont le script de post-installation Linux est déplié, s'il y en a une
+  const [editingAppScript, setEditingAppScript] = useState<number | null>(null)
 
   // ── Profils (liste partagée ; le state d'édition vit dans ProfilesSection) ──
   const [profiles, setProfiles] = useState<Profile[]>([])
@@ -363,16 +365,16 @@ export default function App() {
     )
   }
 
-  const handlePatchOrg = (id: number, webhook_url: string) => {
+  const handlePatchOrg = (id: number, patch: Partial<Organization>, label: string) => {
     if (!auth) return
     fetch(`${API_URL}/organizations/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
-      body: JSON.stringify({ webhook_url }),
+      body: JSON.stringify(patch),
     })
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then(() => { fetchOrgs(auth.token); toast.success('Webhook enregistré') })
-      .catch(() => toast.error('Erreur enregistrement webhook'))
+      .then(() => { fetchOrgs(auth.token); toast.success(`${label} enregistré`) })
+      .catch(() => toast.error(`Erreur enregistrement ${label.toLowerCase()}`))
   }
 
 
@@ -715,6 +717,17 @@ export default function App() {
       .catch((err) => toast.error(err.message))
   }
 
+  const handlePatchApp = (id: number, patch: Partial<Application>) => {
+    fetch(`${API_URL}/apps/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
+      body: JSON.stringify(patch),
+    })
+      .then((res) => { if (!res.ok) throw new Error('Erreur enregistrement'); return res.json() })
+      .then(() => { fetchApps(auth.token); toast.success('Application mise à jour') })
+      .catch((err) => toast.error(err.message))
+  }
+
   const handleDeleteApp = (id: number) => {
     fetch(`${API_URL}/apps/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
       .then(() => { fetchApps(auth.token); toast.success('Application supprimée') })
@@ -887,7 +900,15 @@ export default function App() {
                       <input
                         placeholder="Webhook URL (Teams, Slack, Discord…)"
                         defaultValue={org.webhook_url}
-                        onBlur={e => { if (e.target.value !== org.webhook_url) handlePatchOrg(org.id, e.target.value) }}
+                        onBlur={e => { if (e.target.value !== org.webhook_url) handlePatchOrg(org.id, { webhook_url: e.target.value }, 'Webhook') }}
+                        className="osiris-input text-[10px] font-mono flex-1"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        placeholder="Collecteur Zabbix (ex: 10.231.248.130) — vide = pas de supervision"
+                        defaultValue={org.zabbix_server}
+                        onBlur={e => { if (e.target.value !== org.zabbix_server) handlePatchOrg(org.id, { zabbix_server: e.target.value }, 'Collecteur Zabbix') }}
                         className="osiris-input text-[10px] font-mono flex-1"
                       />
                     </div>
@@ -942,16 +963,40 @@ export default function App() {
               <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Applications</h2>
               <ul className="space-y-1 max-h-64 overflow-y-auto">
                 {apps.map(a => (
-                  <li key={a.id} className="flex items-center justify-between text-sm py-1 border-b border-slate-800/50">
-                    <span className="flex items-center gap-2 min-w-0">
-                      <span className="flex-shrink-0">{a.icon}</span>
-                      <span className="text-white truncate">{a.name}</span>
-                      <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">{a.category}</span>
-                    </span>
-                    <div className="flex items-center gap-3 flex-shrink-0">
-                      <span className="font-mono text-[10px] text-slate-600 truncate max-w-[140px]">{a.winget_id || a.apt_package}</span>
-                      <button onClick={() => handleDeleteApp(a.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
+                  <li key={a.id} className="text-sm py-1 border-b border-slate-800/50 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="flex-shrink-0">{a.icon}</span>
+                        <span className="text-white truncate">{a.name}</span>
+                        <span className="text-[10px] text-slate-600 font-mono flex-shrink-0">{a.category}</span>
+                      </span>
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        <span className="font-mono text-[10px] text-slate-600 truncate max-w-[140px]">{a.winget_id || a.apt_package}</span>
+                        {a.apt_package && (
+                          <button
+                            onClick={() => setEditingAppScript(editingAppScript === a.id ? null : a.id)}
+                            className="osiris-action-btn"
+                            title="Script de post-installation Linux">
+                            {a.linux_post_install ? '🐧✓' : '🐧'}
+                          </button>
+                        )}
+                        <button onClick={() => handleDeleteApp(a.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
+                      </div>
                     </div>
+                    {editingAppScript === a.id && (
+                      <div className="space-y-1 pb-2">
+                        <p className="text-[10px] text-slate-600 leading-relaxed">
+                          Script bash exécuté en root juste après <span className="font-mono">apt-get install {a.apt_package}</span>,
+                          au premier démarrage. Sert à configurer le paquet (fichier de conf, activation de service…).
+                        </p>
+                        <textarea
+                          rows={5}
+                          placeholder={"# ex :\nsed -i 's/^#Port/Port/' /etc/exemple.conf\nsystemctl restart exemple"}
+                          defaultValue={a.linux_post_install ?? ''}
+                          onBlur={e => { if (e.target.value !== (a.linux_post_install ?? '')) handlePatchApp(a.id, { linux_post_install: e.target.value }) }}
+                          className="osiris-input text-[10px] font-mono w-full" />
+                      </div>
+                    )}
                   </li>
                 ))}
                 {apps.length === 0 && <li className="text-slate-700 text-xs font-mono">Aucune application</li>}
@@ -1665,6 +1710,23 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                   {driverPacks.length === 0 && <p className="text-[10px] text-slate-600">Aucun pack téléchargé — va dans l'onglet Drivers pour en télécharger un.</p>}
                 </div>
               )}
+              <div className="space-y-1.5 pt-1">
+                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input type="checkbox" checked={formData.supervised ?? true}
+                    onChange={e => setFormData({ ...formData, supervised: e.target.checked })}
+                    className="accent-blue-500" />
+                  Superviser cette machine (agent Zabbix)
+                </label>
+                <p className="text-[10px] text-slate-600 leading-relaxed">
+                  {(() => {
+                    const org = orgs.find(o => o.id === formData.organization_id)
+                    if (!org) return "L'agent n'est installé que si l'organisation de la machine déclare un collecteur Zabbix — celle-ci n'en a pas encore."
+                    return org.zabbix_server
+                      ? `Agent en mode actif vers ${org.zabbix_server} (TCP 10051).`
+                      : `${org.name} n'a pas de collecteur Zabbix : à renseigner dans Administration › Organisations.`
+                  })()}
+                </p>
+              </div>
               <div className="flex justify-end gap-3 pt-2">
                 <button type="button" onClick={closeModal} className="osiris-btn-ghost">Annuler</button>
                 <button type="submit" className="osiris-btn">{editingMac ? 'Enregistrer les modifications' : 'Enregistrer'}</button>

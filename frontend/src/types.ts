@@ -12,6 +12,8 @@ export interface Organization {
   name: string;
   slug: string;
   webhook_url: string;
+  /** Adresse du serveur/proxy Zabbix de l'organisation. Vide = pas de supervision. */
+  zabbix_server: string;
 }
 
 export interface VpnTunnel {
@@ -64,6 +66,9 @@ export interface Machine {
   has_laps?: boolean;
   user_name?: string;
   user_email?: string;
+  /** Installer l'agent Zabbix au premier démarrage (sans effet si l'organisation
+   *  n'a pas de collecteur renseigné). Activé par défaut. */
+  supervised?: boolean;
   notes?: string;
   smoke_status?: string;
   smoke_results?: string;
@@ -123,6 +128,8 @@ export interface Application {
   icon: string;
   install_type?: string;
   installer_file?: string;
+  /** Script bash exécuté après l'apt-get install de ce paquet, au premier démarrage. */
+  linux_post_install?: string;
 }
 
 export interface DeploymentEvent {
@@ -234,7 +241,7 @@ export function formatMac(mac: string): string {
   return mac.match(/.{1,2}/g)?.join(':').toUpperCase() ?? mac
 }
 
-export const EMPTY_FORM: Machine = { mac: '', deploy_mac: '', client: '', os: 'windows', hostname: '', ou: '', organization_id: null, profile_id: null, driver_pack_id: null, hw_serial: '' }
+export const EMPTY_FORM: Machine = { mac: '', deploy_mac: '', client: '', os: 'windows', hostname: '', ou: '', organization_id: null, profile_id: null, driver_pack_id: null, hw_serial: '', supervised: true }
 
 export function authHeader(token: string) {
   return { 'Authorization': `Bearer ${token}` }

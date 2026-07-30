@@ -5,7 +5,11 @@ exec >> "$LOG" 2>&1
 
 ts() { date '+%H:%M:%S'; }
 osiris_url="{{ osiris_url }}"
-_osiris_mac=""
+# MAC de la fiche OSIRIS, gravee ici a la generation du script. On ne la rededuit
+# PAS de l'interface reseau : sur une machine a plusieurs cartes, celle qui porte
+# la route par defaut n'est pas forcement celle qui identifie la fiche, et tous
+# les rappels partaient alors sur une MAC inconnue d'OSIRIS.
+_osiris_mac="{{ machine.mac }}"
 
 _on_error() {
     local line=$1
@@ -20,6 +24,24 @@ echo "[$(ts)] ============================================"
 echo "[$(ts)] OSIRIS First Boot - {{ machine.hostname }}"
 echo "[$(ts)] ============================================"
 
+# ── Nom d'hote ────────────────────────────────────────────────────────────────
+# Pose en tout premier : la jonction AD, l'agent de supervision et le bail DHCP
+# reprennent tous ce nom. Sans ca, une VM clonee depuis un template garde celui
+# du template (« ubuntu ») et s'annonce sous ce nom partout.
+echo "[$(ts)] Application du nom d'hote : {{ machine.hostname }}"
+hostnamectl set-hostname {{ machine.hostname | bash_squote }} \
+    || echo "{{ machine.hostname }}" > /etc/hostname
+if grep -q '^127\.0\.1\.1' /etc/hosts; then
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t{{ machine.hostname }}/" /etc/hosts
+else
+    printf '127.0.1.1\t%s\n' '{{ machine.hostname }}' >> /etc/hosts
+fi
+# cloud-init repose le nom d'hote a chaque demarrage depuis les metadonnees du
+# datasource, qui sur un clone portent encore celui du template : sans ce
+# verrou, le nom qu'on vient de poser serait perdu au premier reboot.
+mkdir -p /etc/cloud/cloud.cfg.d
+printf 'preserve_hostname: true\n' > /etc/cloud/cloud.cfg.d/99-osiris-hostname.cfg
+
 # ── Inventaire materiel ───────────────────────────────────────────────────────
 echo "[$(ts)] Collecte des informations materiel..."
 HW_SERIAL=$(cat /sys/class/dmi/id/product_serial 2>/dev/null | tr -d '[:space:]') || HW_SERIAL=""
@@ -30,14 +52,10 @@ HW_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 HW_RAM_GB=$(( (HW_RAM_KB + 524288) / 1048576 ))
 echo "[$(ts)] Materiel : $HW_MODEL | S/N : $HW_SERIAL | RAM : ${HW_RAM_GB} Go"
 
-MAC=$(cat /sys/class/net/$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')/address 2>/dev/null | tr -d ':')
-_osiris_mac="$MAC"
-if [ -n "$MAC" ]; then
-    curl -s -X POST "$osiris_url/machines/$MAC/hardware" \
-        -H "Content-Type: application/json" \
-        -d "{\"serial\":\"$HW_SERIAL\",\"model\":\"$HW_MODEL\",\"ram_gb\":$HW_RAM_GB}" || true
-    echo "[$(ts)] Inventaire envoye a OSIRIS"
-fi
+curl -s -X POST "$osiris_url/machines/$_osiris_mac/hardware" \
+    -H "Content-Type: application/json" \
+    -d "{\"serial\":\"$HW_SERIAL\",\"model\":\"$HW_MODEL\",\"ram_gb\":$HW_RAM_GB}" || true
+echo "[$(ts)] Inventaire envoye a OSIRIS"
 
 {% if tv_password %}
 echo "[$(ts)] Installation de TeamViewer Host..."
@@ -67,7 +85,49 @@ apt-get update -qq
 {% for app in linux_apps %}
 apt-get install -y {{ app.apt_package }} 2>&1 | tail -1
 echo "[$(ts)] Installe : {{ app.name }}"
+{% if app.linux_post_install %}
+echo "[$(ts)] Post-installation : {{ app.name }}"
+(
+{{ app.linux_post_install }}
+) || echo "[$(ts)] AVERTISSEMENT : post-installation de {{ app.name }} terminee en erreur"
+{% endif %}
 {% endfor %}
+{% endif %}
+
+{% if zabbix %}
+# ── Supervision Zabbix ────────────────────────────────────────────────────────
+# Agent en mode ACTIF : c'est lui qui sort vers le collecteur en TCP 10051.
+# Le VLAN est isole, rien n'entre — le collecteur ne joint jamais la machine.
+echo "[$(ts)] Supervision Zabbix : agent actif vers {{ zabbix.server }}"
+apt-get update -qq
+# zabbix-agent2 quand la distribution le fournit, zabbix-agent sinon. Aucun depot
+# tiers : on reste sur des paquets signes par la distro.
+_zbx_pkg=""
+for _p in zabbix-agent2 zabbix-agent; do
+    if apt-get install -y "$_p" > /dev/null 2>&1; then _zbx_pkg="$_p"; break; fi
+done
+if [ -z "$_zbx_pkg" ]; then
+    echo "[$(ts)] AVERTISSEMENT : aucun paquet d'agent Zabbix disponible - supervision non configuree"
+else
+    if [ "$_zbx_pkg" = "zabbix-agent2" ]; then
+        _zbx_dir=/etc/zabbix/zabbix_agent2.d; _zbx_svc=zabbix-agent2
+    else
+        _zbx_dir=/etc/zabbix/zabbix_agentd.conf.d; _zbx_svc=zabbix-agent
+    fi
+    mkdir -p "$_zbx_dir"
+    # Fichier a part plutot que modification du conf principal : une mise a jour
+    # du paquet ne l'ecrase pas, et il est lu par l'Include= par defaut.
+    cat > "$_zbx_dir/osiris.conf" << 'ZBXEOF'
+# Genere par OSIRIS au premier demarrage - ne pas editer a la main
+Server={{ zabbix.server }}
+ServerActive={{ zabbix.server }}
+Hostname={{ zabbix.hostname }}
+HostMetadata={{ zabbix.metadata }}
+ZBXEOF
+    systemctl enable "$_zbx_svc" > /dev/null 2>&1 || true
+    systemctl restart "$_zbx_svc" || echo "[$(ts)] AVERTISSEMENT : demarrage de $_zbx_svc en echec"
+    echo "[$(ts)] Agent Zabbix configure ($_zbx_pkg) - hote : {{ zabbix.hostname }}"
+fi
 {% endif %}
 
 {% if profile.join_domain and profile.domain and profile.domain_join_user and profile.domain_join_password %}
@@ -117,20 +177,45 @@ else
 fi
 {% endif %}
 
-{% if profile.machine_type == 'server' %}
-echo "[$(ts)] Configuration SSH serveur..."
+{% if profile.default_user %}
+# ── Compte local et acces SSH ─────────────────────────────────────────────────
+# Le compte existe deja quand la machine sort d'un installeur ou d'un cloud-init
+# qui l'a cree. Sur un clone de template, rien ne le garantit — et une VM sans
+# compte est HERMETIQUE : ni SSH ni console, plus personne n'entre. On le cree
+# donc si besoin, quel que soit le type de machine.
+if id -u {{ profile.default_user | bash_squote }} > /dev/null 2>&1; then
+    echo "[$(ts)] Compte local {{ profile.default_user }} deja present"
+else
+    useradd -m -s /bin/bash {{ profile.default_user | bash_squote }}
+    usermod -aG sudo {{ profile.default_user | bash_squote }} || true
+    echo "[$(ts)] Compte local {{ profile.default_user }} cree"
+fi
+# Aucun mot de passe n'est pose sur ce compte (choix OSIRIS : acces par cle
+# uniquement). Sans sudo sans mot de passe il serait donc inutilisable — c'est
+# exactement ce que font les images cloud pour leur utilisateur par defaut.
+printf '%s ALL=(ALL) NOPASSWD:ALL\n' {{ profile.default_user | bash_squote }} \
+    > /etc/sudoers.d/osiris-default-user
+chmod 440 /etc/sudoers.d/osiris-default-user
 
-# Clés SSH autorisées
-mkdir -p /home/{{ profile.default_user }}/.ssh
-chmod 700 /home/{{ profile.default_user }}/.ssh
 {% if profile.ssh_authorized_keys %}
-cat > /home/{{ profile.default_user }}/.ssh/authorized_keys << 'SSHEOF'
+_osiris_home=$(getent passwd {{ profile.default_user | bash_squote }} | cut -d: -f6)
+mkdir -p "$_osiris_home/.ssh"
+chmod 700 "$_osiris_home/.ssh"
+cat > "$_osiris_home/.ssh/authorized_keys" << 'SSHEOF'
 {{ profile.ssh_authorized_keys }}
 SSHEOF
-chmod 600 /home/{{ profile.default_user }}/.ssh/authorized_keys
-chown -R {{ profile.default_user }}:{{ profile.default_user }} /home/{{ profile.default_user }}/.ssh
-echo "[$(ts)] Cles SSH injectees"
+chmod 600 "$_osiris_home/.ssh/authorized_keys"
+chown -R {{ profile.default_user }}:{{ profile.default_user }} "$_osiris_home/.ssh"
+# Une cle sans serveur SSH ne sert a rien, et une image minimale peut ne pas en
+# avoir : on s'assure qu'il est la ET demarre.
+dpkg -s openssh-server > /dev/null 2>&1 || apt-get install -y openssh-server 2>&1 | tail -1
+systemctl enable --now ssh > /dev/null 2>&1 || systemctl enable --now sshd > /dev/null 2>&1 || true
+echo "[$(ts)] Acces SSH par cle ouvert pour {{ profile.default_user }}"
 {% endif %}
+{% endif %}
+
+{% if profile.machine_type == 'server' %}
+echo "[$(ts)] Durcissement SSH serveur..."
 
 # Durcissement sshd
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
@@ -214,6 +299,23 @@ else
 fi
 {% endif %}
 
+{% if zabbix %}
+# Agent de supervision
+if systemctl is-active --quiet zabbix-agent2 2>/dev/null || systemctl is-active --quiet zabbix-agent 2>/dev/null; then
+    _add_test "Agent Zabbix" true "Actif - hote {{ zabbix.hostname }}"
+else
+    _add_test "Agent Zabbix" false "Service inactif ou absent"
+fi
+
+# Joignabilite du collecteur : teste la regle de pare-feu, pas seulement l'agent.
+# C'est le seul moyen de distinguer « agent mal configure » de « flux bloque ».
+if timeout 3 bash -c "</dev/tcp/{{ zabbix.server }}/10051" 2>/dev/null; then
+    _add_test "Collecteur Zabbix joignable" true "{{ zabbix.server }}:10051"
+else
+    _add_test "Collecteur Zabbix joignable" false "TCP 10051 ferme vers {{ zabbix.server }} (regle pare-feu ?)"
+fi
+{% endif %}
+
 {% if ubuntu_packages %}
 # Presence des paquets installes
 {% for pkg in ubuntu_packages %}
@@ -236,5 +338,10 @@ if curl -s -X POST "$osiris_url/machines/$_osiris_mac/smoke-tests" \
 else
     echo "[$(ts)] AVERTISSEMENT : Echec envoi rapport smoke tests."
 fi
+
+# Fin reelle du deploiement. Sur le chemin PXE, l'installeur a deja poste
+# « deployed » avant le reboot ; ici c'est le firstboot qui fait foi, et sur le
+# chemin cloud-init (clone de template) c'est le SEUL signal de fin.
+curl -s -X POST "$osiris_url/machines/$_osiris_mac/status?status=deployed" --max-time 15 || true
 
 systemctl disable osiris-firstboot.service

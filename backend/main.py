@@ -203,6 +203,7 @@ class MachinePatch(SQLModel):
     notes: Optional[str] = None
     user_name: Optional[str] = None
     user_email: Optional[str] = None
+    supervised: Optional[bool] = None
 
 class ProfileCreate(SQLModel):
     name: str
@@ -471,11 +472,16 @@ def change_password(body: PasswordChange, current_user: User = Depends(get_curre
 
 # ── Organisations ──────────────────────────────────────────────────────────────
 
+def _org_dict(o: Organization) -> dict:
+    return {"id": o.id, "name": o.name, "slug": o.slug,
+            "webhook_url": o.webhook_url, "zabbix_server": o.zabbix_server}
+
+
 @app.get("/organizations", dependencies=[Depends(get_current_user)])
 def get_organizations():
     with Session(engine) as session:
         orgs = session.exec(select(Organization)).all()
-        return [{"id": o.id, "name": o.name, "slug": o.slug, "webhook_url": o.webhook_url} for o in orgs]
+        return [_org_dict(o) for o in orgs]
 
 
 @app.post("/organizations", status_code=201)
@@ -488,12 +494,12 @@ def create_organization(body: OrgCreate, current_user: User = Depends(require_ad
         _log(session, current_user, "create_org", details={"name": body.name, "slug": body.slug})
         session.commit()
         session.refresh(org)
-        return {"id": org.id, "name": org.name, "slug": org.slug, "webhook_url": org.webhook_url}
+        return _org_dict(org)
 
 
 @app.patch("/organizations/{org_id}")
 async def patch_organization(org_id: int, request: Request, current_user: User = Depends(require_admin)):
-    """Met à jour les champs d'une organisation (ex: webhook_url)."""
+    """Met à jour les champs d'une organisation (ex: webhook_url, zabbix_server)."""
     data = await request.json()
     with Session(engine) as session:
         org = session.get(Organization, org_id)
@@ -501,12 +507,14 @@ async def patch_organization(org_id: int, request: Request, current_user: User =
             raise HTTPException(status_code=404, detail="Organisation introuvable")
         if "webhook_url" in data:
             org.webhook_url = data["webhook_url"]
+        if "zabbix_server" in data:
+            org.zabbix_server = (data["zabbix_server"] or "").strip()
         if "name" in data:
             org.name = data["name"]
         session.add(org)
         session.commit()
         session.refresh(org)
-        return {"id": org.id, "name": org.name, "slug": org.slug, "webhook_url": org.webhook_url}
+        return _org_dict(org)
 
 
 @app.delete("/organizations/{org_id}", status_code=204)
@@ -1146,12 +1154,23 @@ class ApplicationCreate(SQLModel):
     apt_package: str = ""
     category: str = "tools"
     icon: str = "📦"
+    linux_post_install: str = ""
+
+
+class ApplicationPatch(SQLModel):
+    name: Optional[str] = None
+    winget_id: Optional[str] = None
+    apt_package: Optional[str] = None
+    category: Optional[str] = None
+    icon: Optional[str] = None
+    linux_post_install: Optional[str] = None
 
 
 def _app_dict(a: Application) -> dict:
     return {"id": a.id, "name": a.name, "winget_id": a.winget_id,
             "apt_package": a.apt_package, "category": a.category, "icon": a.icon,
-            "install_type": a.install_type, "installer_file": a.installer_file}
+            "install_type": a.install_type, "installer_file": a.installer_file,
+            "linux_post_install": a.linux_post_install}
 
 
 @app.get("/apps", dependencies=[Depends(get_current_user)])
@@ -1164,6 +1183,22 @@ def get_apps():
 def create_app(body: ApplicationCreate, current_user: User = Depends(require_admin)):
     with Session(engine) as session:
         app_obj = Application(**body.model_dump())
+        session.add(app_obj)
+        session.commit()
+        session.refresh(app_obj)
+        return _app_dict(app_obj)
+
+
+@app.patch("/apps/{app_id}")
+def patch_app(app_id: int, body: ApplicationPatch, current_user: User = Depends(require_admin)):
+    """Met à jour une application du catalogue (ex: son script de post-installation Linux)."""
+    with Session(engine) as session:
+        app_obj = session.get(Application, app_id)
+        if not app_obj:
+            raise HTTPException(status_code=404, detail="Application introuvable")
+        for field, value in body.model_dump(exclude_unset=True).items():
+            if value is not None:
+                setattr(app_obj, field, value)
         session.add(app_obj)
         session.commit()
         session.refresh(app_obj)
@@ -1477,9 +1512,8 @@ def get_user_data(mac: str):
     return Response(content=content, media_type="text/plain")
 
 
-@app.get("/firstboot-ubuntu/{mac}")
-def get_ubuntu_firstboot(mac: str):
-    """Script bash généré à la volée, exécuté au premier démarrage Ubuntu via systemd oneshot."""
+def _render_linux_firstboot(mac: str) -> Response:
+    """Rend le script de premier démarrage Linux (Ubuntu et Debian partagent apt-get)."""
     clean_mac = validate_mac(mac)
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
@@ -1488,7 +1522,8 @@ def get_ubuntu_firstboot(mac: str):
         profile = _resolve_profile(session, machine)
         app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
         linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
-    profile_ctx = _profile_for_template(profile, session)
+        org = session.get(Organization, machine.organization_id) if machine.organization_id else None
+        profile_ctx = _profile_for_template(profile, session)
     tv_suffix = profile_ctx.get("tv_suffix", "")
     tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
     content = jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
@@ -1496,9 +1531,62 @@ def get_ubuntu_firstboot(mac: str):
         profile=profile_ctx,
         tv_password=tv_password,
         linux_apps=list(linux_apps),
+        zabbix=_zabbix_context(machine, org),
         osiris_url=OSIRIS_BASE_URL,
     )
     return Response(content=content, media_type="text/plain")
+
+
+def _zabbix_context(machine: Machine, org: Optional[Organization]) -> Optional[dict]:
+    """
+    Paramètres de l'agent Zabbix pour cette machine, ou None s'il ne faut pas l'installer.
+
+    Deux conditions : la machine est cochée « supervisée » ET son organisation
+    déclare un collecteur. Sans organisation, pas d'adresse à qui parler — on
+    n'installe rien plutôt que d'installer un agent muet.
+    """
+    if not machine.supervised or not org or not org.zabbix_server:
+        return None
+    return {
+        "server": org.zabbix_server,
+        "hostname": machine.hostname,
+        # Lu par l'action d'auto-enregistrement côté Zabbix pour ranger l'hôte
+        # dans le bon groupe / modèle sans avoir à le créer à la main.
+        "metadata": f"osiris linux {org.slug}".strip(),
+    }
+
+
+@app.get("/bootstrap/linux")
+def get_linux_bootstrap():
+    """
+    Installateur du mécanisme d'amorçage générique, à passer une fois dans la VM
+    qui servira de template : `curl -sf <osiris>/bootstrap/linux | bash`.
+
+    Pas d'authentification, et c'est volontaire : le script ne contient aucun
+    secret — l'adresse d'OSIRIS et rien d'autre. Toute la configuration reste
+    servie par les routes /firstboot-*, qui exigent de connaître une MAC déjà
+    enregistrée. C'est ce qui permet de ne stocker aucun identifiant dans le
+    template, contrairement à un compte Proxmox dédié.
+    """
+    content = jinja_env.get_template("bootstrap-linux.sh.j2").render(
+        osiris_url=OSIRIS_BASE_URL,
+    )
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/firstboot-linux/{mac}")
+def get_linux_firstboot(mac: str):
+    """
+    Point d'entrée générique du premier démarrage Linux — celui qu'appelle le
+    mécanisme d'amorçage cuit dans les templates de VM, qui ignore la distribution.
+    """
+    return _render_linux_firstboot(mac)
+
+
+@app.get("/firstboot-ubuntu/{mac}")
+def get_ubuntu_firstboot(mac: str):
+    """Script bash généré à la volée, exécuté au premier démarrage Ubuntu via systemd oneshot."""
+    return _render_linux_firstboot(mac)
 
 
 @app.get("/preseed/{mac}")
@@ -1525,25 +1613,7 @@ def get_preseed(mac: str):
 @app.get("/firstboot-debian/{mac}")
 def get_debian_firstboot(mac: str):
     """Réutilise le template Ubuntu — apt-get est identique sur Debian."""
-    clean_mac = validate_mac(mac)
-    with Session(engine) as session:
-        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
-        if not machine:
-            raise HTTPException(status_code=404, detail="Machine inconnue")
-        profile = _resolve_profile(session, machine)
-        app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
-        linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
-    profile_ctx = _profile_for_template(profile, session)
-    tv_suffix = profile_ctx.get("tv_suffix", "")
-    tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
-    content = jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
-        machine=machine,
-        profile=profile_ctx,
-        tv_password=tv_password,
-        linux_apps=list(linux_apps),
-        osiris_url=OSIRIS_BASE_URL,
-    )
-    return Response(content=content, media_type="text/plain")
+    return _render_linux_firstboot(mac)
 
 
 @app.get("/firstboot-windows/{mac}")
@@ -1617,7 +1687,8 @@ def create_machine(machine: Machine, current_user: User = Depends(get_current_us
         "client": machine.client,
         "os": machine.os, "hostname": machine.hostname, "ou": machine.ou,
         "status": machine.status, "organization_id": machine.organization_id,
-        "profile_id": machine.profile_id, "password": plaintext_password,
+        "profile_id": machine.profile_id, "supervised": machine.supervised,
+        "password": plaintext_password,
     }
 
 
@@ -1673,6 +1744,7 @@ def get_all_machines(org_id: Optional[int] = None):
                 "hw_disk_gb": m.hw_disk_gb, "hw_disk_type": m.hw_disk_type, "hw_cpu": m.hw_cpu,
                 "notes": m.notes,
                 "user_name": m.user_name, "user_email": m.user_email,
+                "supervised": m.supervised,
                 "has_bitlocker": bool(m.bitlocker_key),
                 "has_laps": bool(m.laps_password),
                 "hypervisor_id": m.hypervisor_id,
@@ -1743,7 +1815,7 @@ def update_machine(mac: str, patch: MachinePatch, current_user: User = Depends(g
             "id": machine.id, "mac": machine.mac, "client": machine.client,
             "os": machine.os, "hostname": machine.hostname, "ou": machine.ou,
             "status": machine.status, "organization_id": machine.organization_id,
-            "deploy_mac": machine.deploy_mac,
+            "deploy_mac": machine.deploy_mac, "supervised": machine.supervised,
         }
 
 
@@ -3145,6 +3217,31 @@ class VmCreateBody(SQLModel):
     cloud_template_id: Optional[int] = None
 
 
+def _rollback_vm_machine(user: User, body, hv_id: int, vm_id: int,
+                         mac: str, exc: Exception) -> None:
+    """
+    Retire la fiche d'une VM dont la création a échoué, en laissant l'audit.
+
+    Best-effort par construction : on est déjà dans un chemin d'erreur, une
+    exception ici masquerait la vraie.
+    """
+    try:
+        with Session(engine) as session:
+            machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+            # On ne supprime que SI la fiche est bien celle qu'on vient de créer :
+            # une fiche qui pointerait ailleurs appartient à quelqu'un d'autre.
+            if machine and machine.proxmox_vm_id == vm_id:
+                session.delete(machine)
+            _log(session, user, "create_vm_failed", target_mac=mac, details={
+                "hostname": body.hostname, "vm_id": vm_id, "node": body.node,
+                "hypervisor_id": hv_id, "boot_mode": body.boot_mode,
+                "error": str(exc)[:500], "vm_destroyed": True,
+            })
+            session.commit()
+    except Exception:
+        _hv_log.exception("Echec du nettoyage de la fiche de la VM %s", vm_id)
+
+
 async def _destroy_vm_quietly(h: Hypervisor, node: str, vm_id: int) -> None:
     """Détruit une VM après un échec, sans jamais masquer l'erreur d'origine.
 
@@ -3175,8 +3272,6 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     - PXE : crée une VM vierge qui boote sur le réseau OSIRIS.
     - Cloud-init : clone un template existant, injecte le user-data via snippets Proxmox.
     """
-    import urllib.parse
-
     if body.boot_mode not in ("pxe", "cloudinit"):
         raise HTTPException(status_code=400, detail="boot_mode invalide (pxe ou cloudinit)")
     if body.boot_mode == "cloudinit" and not body.cloud_template_id:
@@ -3199,6 +3294,68 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     mac_bytes  = [0x02] + list(secrets.token_bytes(5))
     mac_colons = ":".join(f"{b:02x}" for b in mac_bytes)
     mac_plain  = "".join(f"{b:02x}" for b in mac_bytes)
+
+    # ── Fiche + audit AVANT le moindre appel à l'hyperviseur ───────────────────
+    # Ils étaient écrits après le démarrage de la VM. Tout ce qui interrompait la
+    # requête entre les deux laissait une VM qui tourne sans AUCUNE trace : ni
+    # dans l'inventaire, ni dans l'audit — donc invisible et non redéployable.
+    # Pas seulement une erreur de base : surtout l'annulation de la requête quand
+    # le client raccroche pendant un clone qui dure des minutes (`CancelledError`
+    # n'est même pas une `Exception`, aucun `except` métier ne la rattrape).
+    # C'est ce qui est arrivé à la VM 101 le 2026-07-29 à 16:31.
+    # En inversant l'ordre, le pire résidu devient une fiche sans VM : visible
+    # dans l'UI et supprimable en un clic. On préfère nettement cette erreur-là.
+    try:
+        with Session(engine) as session:
+            machine = Machine(
+                mac=mac_plain,
+                hostname=body.hostname,
+                client=body.client,
+                os=body.os,
+                ou=body.ou,
+                status="pending",
+                profile_id=body.profile_id,
+                organization_id=body.organization_id,
+                hypervisor_id=hv_id,
+                proxmox_vm_id=vm_id,
+                proxmox_node=body.node,
+            )
+            session.add(machine)
+            _log(session, current_user, "create_vm", target_mac=mac_plain, details={
+                "hostname": body.hostname, "vm_id": vm_id, "boot_mode": body.boot_mode,
+                "node": body.node, "hypervisor_id": hv_id,
+            })
+            session.commit()
+            session.refresh(machine)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Impossible d'enregistrer la machine dans OSIRIS ({exc}) — "
+                   f"aucune VM n'a été créée sur l'hyperviseur.",
+        )
+
+    try:
+        await _provision_vm(h, body, vm_id, mac_colons, mac_plain)
+    except Exception as exc:
+        # Échec côté hyperviseur : on détruit ce qui a pu être créé et on retire
+        # la fiche, mais la ligne d'audit `create_vm_failed` reste.
+        await _destroy_vm_quietly(h, body.node, vm_id)
+        _rollback_vm_machine(current_user, body, hv_id, vm_id, mac_plain, exc)
+        raise
+
+    return {
+        "mac": mac_plain,
+        "vm_id": vm_id,
+        "node": body.node,
+        "hostname": body.hostname,
+        "boot_mode": body.boot_mode,
+        "status": "pending",
+    }
+
+
+async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str, mac_plain: str) -> None:
+    """Crée et démarre la VM côté Proxmox (PXE : VM vierge ; cloud-init : clone de template)."""
+    import urllib.parse
 
     if body.boot_mode == "pxe":
         # ── Chemin PXE ──────────────────────────────────────────────────────────
@@ -3251,101 +3408,67 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
         # detruire : sinon on laisse une VM fantome et ses volumes derriere soi, et
         # `nextid` reattribue le meme identifiant a la tentative suivante — qui
         # echoue alors sur « disk already exists ». Constate 3 fois le 2026-07-29.
-        try:
+        # La destruction est faite par l'appelant, qui couvre AUSSI l'echec du
+        # clone lui-meme et retire la fiche au passage.
+        # Résoudre le profil pour le user-data
+        with Session(engine) as session:
+            profile_obj = session.get(Profile, body.profile_id) if body.profile_id else None
+            if not profile_obj:
+                profile_obj = session.exec(select(Profile).where(Profile.os == body.os)).first()
+            if not profile_obj:
+                profile_obj = Profile(name="_fallback", os=body.os)
 
-            # Résoudre le profil pour le user-data
+        profile_tpl = _profile_for_template(profile_obj)
+        linux_apps  = []
+        if profile_obj.app_ids:
             with Session(engine) as session:
-                profile_obj = session.get(Profile, body.profile_id) if body.profile_id else None
-                if not profile_obj:
-                    profile_obj = session.exec(select(Profile).where(Profile.os == body.os)).first()
-                if not profile_obj:
-                    profile_obj = Profile(name="_fallback", os=body.os)
+                ids = [int(i) for i in profile_obj.app_ids.split(",") if i.strip().isdigit()]
+                linux_apps = [a for a in session.exec(select(Application)).all()
+                              if a.id in ids and a.apt_package]
 
-            profile_tpl = _profile_for_template(profile_obj)
-            linux_apps  = []
-            if profile_obj.app_ids:
-                with Session(engine) as session:
-                    ids = [int(i) for i in profile_obj.app_ids.split(",") if i.strip().isdigit()]
-                    linux_apps = [a for a in session.exec(select(Application)).all()
-                                  if a.id in ids and a.apt_package]
-
-            # Générer le user-data cloud-init
-            osiris_url = os.environ.get("OSIRIS_BASE_URL", "http://osiris:8000")
-            user_data_rendered = jinja_env.get_template("cloud-init-user-data.j2").render(
-                machine={"hostname": body.hostname, "password_hash": "", "mac": mac_plain},
-                profile=profile_tpl,
-                linux_apps=linux_apps,
-                mac=mac_plain,
-                osiris_url=osiris_url,
-            )
-
-            # Configurer le clone : MAC, cloud-init drive, redimensionner le disque
-            cloud_config: dict = {
-                "net0":   f"virtio={mac_colons},bridge={body.bridge}",
-                "cores":  body.vcpus,
-                "memory": body.ram_mb,
-                "agent":  "enabled=1",
-                "onboot": 1,
-                "boot":   "order=scsi0",
-                "ide2":   f"{body.storage}:cloudinit",
-            }
-
-            if h.snippets_storage:
-                snippet_name = f"osiris-{vm_id}-user-data.yaml"
-                await _proxmox_upload_snippet(h, body.node, h.snippets_storage, snippet_name, user_data_rendered)
-                cloud_config["cicustom"] = f"user={h.snippets_storage}:snippets/{snippet_name}"
-            else:
-                # Fallback : paramètres cloud-init basiques sans cicustom
-                cloud_config["ciuser"] = profile_tpl.get("default_user", "osiris")
-                ssh_keys = profile_tpl.get("ssh_authorized_keys", "")
-                if ssh_keys:
-                    cloud_config["sshkeys"] = urllib.parse.quote(ssh_keys.strip(), safe="")
-
-            await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config", cloud_config)
-
-            # Redimensionner le disque si nécessaire.
-            # ⚠️ resize est un PUT, PAS un POST : en POST, Proxmox répond
-            # « Method not implemented » (501) et toute création cloud-init échoue.
-            await _proxmox_request(h, "PUT", f"/api2/json/nodes/{body.node}/qemu/{vm_id}/resize", {
-                "disk": "scsi0", "size": f"{body.disk_gb}G",
-            })
-
-            await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
-        except Exception:
-            await _destroy_vm_quietly(h, body.node, vm_id)
-            raise
-
-    # Enregistrer dans OSIRIS
-    with Session(engine) as session:
-        machine = Machine(
+        # Générer le user-data cloud-init
+        osiris_url = os.environ.get("OSIRIS_BASE_URL", "http://osiris:8000")
+        user_data_rendered = jinja_env.get_template("cloud-init-user-data.j2").render(
+            machine={"hostname": body.hostname, "password_hash": "", "mac": mac_plain},
+            profile=profile_tpl,
+            linux_apps=linux_apps,
             mac=mac_plain,
-            hostname=body.hostname,
-            client=body.client,
-            os=body.os,
-            ou=body.ou,
-            status="pending",
-            profile_id=body.profile_id,
-            organization_id=body.organization_id,
-            hypervisor_id=hv_id,
-            proxmox_vm_id=vm_id,
-            proxmox_node=body.node,
+            osiris_url=osiris_url,
         )
-        session.add(machine)
-        _log(session, current_user, "create_vm", details={
-            "hostname": body.hostname, "vm_id": vm_id, "boot_mode": body.boot_mode,
-            "node": body.node, "hypervisor_id": hv_id,
-        })
-        session.commit()
-        session.refresh(machine)
 
-    return {
-        "mac": mac_plain,
-        "vm_id": vm_id,
-        "node": body.node,
-        "hostname": body.hostname,
-        "boot_mode": body.boot_mode,
-        "status": "pending",
-    }
+        # Configurer le clone : MAC, cloud-init drive, redimensionner le disque
+        cloud_config: dict = {
+            "net0":   f"virtio={mac_colons},bridge={body.bridge}",
+            "cores":  body.vcpus,
+            "memory": body.ram_mb,
+            "agent":  "enabled=1",
+            "onboot": 1,
+            "boot":   "order=scsi0",
+            "ide2":   f"{body.storage}:cloudinit",
+        }
+
+        if h.snippets_storage:
+            snippet_name = f"osiris-{vm_id}-user-data.yaml"
+            await _proxmox_upload_snippet(h, body.node, h.snippets_storage, snippet_name, user_data_rendered)
+            cloud_config["cicustom"] = f"user={h.snippets_storage}:snippets/{snippet_name}"
+        else:
+            # Fallback : paramètres cloud-init basiques sans cicustom
+            cloud_config["ciuser"] = profile_tpl.get("default_user", "osiris")
+            ssh_keys = profile_tpl.get("ssh_authorized_keys", "")
+            if ssh_keys:
+                cloud_config["sshkeys"] = urllib.parse.quote(ssh_keys.strip(), safe="")
+
+        await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config", cloud_config)
+
+        # Redimensionner le disque si nécessaire.
+        # ⚠️ resize est un PUT, PAS un POST : en POST, Proxmox répond
+        # « Method not implemented » (501) et toute création cloud-init échoue.
+        await _proxmox_request(h, "PUT", f"/api2/json/nodes/{body.node}/qemu/{vm_id}/resize", {
+            "disk": "scsi0", "size": f"{body.disk_gb}G",
+        })
+
+        await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
+
 
 
 @app.websocket("/ws/machines")

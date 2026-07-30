@@ -1,0 +1,124 @@
+#!/bin/bash
+# ==============================================================================
+# OSIRIS - Installation du mecanisme d'amorcage generique (Linux)
+#
+# A executer UNE SEULE FOIS, en root, sur la VM qui servira de template :
+#     curl -sf {{ osiris_url }}/bootstrap/linux | bash
+#     curl -sf {{ osiris_url }}/bootstrap/linux | bash -s -- --seal   # + scellement
+#
+# Ce qu'il installe ne contient AUCUN identifiant et AUCUNE logique metier :
+# juste « lis ta MAC, demande ton script a OSIRIS, execute-le ». Tout le reste
+# (profil, applications, jonction au domaine, supervision) est decide par OSIRIS
+# au demarrage de chaque clone. Consequence : on ne refabrique PAS le template
+# quand un profil change - seulement si ce mecanisme-ci evolue, c'est-a-dire
+# quasiment jamais.
+# ==============================================================================
+set -euo pipefail
+
+OSIRIS_URL="{{ osiris_url }}"
+SEAL=0
+for arg in "$@"; do
+    case "$arg" in
+        --seal) SEAL=1 ;;
+        --url=*) OSIRIS_URL="${arg#--url=}" ;;
+        *) echo "Argument inconnu : $arg" >&2; exit 2 ;;
+    esac
+done
+
+[ "$(id -u)" -eq 0 ] || { echo "A executer en root." >&2; exit 1; }
+
+echo "[OSIRIS] Serveur : $OSIRIS_URL"
+
+mkdir -p /etc/osiris
+# Seule donnee propre a l'installation : l'URL d'OSIRIS. Ce n'est pas un secret.
+printf 'OSIRIS_URL=%s\n' "$OSIRIS_URL" > /etc/osiris/bootstrap.conf
+chmod 644 /etc/osiris/bootstrap.conf
+
+cat > /usr/local/sbin/osiris-bootstrap.sh << 'OSIRIS_BOOTSTRAP_EOF'
+#!/bin/bash
+# OSIRIS - Amorcage du premier demarrage. Generique : ce fichier est identique
+# sur toutes les machines, il ne contient ni secret ni configuration.
+LOG=/var/log/osiris-bootstrap.log
+exec >> "$LOG" 2>&1
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+OSIRIS_URL=""
+[ -r /etc/osiris/bootstrap.conf ] && . /etc/osiris/bootstrap.conf
+if [ -z "$OSIRIS_URL" ]; then
+    echo "[$(ts)] Aucune URL OSIRIS dans /etc/osiris/bootstrap.conf - abandon."
+    exit 1
+fi
+
+# Cartes physiques uniquement : un pont, un veth ou une interface docker n'a pas
+# de lien ../device et ne correspond a aucune fiche OSIRIS.
+macs() {
+    local iface mac
+    for iface in /sys/class/net/*; do
+        [ -e "$iface/device" ] || continue
+        mac=$(tr -d ':' < "$iface/address" 2>/dev/null | tr 'A-Z' 'a-z')
+        [ -n "$mac" ] && [ "$mac" != "000000000000" ] && echo "$mac"
+    done
+}
+
+SCRIPT=/run/osiris-firstboot.sh
+# 30 tentatives x 10 s = 5 min : de quoi laisser le bail DHCP s'etablir, et
+# couvrir le cas ou la VM demarre avant que sa fiche existe cote OSIRIS.
+for attempt in $(seq 1 30); do
+    for mac in $(macs); do
+        code=$(curl -sf -o "$SCRIPT" -w '%{http_code}' --max-time 20 \
+               "$OSIRIS_URL/firstboot-linux/$mac" 2>/dev/null) || code=""
+        if [ "$code" = "200" ] && [ -s "$SCRIPT" ]; then
+            echo "[$(ts)] Fiche trouvee pour la MAC $mac - execution du premier demarrage."
+            curl -sf -X POST "$OSIRIS_URL/machines/$mac/status?status=deploying" --max-time 15 || true
+            chmod +x "$SCRIPT"
+            exec /bin/bash "$SCRIPT"
+        fi
+    done
+    echo "[$(ts)] Tentative $attempt/30 : aucune fiche OSIRIS pour $(macs | tr '\n' ' ')- nouvel essai dans 10 s."
+    sleep 10
+done
+
+# On sort SANS desactiver l'unite : le script de premier demarrage est le seul a
+# le faire, une fois qu'il a reellement tourne. Une VM demarree trop tot
+# retentera donc au prochain boot au lieu de rester orpheline pour toujours.
+echo "[$(ts)] Abandon apres 5 minutes - nouvelle tentative au prochain demarrage."
+exit 0
+OSIRIS_BOOTSTRAP_EOF
+chmod 755 /usr/local/sbin/osiris-bootstrap.sh
+
+cat > /etc/systemd/system/osiris-firstboot.service << 'OSIRIS_UNIT_EOF'
+[Unit]
+Description=OSIRIS First Boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/osiris-bootstrap.sh
+RemainAfterExit=yes
+# Un premier demarrage installe des paquets et joint un domaine : il depasse
+# largement les 90 s du delai par defaut, qui tuerait le script en plein milieu.
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target
+OSIRIS_UNIT_EOF
+
+systemctl daemon-reload
+systemctl enable osiris-firstboot.service > /dev/null
+echo "[OSIRIS] Unite osiris-firstboot.service installee et activee."
+
+if [ "$SEAL" -eq 1 ]; then
+    echo "[OSIRIS] Scellement du template..."
+    command -v cloud-init > /dev/null && cloud-init clean --logs --seed || true
+    # machine-id identique sur tous les clones = meme DUID DHCP = baux qui se
+    # volent l'un l'autre. Il doit etre vide pour etre regenere au demarrage.
+    : > /etc/machine-id
+    rm -f /var/lib/dbus/machine-id
+    rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
+    rm -f /var/log/osiris-bootstrap.log /var/log/osiris-firstboot.log
+    echo "[OSIRIS] Template scelle. Eteindre la VM puis 'qm template <vmid>'."
+else
+    echo "[OSIRIS] Avant de convertir cette VM en template, relancer avec --seal"
+    echo "         (remise a zero de machine-id, des cles SSH et de cloud-init)."
+fi

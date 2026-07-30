@@ -93,6 +93,104 @@ def test_create_vm_linux_stays_virtio(client, admin_headers, monkeypatch):
     assert "bios" not in cfg and "efidisk0" not in cfg
 
 
+def test_la_fiche_est_ecrite_avant_le_moindre_appel_proxmox(client, admin_headers, monkeypatch):
+    """
+    Une VM créée avant sa fiche devient invisible si la requête est interrompue
+    entre les deux : ni inventaire, ni audit. La fiche doit donc exister d'abord,
+    quitte à laisser une fiche sans VM — visible, elle, et supprimable.
+    """
+    from sqlmodel import select
+    from models import Machine
+
+    hv_id = _make_hypervisor()
+    ordre: list = []
+
+    async def fake_get(h, path):
+        return "150" if path.endswith("/cluster/nextid") else {}
+
+    async def fake_post(h, path, data=None):
+        with Session(engine) as session:
+            fiche = session.exec(select(Machine).where(Machine.hostname == "srv-linux")).first()
+        ordre.append(("proxmox", fiche is not None))
+        return "UPID:pve:task"
+
+    monkeypatch.setattr(main, "_proxmox_get", fake_get)
+    monkeypatch.setattr(main, "_proxmox_post", fake_post)
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "srv-linux", "client": "Acme", "os": "ubuntu",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+    assert resp.status_code == 201, resp.text
+    assert ordre and all(fiche_presente for _, fiche_presente in ordre), \
+        "la fiche doit déjà exister au premier appel Proxmox"
+
+
+def test_echec_hyperviseur_detruit_la_vm_retire_la_fiche_et_laisse_une_trace(
+        client, admin_headers, monkeypatch):
+    from sqlmodel import select
+    from models import Machine, AuditLog
+
+    hv_id = _make_hypervisor()
+
+    async def fake_get(h, path):
+        return "150" if path.endswith("/cluster/nextid") else {}
+
+    async def fake_post(h, path, data=None):
+        if path.endswith("/status/start"):
+            raise RuntimeError("hyperviseur injoignable")
+        return "UPID:pve:task"
+
+    monkeypatch.setattr(main, "_proxmox_get", fake_get)
+    monkeypatch.setattr(main, "_proxmox_post", fake_post)
+
+    destroyed: list = []
+
+    async def fake_destroy(h, node, vm_id):
+        destroyed.append(vm_id)
+
+    monkeypatch.setattr(main, "_destroy_vm_quietly", fake_destroy)
+
+    # L'erreur d'origine remonte telle quelle (le client de test ne l'avale pas) :
+    # ce qui compte ici est le nettoyage effectué au passage.
+    import pytest
+    with pytest.raises(RuntimeError, match="hyperviseur injoignable"):
+        client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+            "hostname": "srv-rate", "client": "Acme", "os": "ubuntu",
+            "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+        })
+
+    assert destroyed == [150], "la VM doit être détruite, pas laissée orpheline"
+    with Session(engine) as session:
+        assert session.exec(select(Machine).where(Machine.hostname == "srv-rate")).first() is None, \
+            "la fiche d'une VM qui n'existe pas doit être retirée"
+        trace = session.exec(select(AuditLog).where(AuditLog.action == "create_vm_failed")).first()
+        assert trace is not None, "l'audit doit garder trace de la tentative"
+        assert '"vm_id": 150' in trace.details
+        assert "hyperviseur injoignable" in trace.details
+
+
+def test_mac_deja_prise_nempeche_toute_creation_de_vm(client, admin_headers, monkeypatch):
+    """Si la fiche ne peut pas être écrite, aucune VM ne doit être créée."""
+    from models import Machine
+
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _patch_proxmox(monkeypatch, captured)
+
+    monkeypatch.setattr(main.secrets, "token_bytes", lambda n: b"\xaa" * n)
+    with Session(engine) as session:
+        session.add(Machine(mac="02" + "aa" * 5, hostname="DEJA-LA", client="X", os="ubuntu"))
+        session.commit()
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "srv-linux", "client": "Acme", "os": "ubuntu",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+    assert resp.status_code == 500
+    assert "qemu" not in captured, "aucune VM ne doit avoir été créée"
+
+
 def test_create_vm_windows_rejects_cloudinit(client, admin_headers, monkeypatch):
     hv_id = _make_hypervisor()
     captured: dict = {}

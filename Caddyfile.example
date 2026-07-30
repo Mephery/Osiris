@@ -27,7 +27,7 @@ https://10.0.0.1 {
 # ── HTTP — Routes iPXE & Redirection automatique ────────────────────────────
 http://10.0.0.1 {
     # Définition du matcher nommé pour le déploiement réseau
-    @pxe path /boot* /cloud-init/* /static/* /machines/* /winpe-script/* /winpe-auto /unattend.xml* /firstboot-ubuntu/* /firstboot-debian/* /firstboot-windows/* /preseed/* /capture/*
+    @pxe path /boot* /cloud-init/* /static/* /machines/* /winpe-script/* /winpe-auto /unattend.xml* /firstboot-ubuntu/* /firstboot-debian/* /firstboot-linux/* /firstboot-windows/* /bootstrap/* /preseed/* /capture/*
 
     handle @pxe {
         reverse_proxy localhost:8000

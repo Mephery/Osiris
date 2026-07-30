@@ -562,6 +562,99 @@ Le suffixe est stocké chiffré (Fernet) et jamais renvoyé en clair via l'API.
 
 ---
 
+## VM Linux : template d'amorçage générique
+
+Une VM clonée depuis un template n'a pas d'installeur pour recevoir sa configuration :
+il faut un mécanisme qui, au premier démarrage, aille la demander à OSIRIS. Ce mécanisme
+est **cuit une fois dans le template** et **ne contient aucun identifiant** — il sait
+seulement lire sa propre MAC et appeler OSIRIS.
+
+Sur la VM qui servira de template, en root :
+
+```bash
+# Installe /usr/local/sbin/osiris-bootstrap.sh + osiris-firstboot.service
+curl -sf http://osiris.local:8000/bootstrap/linux | bash
+
+# Puis, juste avant de convertir la VM en template :
+curl -sf http://osiris.local:8000/bootstrap/linux | bash -s -- --seal
+```
+
+`--seal` remet à zéro `machine-id`, les clés d'hôte SSH et l'état cloud-init. **Sans ça,
+tous les clones partagent le même `machine-id`, donc le même DUID DHCP, et se volent
+leurs baux.**
+
+Au démarrage de chaque clone, l'unité `osiris-firstboot.service` :
+
+1. énumère les MAC des cartes **physiques** (`/sys/class/net/*/device`) ;
+2. appelle `GET /firstboot-linux/<mac>` pour chacune, jusqu'à obtenir un 200 ;
+3. poste `status=deploying`, exécute le script reçu, qui pose le nom d'hôte, installe
+   les applications du profil, joint le domaine, configure la supervision, lance les
+   smoke tests puis poste `status=deployed` ;
+4. le script désactive l'unité — **et lui seul**. Une VM démarrée avant que sa fiche
+   existe côté OSIRIS retente donc au démarrage suivant au lieu de rester orpheline.
+
+Ce script d'amorçage ne contient **aucune logique métier** : tout vient d'OSIRIS au
+démarrage. Un changement de profil, d'application ou de script de premier démarrage
+**ne nécessite pas de refabriquer le template**.
+
+---
+
+## Supervision Zabbix
+
+Deux réglages, l'un par organisation, l'autre par machine :
+
+| Où | Champ | Effet |
+|---|---|---|
+| Administration › Organisations | `zabbix_server` | Adresse du serveur ou proxy qui collecte cette organisation. Vide = aucune supervision. |
+| Fiche machine | `supervised` | Coché par défaut. Décocher exclut la machine sans toucher à l'organisation. |
+
+L'agent n'est installé que si **les deux** conditions sont réunies : un agent sans
+collecteur à qui parler serait muet.
+
+Le premier démarrage installe `zabbix-agent2` (ou `zabbix-agent` à défaut) depuis les
+dépôts de la distribution, puis écrit un fichier à part —
+`/etc/zabbix/zabbix_agent2.d/osiris.conf` — qu'une mise à jour du paquet n'écrase pas :
+
+```
+Server=<zabbix_server>
+ServerActive=<zabbix_server>
+Hostname=<nom d'hôte de la machine>
+HostMetadata=osiris linux <slug de l'organisation>
+```
+
+**Mode actif** : c'est l'agent qui sort vers le collecteur en **TCP 10051**. Le collecteur
+ne joint jamais la machine, ce qui convient à un VLAN isolé — un seul flux sortant à
+autoriser, pour tout le sous-réseau.
+
+`HostMetadata` est là pour l'**auto-enregistrement** côté Zabbix : une action qui filtre
+sur `osiris linux` crée l'hôte et lui applique le bon modèle sans intervention.
+
+Deux smoke tests remontent dans la fiche machine : l'agent tourne, et le collecteur est
+joignable en 10051. Le second teste la **règle de pare-feu**, ce qui distingue un agent
+mal configuré d'un flux bloqué.
+
+---
+
+## Post-installation des paquets Linux
+
+`Application.linux_post_install` est un script bash exécuté en root **juste après**
+l'`apt-get install` du paquet, pendant le premier démarrage. Pendant Linux de
+`installer_config_file`, qui est exclusivement Windows.
+
+Il s'édite dans Administration › Applications (bouton 🐧 sur les applications qui ont un
+paquet apt). Sans lui, OSIRIS savait poser un paquet mais pas le configurer.
+
+```bash
+# Exemple sur nginx
+rm -f /etc/nginx/sites-enabled/default
+systemctl reload nginx
+```
+
+Une erreur dans ce script n'interrompt pas le déploiement : elle est journalisée dans
+`/var/log/osiris-firstboot.log` et la suite continue.
+
+---
+
 ## Modèle de données
 
 ```
@@ -569,6 +662,7 @@ Organization          User                    Profile
 ------------          ----                    -------
 id / name / slug      id / email              id / name / os
 webhook_url           hashed_password         locale / keyboard / timezone
+zabbix_server
                       role (admin|tech)       default_user / extra_packages
                       totp_secret (Fernet)    join_domain / domain
                                               domain_join_user/password (Fernet)
@@ -589,13 +683,14 @@ client / os / ou      organization_id         winget_id (Windows)
 status / deployed_at  domain                  apt_package (Ubuntu)
 organization_id       join_user               category / icon
 profile_id            join_password (Fernet)
-hw_serial / hw_model  default_ou
+hw_serial / hw_model  default_ou              linux_post_install
 hw_ram_gb
 bitlocker_key (Fernet)
 bitlocker_pin (Fernet)
 laps_password (Fernet)
 laps_rotated_at
 user_name / user_email
+supervised
 notes
 smoke_status / smoke_results
 ```
@@ -725,6 +820,10 @@ handle /docs*           { reverse_proxy localhost:8000 }
 handle /openapi.json    { reverse_proxy localhost:8000 }
 handle /ws/*            { reverse_proxy localhost:8000 }
 ```
+
+Le bloc HTTP (celui que les machines en déploiement appellent, sans TLS) doit en plus
+laisser passer `/bootstrap/*` et `/firstboot-linux/*`, à côté des routes PXE existantes —
+sans quoi une VM clonée ne peut ni s'amorcer ni récupérer son script de premier démarrage.
 
 En Docker Compose, le `Caddyfile.docker` inclus utilise `backend:8000` comme upstream et ajoute `tls internal` (certificat auto-signé géré par Caddy).
 

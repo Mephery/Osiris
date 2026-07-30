@@ -21,6 +21,11 @@ class Organization(SQLModel, table=True):
     name: str                          # "Acme Corp"
     slug: str = Field(unique=True)     # "acme-corp"  — utilisé dans les URLs plus tard
     webhook_url: str = Field(default="")   # URL webhook (Teams, Slack, Discord…)
+    # Adresse du serveur/proxy Zabbix qui collecte les machines de cette organisation
+    # (ex. "10.231.248.130"). Les agents sont configurés en mode ACTIF : ils sortent
+    # vers cette adresse en TCP 10051, le collecteur n'a jamais à les joindre.
+    # Vide = pas de supervision pour cette organisation.
+    zabbix_server: str = Field(default="")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -134,6 +139,12 @@ class Application(SQLModel, table=True):
     install_args: str    = Field(default="")        # args silencieux (ex: "/qn VOUCHER=... LANGUAGE=fr")
     installer_config_file: str = Field(default="")  # fichier compagnon telecharge a cote (ex: config XML de l'ODT Office)
     detect_name: str     = Field(default="")        # chaine cherchee dans le registre pour le smoke test (si le nom installe differe du nom affiche)
+    # Crochet de post-installation LINUX : script bash execute juste apres l'apt-get
+    # install du paquet, dans le firstboot. Pendant Linux de installer_config_file,
+    # qui est exclusivement Windows. Sans lui on sait poser un paquet mais pas le
+    # configurer — bloquant pour tout ce qui a besoin d'un fichier de conf (agent
+    # Zabbix, exporters, VPN...). Le script tourne en root, `set -e` non impose.
+    linux_post_install: str = Field(default="")
 
 
 class Machine(SQLModel, table=True):
@@ -182,6 +193,9 @@ class Machine(SQLModel, table=True):
     # Utilisateur final affecte a cette machine (optionnel)
     user_name: str = Field(default="")
     user_email: str = Field(default="")
+    # Supervision Zabbix : activee par defaut, l'agent n'est reellement installe que
+    # si l'organisation de la machine a un zabbix_server renseigne.
+    supervised: bool = Field(default=True)
     # Notes libres
     notes: str = Field(default="")
     # Smoke tests post-deploiement
