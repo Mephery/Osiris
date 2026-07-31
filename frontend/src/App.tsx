@@ -934,7 +934,7 @@ export default function App() {
                     </div>
                     <div className="flex gap-2">
                       <input
-                        placeholder="Collecteur Zabbix (ex: 10.231.248.130) — vide = pas de supervision"
+                        placeholder="Collecteur Zabbix (ex: 192.0.2.130) — vide = pas de supervision"
                         defaultValue={org.zabbix_server}
                         onBlur={e => { if (e.target.value !== org.zabbix_server) handlePatchOrg(org.id, { zabbix_server: e.target.value }, 'Collecteur Zabbix') }}
                         className="osiris-input text-[10px] font-mono flex-1"

@@ -16,3 +16,7 @@ cryptography
 pyotp
 qrcode[pil]
 alembic
+
+# Pilotage vCenter (API SOAP vSphere) — la seule voie pour cloner une VM
+# sur vSphere 6.7, dont l'API REST ne sait pas le faire.
+pyvmomi==9.1.0.0

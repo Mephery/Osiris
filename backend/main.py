@@ -35,6 +35,7 @@ import pyotp
 import qrcode
 from models import ApiKey, Application, AuditLog, DeploymentEvent, DriverPack, DomainConfig, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
 import vpn
+import vsphere
 from auth import (
     hash_password, verify_password, create_token,
     get_current_user, require_admin
@@ -248,6 +249,9 @@ class MachinePatch(SQLModel):
     user_name: Optional[str] = None
     user_email: Optional[str] = None
     supervised: Optional[bool] = None
+    ip_cidr: Optional[str] = None
+    gateway: Optional[str] = None
+    dns_servers: Optional[str] = None
 
 class ProfileCreate(SQLModel):
     name: str
@@ -272,6 +276,11 @@ class ProfileCreate(SQLModel):
     app_ids: str = ""
     machine_type: str = "workstation"
     ssh_authorized_keys: str = ""
+    vm_vcpus: int = 2
+    vm_ram_mb: int = 2048
+    vm_disk_gb: int = 20
+    vm_data_disk_gb: int = 0
+    set_root_password: bool = False
 
 class ProfilePatch(SQLModel):
     name: Optional[str] = None
@@ -295,6 +304,11 @@ class ProfilePatch(SQLModel):
     app_ids: Optional[str] = None
     machine_type: Optional[str] = None
     ssh_authorized_keys: Optional[str] = None
+    vm_vcpus: Optional[int] = None
+    vm_ram_mb: Optional[int] = None
+    vm_disk_gb: Optional[int] = None
+    vm_data_disk_gb: Optional[int] = None
+    set_root_password: Optional[bool] = None
 
 class LoginRequest(SQLModel):
     email: str
@@ -1040,6 +1054,11 @@ def _profile_dict(p: Profile) -> dict:
         "app_ids": p.app_ids or "",
         "machine_type": p.machine_type or "workstation",
         "ssh_authorized_keys": p.ssh_authorized_keys or "",
+        "vm_vcpus": p.vm_vcpus,
+        "vm_ram_mb": p.vm_ram_mb,
+        "vm_disk_gb": p.vm_disk_gb,
+        "vm_data_disk_gb": p.vm_data_disk_gb,
+        "set_root_password": p.set_root_password,
     }
 
 
@@ -1094,6 +1113,8 @@ def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
         "wifi_password": wifi_password,
         "machine_type": p.machine_type or "workstation",
         "ssh_authorized_keys": p.ssh_authorized_keys or "",
+        "set_root_password": p.set_root_password,
+        "vm_data_disk_gb": p.vm_data_disk_gb,
     }
 
 
@@ -1564,6 +1585,21 @@ def get_user_data(mac: str):
     return Response(content=content, media_type="text/plain")
 
 
+def _osiris_url_for(session: Session, machine: Machine) -> str:
+    """
+    Adresse d'OSIRIS à graver dans les scripts de CETTE machine.
+
+    Une VM déployée sur un autre site ne voit pas forcément OSIRIS à la même
+    adresse que celles du réseau de déploiement. L'hyperviseur peut donc porter
+    sa propre URL de rappel ; sans elle, on garde la globale.
+    """
+    if machine.hypervisor_id:
+        h = session.get(Hypervisor, machine.hypervisor_id)
+        if h and h.callback_url:
+            return h.callback_url.rstrip("/")
+    return OSIRIS_BASE_URL
+
+
 def _render_linux_firstboot(mac: str) -> Response:
     """Rend le script de premier démarrage Linux (Ubuntu et Debian partagent apt-get)."""
     clean_mac = validate_mac(mac)
@@ -1576,6 +1612,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
         org = session.get(Organization, machine.organization_id) if machine.organization_id else None
         profile_ctx = _profile_for_template(profile, session)
+        osiris_url = _osiris_url_for(session, machine)
     tv_suffix = profile_ctx.get("tv_suffix", "")
     tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
     content = jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
@@ -1584,7 +1621,10 @@ def _render_linux_firstboot(mac: str) -> Response:
         tv_password=tv_password,
         linux_apps=list(linux_apps),
         zabbix=_zabbix_context(machine, org),
-        osiris_url=OSIRIS_BASE_URL,
+        # Le disque de données est une décision de PROFIL (« ce type de serveur a
+        # un volume de données séparé »), sa taille une décision de formulaire.
+        data_disk_gb=profile_ctx.get("vm_data_disk_gb", 0),
+        osiris_url=osiris_url,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -1804,6 +1844,7 @@ def get_all_machines(org_id: Optional[int] = None):
                 "notes": m.notes,
                 "user_name": m.user_name, "user_email": m.user_email,
                 "supervised": m.supervised,
+                "ip_cidr": m.ip_cidr, "gateway": m.gateway, "dns_servers": m.dns_servers,
                 "has_bitlocker": bool(m.bitlocker_key),
                 "has_laps": bool(m.laps_password),
                 "hypervisor_id": m.hypervisor_id,
@@ -1893,14 +1934,13 @@ async def delete_machine(mac: str, destroy_proxmox: bool = False, current_user: 
         h = session.get(Hypervisor, hv_id) if (destroy_proxmox and vm_id and hv_id) else None
 
     if destroy_proxmox and vm_id and hv_id and h:
+        # Par le provider : la destruction n'a rien de commun entre un appel
+        # Proxmox et un Destroy_Task vSphere. Si la VM n'existe plus côté
+        # hyperviseur, on supprime quand même la fiche d'OSIRIS.
         try:
-            await _proxmox_request(h, "POST",
-                f"/api2/json/nodes/{node}/qemu/{vm_id}/status/stop")
-            await asyncio.sleep(2)
-            await _proxmox_request(h, "DELETE",
-                f"/api2/json/nodes/{node}/qemu/{vm_id}?purge=1&destroy-unreferenced-disks=1")
+            await _provider(h).destroy_vm(h, node, vm_id)
         except HTTPException:
-            pass  # Si la VM n'existe plus côté Proxmox, on supprime quand même d'OSIRIS
+            pass
 
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
@@ -3009,6 +3049,7 @@ class HypervisorCreate(SQLModel):
     token_secret: str = ""
     tls_verify: bool = False
     snippets_storage: str = ""
+    callback_url: str = ""
     organization_id: Optional[int] = None
 
 class HypervisorPatch(SQLModel):
@@ -3016,8 +3057,10 @@ class HypervisorPatch(SQLModel):
     url: Optional[str] = None
     token_id: Optional[str] = None
     token_secret: Optional[str] = None
+    type: Optional[str] = None
     tls_verify: Optional[bool] = None
     snippets_storage: Optional[str] = None
+    callback_url: Optional[str] = None
     organization_id: Optional[int] = None
 
 
@@ -3031,6 +3074,7 @@ def _hypervisor_dict(h: Hypervisor) -> dict:
         "token_secret": "***" if h.token_secret else "",
         "tls_verify": h.tls_verify,
         "snippets_storage": h.snippets_storage or "",
+        "callback_url": h.callback_url or "",
         "organization_id": h.organization_id,
         "created_at": h.created_at.isoformat(),
     }
@@ -3162,114 +3206,172 @@ def delete_hypervisor(hv_id: int, current_user: User = Depends(require_admin)):
         session.commit()
 
 
-@app.post("/hypervisors/{hv_id}/test")
-async def test_hypervisor(hv_id: int, _: User = Depends(require_admin)):
-    """Teste la connexion Proxmox et retourne la version + les noeuds disponibles."""
+# ── Aiguillage par type d'hyperviseur ─────────────────────────────────────────
+# `Hypervisor.type` existait depuis le début mais n'était lu NULLE PART : toutes
+# les routes appelaient Proxmox en dur. Ce module d'aiguillage est désormais le
+# seul endroit où l'on choisit l'implémentation — en ajouter une revient à écrire
+# une classe et une entrée dans `_PROVIDERS`.
+#
+# Le vocabulaire reste celui de Proxmox (« nœud », « stockage »), parce que c'est
+# celui de l'UI : côté vSphere, un nœud est un cluster et un stockage un datastore.
+
+class ProxmoxProvider:
+    """Hyperviseur Proxmox VE, piloté par jeton d'API."""
+
+    label = "Proxmox VE"
+
+    @staticmethod
+    async def test(h: Hypervisor) -> dict:
+        version = await _proxmox_get(h, "/api2/json/version")
+        return {
+            "ok": True,
+            "type": h.type,
+            "version": version.get("version", "?"),
+            "proxmox_version": version.get("version", "?"),   # compat UI
+            "nodes": await ProxmoxProvider.list_nodes(h),
+        }
+
+    @staticmethod
+    async def list_nodes(h: Hypervisor) -> list[dict]:
+        nodes = await _proxmox_get(h, "/api2/json/nodes")
+        return [
+            {
+                "node":       n["node"],
+                "status":     n.get("status", "unknown"),
+                "cpu":        round(n.get("cpu", 0) * 100, 1),
+                "maxcpu":     n.get("maxcpu", 0),
+                "mem_gb":     round(n.get("mem", 0) / 1073741824, 1),
+                "maxmem_gb":  round(n.get("maxmem", 0) / 1073741824, 1),
+            }
+            for n in nodes
+        ]
+
+    @staticmethod
+    async def list_storages(h: Hypervisor, node: str) -> list[dict]:
+        storages = await _proxmox_get(h, f"/api2/json/nodes/{node}/storage")
+        return [
+            {
+                "storage":   s["storage"],
+                "type":      s.get("type", "?"),
+                "active":    s.get("active", 0) == 1,
+                "avail_gb":  round(s.get("avail", 0) / 1073741824, 1),
+                "total_gb":  round(s.get("total", 0) / 1073741824, 1),
+                "content":   s.get("content", ""),
+            }
+            for s in storages
+            if "images" in s.get("content", "")  # ceux qui acceptent des disques VM
+        ]
+
+    @staticmethod
+    async def list_networks(h: Hypervisor, node: str) -> list[dict]:
+        networks = await _proxmox_get(h, f"/api2/json/nodes/{node}/network")
+        return [
+            {
+                "iface":    n["iface"],
+                "type":     n.get("type", "?"),
+                "address":  n.get("address", ""),
+                "comments": n.get("comments", ""),
+            }
+            for n in networks
+            if n.get("type") in ("bridge", "bond")
+        ]
+
+    @staticmethod
+    async def list_templates(h: Hypervisor, node: str) -> list[dict]:
+        vms = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu")
+        return [
+            {
+                "vmid":      int(v["vmid"]),
+                "name":      v.get("name", f"VM {v['vmid']}"),
+                "status":    v.get("status", "unknown"),
+                "cores":     v.get("cpus", 0),
+                "maxmem_gb": round(v.get("maxmem", 0) / 1073741824, 1),
+            }
+            for v in vms
+            if v.get("template") == 1
+        ]
+
+    @staticmethod
+    def generate_mac() -> str:
+        """MAC dans la plage « locally administered » (02:…), libre d'usage."""
+        return "02" + secrets.token_bytes(5).hex()
+
+    @staticmethod
+    async def next_vm_id(h: Hypervisor) -> int:
+        data = await _proxmox_get(h, "/api2/json/cluster/nextid")
+        return int(data) if isinstance(data, (str, int)) else int(data.get("nextid", 100))
+
+    @staticmethod
+    async def provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
+                           mac_plain: str, user_data: str = "",
+                           render_user_data=None) -> Optional[dict]:
+        await _provision_vm(h, body, vm_id, mac_colons, mac_plain, user_data)
+        # Proxmox : identifiant et MAC étaient connus d'avance, rien à corriger.
+        return None
+
+    @staticmethod
+    async def destroy_vm(h: Hypervisor, node: str, vm_id: int) -> None:
+        await _destroy_vm_quietly(h, node, vm_id)
+
+
+_PROVIDERS = {
+    "proxmox": ProxmoxProvider,
+    "vsphere": vsphere.VSphereProvider,
+}
+
+
+def _provider(h: Hypervisor):
+    provider = _PROVIDERS.get((h.type or "proxmox").lower())
+    if not provider:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type d'hyperviseur non supporté : {h.type} "
+                   f"(connus : {', '.join(sorted(_PROVIDERS))})",
+        )
+    return provider
+
+
+def _get_hypervisor(hv_id: int) -> Hypervisor:
     with Session(engine) as session:
         h = session.get(Hypervisor, hv_id)
         if not h:
             raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
-    version = await _proxmox_get(h, "/api2/json/version")
-    nodes   = await _proxmox_get(h, "/api2/json/nodes")
-    return {
-        "ok": True,
-        "proxmox_version": version.get("version", "?"),
-        "nodes": [
-            {
-                "node":   n["node"],
-                "status": n.get("status", "unknown"),
-                "cpu":    round(n.get("cpu", 0) * 100, 1),
-                "maxcpu": n.get("maxcpu", 0),
-                "mem_gb": round(n.get("mem", 0) / 1073741824, 1),
-                "maxmem_gb": round(n.get("maxmem", 0) / 1073741824, 1),
-            }
-            for n in nodes
-        ],
-    }
+        return h
+
+
+@app.post("/hypervisors/{hv_id}/test")
+async def test_hypervisor(hv_id: int, _: User = Depends(require_admin)):
+    """Teste la connexion à l'hyperviseur et retourne sa version + ses nœuds."""
+    h = _get_hypervisor(hv_id)
+    return await _provider(h).test(h)
 
 
 @app.get("/hypervisors/{hv_id}/nodes")
 async def get_hypervisor_nodes(hv_id: int, _: User = Depends(require_admin)):
-    """Liste les noeuds Proxmox avec leurs ressources disponibles (appel live)."""
-    with Session(engine) as session:
-        h = session.get(Hypervisor, hv_id)
-        if not h:
-            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
-    nodes = await _proxmox_get(h, "/api2/json/nodes")
-    return [
-        {
-            "node":       n["node"],
-            "status":     n.get("status", "unknown"),
-            "cpu":        round(n.get("cpu", 0) * 100, 1),
-            "maxcpu":     n.get("maxcpu", 0),
-            "mem_gb":     round(n.get("mem", 0) / 1073741824, 1),
-            "maxmem_gb":  round(n.get("maxmem", 0) / 1073741824, 1),
-        }
-        for n in nodes
-    ]
+    """Nœuds (Proxmox) ou clusters (vSphere) avec leurs ressources, en direct."""
+    h = _get_hypervisor(hv_id)
+    return await _provider(h).list_nodes(h)
 
 
 @app.get("/hypervisors/{hv_id}/nodes/{node}/storages")
 async def get_node_storages(hv_id: int, node: str, _: User = Depends(require_admin)):
-    """Liste les pools de stockage disponibles sur un noeud Proxmox."""
-    with Session(engine) as session:
-        h = session.get(Hypervisor, hv_id)
-        if not h:
-            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
-    storages = await _proxmox_get(h, f"/api2/json/nodes/{node}/storage")
-    return [
-        {
-            "storage":   s["storage"],
-            "type":      s.get("type", "?"),
-            "active":    s.get("active", 0) == 1,
-            "avail_gb":  round(s.get("avail", 0) / 1073741824, 1),
-            "total_gb":  round(s.get("total", 0) / 1073741824, 1),
-            "content":   s.get("content", ""),
-        }
-        for s in storages
-        if "images" in s.get("content", "")  # ne garder que ceux qui acceptent des disques VM
-    ]
+    """Stockages acceptant des disques de VM (pools Proxmox / datastores vSphere)."""
+    h = _get_hypervisor(hv_id)
+    return await _provider(h).list_storages(h, node)
 
 
 @app.get("/hypervisors/{hv_id}/nodes/{node}/networks")
 async def get_node_networks(hv_id: int, node: str, _: User = Depends(require_admin)):
-    """Liste les bridges réseau disponibles sur un noeud Proxmox."""
-    with Session(engine) as session:
-        h = session.get(Hypervisor, hv_id)
-        if not h:
-            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
-    networks = await _proxmox_get(h, f"/api2/json/nodes/{node}/network")
-    return [
-        {
-            "iface":   n["iface"],
-            "type":    n.get("type", "?"),
-            "address": n.get("address", ""),
-            "comments": n.get("comments", ""),
-        }
-        for n in networks
-        if n.get("type") in ("bridge", "bond")
-    ]
+    """Réseaux disponibles (bridges Proxmox / port groups vSphere)."""
+    h = _get_hypervisor(hv_id)
+    return await _provider(h).list_networks(h, node)
 
 
 @app.get("/hypervisors/{hv_id}/nodes/{node}/templates")
 async def get_node_templates(hv_id: int, node: str, _: User = Depends(require_admin)):
-    """Liste les VMs configurées comme templates sur un noeud Proxmox."""
-    with Session(engine) as session:
-        h = session.get(Hypervisor, hv_id)
-        if not h:
-            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
-    vms = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu")
-    return [
-        {
-            "vmid":   int(v["vmid"]),
-            "name":   v.get("name", f"VM {v['vmid']}"),
-            "status": v.get("status", "unknown"),
-            "cores":  v.get("cpus", 0),
-            "maxmem_gb": round(v.get("maxmem", 0) / 1073741824, 1),
-        }
-        for v in vms
-        if v.get("template") == 1
-    ]
+    """Templates clonables."""
+    h = _get_hypervisor(hv_id)
+    return await _provider(h).list_templates(h, node)
 
 
 class VmCreateBody(SQLModel):
@@ -3289,7 +3391,16 @@ class VmCreateBody(SQLModel):
     bridge: str = "vmbr0"            # bridge réseau
     vcpus: int = 2
     ram_mb: int = 2048               # RAM en Mo
-    disk_gb: int = 20                # disque en Go
+    disk_gb: int = 20                # disque système en Go
+    # Second disque, monté sur /data au premier démarrage. 0 = pas de disque de
+    # données. Le formulaire propose par défaut la valeur du profil.
+    data_disk_gb: int = 0
+    # Adressage IP. Vide = DHCP. À renseigner sur les VLAN serveurs, qui n'ont
+    # généralement pas de DHCP : sans adresse, la VM démarre et ne rappelle
+    # jamais OSIRIS.
+    ip_cidr: str = ""        # ex. "203.0.113.60/24"
+    gateway: str = ""
+    dns_servers: str = ""    # séparés par des virgules
     # Mode de boot
     boot_mode: str = "pxe"          # "pxe" | "cloudinit"
     # PXE : ISO a booter (ex: "local:iso/ubuntu-24.04.iso") — optionnel
@@ -3346,6 +3457,43 @@ async def _destroy_vm_quietly(h: Hypervisor, node: str, vm_id: int) -> None:
         )
 
 
+def _resolve_profile_for_vm(body) -> Profile:
+    """Profil d'une VM en cours de création : celui demandé, sinon le premier de l'OS."""
+    with Session(engine) as session:
+        profile = session.get(Profile, body.profile_id) if body.profile_id else None
+        if not profile:
+            profile = session.exec(select(Profile).where(Profile.os == body.os)).first()
+    return profile or Profile(name="_fallback", os=body.os)
+
+
+def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str) -> str:
+    """
+    User-data cloud-init d'une VM à créer, indépendant de l'hyperviseur.
+
+    Proxmox le dépose en snippet, vSphere l'injecte en `guestinfo` : même
+    contenu, deux véhicules. L'URL de rappel est celle de l'hyperviseur quand
+    elle est renseignée — une VM d'un autre site ne voit pas forcément OSIRIS
+    à la même adresse que le réseau de déploiement.
+    """
+    profile_obj = _resolve_profile_for_vm(body)
+    profile_tpl = _profile_for_template(profile_obj)
+    linux_apps = []
+    if profile_obj.app_ids:
+        with Session(engine) as session:
+            ids = [int(i) for i in profile_obj.app_ids.split(",") if i.strip().isdigit()]
+            linux_apps = [a for a in session.exec(select(Application)).all()
+                          if a.id in ids and a.apt_package]
+    osiris_url = (h.callback_url or "").rstrip("/") \
+        or os.environ.get("OSIRIS_BASE_URL", "http://osiris:8000")
+    return jinja_env.get_template("cloud-init-user-data.j2").render(
+        machine={"hostname": body.hostname, "password_hash": "", "mac": mac_plain},
+        profile=profile_tpl,
+        linux_apps=linux_apps,
+        mac=mac_plain,
+        osiris_url=osiris_url,
+    )
+
+
 @app.post("/hypervisors/{hv_id}/create-vm", status_code=201)
 async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends(require_admin)):
     """
@@ -3367,14 +3515,22 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
         if not h:
             raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
 
-    # VMID libre
-    next_id_data = await _proxmox_get(h, "/api2/json/cluster/nextid")
-    vm_id = int(next_id_data) if isinstance(next_id_data, (str, int)) else int(next_id_data.get("nextid", 100))
+    provider = _provider(h)
 
-    # MAC aléatoire (plage "locally administered")
-    mac_bytes  = [0x02] + list(secrets.token_bytes(5))
-    mac_colons = ":".join(f"{b:02x}" for b in mac_bytes)
-    mac_plain  = "".join(f"{b:02x}" for b in mac_bytes)
+    # Identifiant de VM libre côté hyperviseur (0 sur vSphere, qui l'attribue lui-même)
+    vm_id = await provider.next_vm_id(h)
+
+    # MAC générée par le provider : chaque hyperviseur impose sa plage. VMware
+    # n'accepte une MAC imposée que dans 00:50:56:00:00:00–00:50:56:3F:FF:FF ;
+    # une MAC « locally administered » y serait refusée.
+    mac_plain  = provider.generate_mac()
+    mac_colons = ":".join(mac_plain[i:i + 2] for i in range(0, 12, 2))
+
+    # Le user-data cloud-init est rendu ici, pour les deux hyperviseurs : Proxmox
+    # le dépose en snippet, vSphere l'injecte en guestinfo. Même contenu.
+    user_data = ""
+    if body.boot_mode == "cloudinit":
+        user_data = _render_cloud_init_user_data(h, body, mac_plain)
 
     # ── Fiche + audit AVANT le moindre appel à l'hyperviseur ───────────────────
     # Ils étaient écrits après le démarrage de la VM. Tout ce qui interrompait la
@@ -3400,6 +3556,9 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                 hypervisor_id=hv_id,
                 proxmox_vm_id=vm_id,
                 proxmox_node=body.node,
+                ip_cidr=body.ip_cidr.strip(),
+                gateway=body.gateway.strip(),
+                dns_servers=body.dns_servers.strip(),
             )
             session.add(machine)
             _log(session, current_user, "create_vm", target_mac=mac_plain, details={
@@ -3416,11 +3575,33 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
         )
 
     try:
-        await _provision_vm(h, body, vm_id, mac_colons, mac_plain)
+        created = await provider.provision_vm(
+            h, body, vm_id, mac_colons, mac_plain, user_data,
+            lambda mac: _render_cloud_init_user_data(h, body, mac),
+        )
+        if created:
+            # vSphere décide de l'identifiant ET de la MAC au moment du clone.
+            # La fiche existe déjà (écrite avant tout appel à l'hyperviseur) :
+            # on la corrige avec ce que la plateforme a réellement attribué,
+            # sans quoi la machine s'annoncerait sous une MAC inconnue d'OSIRIS.
+            vm_id = created.get("vm_id") or vm_id
+            real_mac = created.get("mac") or mac_plain
+            with Session(engine) as session:
+                m = session.exec(select(Machine).where(Machine.mac == mac_plain)).first()
+                if m:
+                    m.proxmox_vm_id = vm_id
+                    if real_mac != mac_plain:
+                        m.mac = real_mac
+                        _log(session, current_user, "update_machine", target_mac=real_mac,
+                             details={"mac_provisoire": mac_plain,
+                                      "mac_attribuee_par_hyperviseur": real_mac})
+                    session.add(m)
+                    session.commit()
+            mac_plain = real_mac
     except Exception as exc:
         # Échec côté hyperviseur : on détruit ce qui a pu être créé et on retire
         # la fiche, mais la ligne d'audit `create_vm_failed` reste.
-        await _destroy_vm_quietly(h, body.node, vm_id)
+        await provider.destroy_vm(h, body.node, vm_id)
         _rollback_vm_machine(current_user, body, hv_id, vm_id, mac_plain, exc)
         raise
 
@@ -3434,7 +3615,8 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     }
 
 
-async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str, mac_plain: str) -> None:
+async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
+                        mac_plain: str, user_data: str = "") -> None:
     """Crée et démarre la VM côté Proxmox (PXE : VM vierge ; cloud-init : clone de template)."""
     import urllib.parse
 
@@ -3468,6 +3650,14 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str, mac_pl
                 "scsihw": "virtio-scsi-pci",
                 "scsi0": f"{body.storage}:{body.disk_gb},format=qcow2",
             }
+        if body.data_disk_gb:
+            # Disque de donnees, laisse VIERGE : c'est le premier demarrage qui le
+            # formate et le monte sur /data. Sur le materiel Windows (SATA), il
+            # prend la place suivante sur le meme controleur.
+            if body.os == "windows":
+                vm_config["sata1"] = f"{body.storage}:{body.data_disk_gb},format=qcow2"
+            else:
+                vm_config["scsi1"] = f"{body.storage}:{body.data_disk_gb},format=qcow2"
         if body.iso:
             vm_config["ide2"] = f"{body.iso},media=cdrom"
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu", vm_config)
@@ -3491,31 +3681,9 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str, mac_pl
         # echoue alors sur « disk already exists ». Constate 3 fois le 2026-07-29.
         # La destruction est faite par l'appelant, qui couvre AUSSI l'echec du
         # clone lui-meme et retire la fiche au passage.
-        # Résoudre le profil pour le user-data
-        with Session(engine) as session:
-            profile_obj = session.get(Profile, body.profile_id) if body.profile_id else None
-            if not profile_obj:
-                profile_obj = session.exec(select(Profile).where(Profile.os == body.os)).first()
-            if not profile_obj:
-                profile_obj = Profile(name="_fallback", os=body.os)
-
-        profile_tpl = _profile_for_template(profile_obj)
-        linux_apps  = []
-        if profile_obj.app_ids:
-            with Session(engine) as session:
-                ids = [int(i) for i in profile_obj.app_ids.split(",") if i.strip().isdigit()]
-                linux_apps = [a for a in session.exec(select(Application)).all()
-                              if a.id in ids and a.apt_package]
-
-        # Générer le user-data cloud-init
-        osiris_url = os.environ.get("OSIRIS_BASE_URL", "http://osiris:8000")
-        user_data_rendered = jinja_env.get_template("cloud-init-user-data.j2").render(
-            machine={"hostname": body.hostname, "password_hash": "", "mac": mac_plain},
-            profile=profile_tpl,
-            linux_apps=linux_apps,
-            mac=mac_plain,
-            osiris_url=osiris_url,
-        )
+        # Le user-data est rendu par l'appelant (commun aux deux hyperviseurs).
+        # Le profil reste nécessaire ici pour le repli sans snippets.
+        profile_tpl = _profile_for_template(_resolve_profile_for_vm(body))
 
         # Configurer le clone : MAC, cloud-init drive, redimensionner le disque
         cloud_config: dict = {
@@ -3527,10 +3695,26 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str, mac_pl
             "boot":   "order=scsi0",
             "ide2":   f"{body.storage}:cloudinit",
         }
+        if body.data_disk_gb:
+            # Le template n'a qu'un disque : celui-ci s'ajoute, vierge, et sera
+            # formate puis monte sur /data au premier demarrage.
+            cloud_config["scsi1"] = f"{body.storage}:{body.data_disk_gb}"
+
+        # Adressage : cloud-init applique `ipconfig0` au premier demarrage.
+        # Sans lui, Proxmox laisse la carte en DHCP.
+        if body.ip_cidr:
+            ipconfig = f"ip={body.ip_cidr}"
+            if body.gateway:
+                ipconfig += f",gw={body.gateway}"
+            cloud_config["ipconfig0"] = ipconfig
+            if body.dns_servers:
+                cloud_config["nameserver"] = body.dns_servers.replace(",", " ")
+        else:
+            cloud_config["ipconfig0"] = "ip=dhcp"
 
         if h.snippets_storage:
             snippet_name = f"osiris-{vm_id}-user-data.yaml"
-            await _proxmox_upload_snippet(h, body.node, h.snippets_storage, snippet_name, user_data_rendered)
+            await _proxmox_upload_snippet(h, body.node, h.snippets_storage, snippet_name, user_data)
             cloud_config["cicustom"] = f"user={h.snippets_storage}:snippets/{snippet_name}"
         else:
             # Fallback : paramètres cloud-init basiques sans cicustom

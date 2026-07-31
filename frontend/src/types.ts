@@ -81,6 +81,10 @@ export interface Machine {
   /** Installer l'agent Zabbix au premier démarrage (sans effet si l'organisation
    *  n'a pas de collecteur renseigné). Activé par défaut. */
   supervised?: boolean;
+  /** Adressage IP fixe appliqué par cloud-init. Vide = DHCP. */
+  ip_cidr?: string;
+  gateway?: string;
+  dns_servers?: string;
   notes?: string;
   smoke_status?: string;
   smoke_results?: string;
@@ -129,6 +133,14 @@ export interface Profile {
   laps_rotation_days: number;
   machine_type: string;
   ssh_authorized_keys: string;
+  /** Gabarit matériel des VM créées avec ce profil (valeurs par défaut du formulaire). */
+  vm_vcpus: number;
+  vm_ram_mb: number;
+  vm_disk_gb: number;
+  /** Second disque monté sur /data. 0 = pas de disque de données. */
+  vm_data_disk_gb: number;
+  /** Linux : poser un mot de passe root aléatoire, stocké chiffré côté OSIRIS. */
+  set_root_password: boolean;
 }
 
 export interface Application {
@@ -162,6 +174,8 @@ export interface Hypervisor {
   token_secret: string;
   tls_verify: boolean;
   snippets_storage: string;
+  /** URL d'OSIRIS telle que la voient les VM de cet hyperviseur. Vide = URL globale. */
+  callback_url: string;
   organization_id: number | null;
   created_at: string;
 }

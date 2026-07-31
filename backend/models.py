@@ -22,7 +22,7 @@ class Organization(SQLModel, table=True):
     slug: str = Field(unique=True)     # "acme-corp"  — utilisé dans les URLs plus tard
     webhook_url: str = Field(default="")   # URL webhook (Teams, Slack, Discord…)
     # Adresse du serveur/proxy Zabbix qui collecte les machines de cette organisation
-    # (ex. "10.231.248.130"). Les agents sont configurés en mode ACTIF : ils sortent
+    # (ex. "192.0.2.130"). Les agents sont configurés en mode ACTIF : ils sortent
     # vers cette adresse en TCP 10051, le collecteur n'a jamais à les joindre.
     # Vide = pas de supervision pour cette organisation.
     zabbix_server: str = Field(default="")
@@ -116,6 +116,20 @@ class Profile(SQLModel, table=True):
     laps_rotation_days: int = Field(default=0)      # 0 = rotation desactivee
     machine_type: str = Field(default="workstation")       # "workstation" | "server"
     ssh_authorized_keys: str = Field(default="")           # clés SSH (une par ligne)
+    # Gabarit materiel des VM creees avec ce profil. Sert de valeur par defaut au
+    # formulaire de creation : un profil « serveur de fichiers » n'a pas les memes
+    # besoins qu'un poste, et les resaisir a chaque VM est une source d'erreur.
+    vm_vcpus: int = Field(default=2)
+    vm_ram_mb: int = Field(default=2048)
+    vm_disk_gb: int = Field(default=20)
+    # Second disque, monte sur /data au premier demarrage. 0 = pas de disque de
+    # donnees. Separer systeme et donnees est la norme sur un serveur : on peut
+    # redimensionner, sauvegarder ou reinstaller l'un sans toucher a l'autre.
+    vm_data_disk_gb: int = Field(default=0)
+    # Linux : poser un mot de passe root aleatoire, stocke chiffre cote OSIRIS.
+    # Acces de SECOURS par la console quand le reseau ou SSH est tombe. Root
+    # reste interdit en SSH : ce mot de passe ne sert qu'en local.
+    set_root_password: bool = Field(default=False)
 
 
 class Hypervisor(SQLModel, table=True):
@@ -128,6 +142,12 @@ class Hypervisor(SQLModel, table=True):
     token_secret: str = Field(default="") # chiffré Fernet
     tls_verify: bool = Field(default=False)       # False = ignorer cert self-signé (courant en lab)
     snippets_storage: str = Field(default="")    # nom du stockage Proxmox avec content-type "snippets" (ex: "local")
+    # Adresse d'OSIRIS telle que la voient les VM DE CET HYPERVISEUR. Vide = la
+    # variable globale OSIRIS_BASE_URL. Indispensable des qu'on deploie sur un
+    # second site : l'URL est gravee dans les scripts de premier demarrage, et
+    # une VM qui ne l'atteint pas ne rappelle jamais OSIRIS — elle reste
+    # eternellement « en attente » sans que rien n'explique pourquoi.
+    callback_url: str = Field(default="")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -200,6 +220,14 @@ class Machine(SQLModel, table=True):
     # Utilisateur final affecte a cette machine (optionnel)
     user_name: str = Field(default="")
     user_email: str = Field(default="")
+    # Adressage IP fixe, applique par cloud-init au premier demarrage. Vide =
+    # DHCP. Indispensable des qu'on deploie sur un VLAN serveur : ils sont
+    # rarement servis par un DHCP, et une VM sans bail demarre, tourne, et ne
+    # rappelle jamais OSIRIS sans que rien ne l'explique.
+    ip_cidr: str = Field(default="")        # ex. "203.0.113.60/24"
+    gateway: str = Field(default="")        # ex. "203.0.113.1"
+    dns_servers: str = Field(default="")    # separes par des virgules
+
     # Supervision Zabbix : activee par defaut, l'agent n'est reellement installe que
     # si l'organisation de la machine a un zabbix_server renseigne.
     supervised: bool = Field(default=True)

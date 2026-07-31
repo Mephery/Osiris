@@ -18,8 +18,8 @@ interface InfrastructureTabProps {
 }
 
 export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
-  const [newHv, setNewHv]               = useState({ name: '', url: '', token_id: '', token_secret: '', tls_verify: false, snippets_storage: '' })
-  const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; proxmox_version?: string; nodes?: ProxmoxNode[]; error?: string } | null>>({})
+  const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: false, snippets_storage: '', callback_url: '' })
+  const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; error?: string } | null>>({})
   const [hvTesting, setHvTesting]       = useState<Record<number, boolean>>({})
   const [showVmForm, setShowVmForm]     = useState(false)
   const [vmHvId, setVmHvId]             = useState<number | ''>('')
@@ -27,7 +27,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
   const [vmStorages, setVmStorages]     = useState<{storage:string;type:string;avail_gb:number;total_gb:number}[]>([])
   const [vmNetworks, setVmNetworks]     = useState<{iface:string;type:string;address:string}[]>([])
   const [vmNodes, setVmNodes]           = useState<ProxmoxNode[]>([])
-  const [vmForm, setVmForm]             = useState({ hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, iso: '', boot_mode: 'pxe', cloud_template_id: '' })
+  const [vmForm, setVmForm]             = useState({ hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', cloud_template_id: '' })
   const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
   const [vmCreating, setVmCreating]     = useState(false)
 
@@ -36,8 +36,8 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
     fetch(`${API_URL}/hypervisors`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
-      body: JSON.stringify({ ...newHv, type: 'proxmox' }),
-    }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', token_id: '', token_secret: '', tls_verify: false, snippets_storage: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
+      body: JSON.stringify(newHv),
+    }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: false, snippets_storage: '', callback_url: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
       .catch(() => toast.error('Erreur création hyperviseur'))
   }
 
@@ -112,7 +112,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
     }).then(data => {
       toast.success(`VM "${data.hostname}" créée (VMID ${data.vm_id}) - en attente de boot PXE`)
       setShowVmForm(false)
-      setVmForm({ hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, iso: '', boot_mode: 'pxe', cloud_template_id: '' })
+      setVmForm({ hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', cloud_template_id: '' })
       onVmCreated()
     }).catch(err => toast.error(err.message))
       .finally(() => setVmCreating(false))
@@ -153,7 +153,8 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
                 <div className={`rounded p-3 text-xs font-mono space-y-2 ${result.ok ? 'bg-green-950/40 border border-green-800/40' : 'bg-red-950/40 border border-red-800/40'}`}>
                   {result.ok ? (
                     <>
-                      <p className="text-green-400">Connexion OK - Proxmox {result.proxmox_version}</p>
+                      {/* vCenter renvoie son nom complet, Proxmox un simple numéro de version. */}
+                      <p className="text-green-400">Connexion OK - {h.type === 'vsphere' ? result.version : `Proxmox ${result.proxmox_version ?? result.version}`}</p>
                       {result.nodes && result.nodes.length > 0 && (
                         <table className="w-full text-[10px]">
                           <thead>
@@ -213,7 +214,21 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
                   <option value="debian">Debian</option>
                   <option value="windows">Windows</option>
                 </select>
-                <select value={vmForm.profile_id} onChange={e => setVmForm(f => ({...f, profile_id: e.target.value}))} className="osiris-input text-xs">
+                {/* Choisir un profil reprend son gabarit matériel : c'est le profil
+                    qui sait ce que demande ce type de serveur, pas l'opérateur. Les
+                    valeurs restent modifiables juste en dessous. */}
+                <select value={vmForm.profile_id} onChange={e => {
+                    const p = profiles.find(p => String(p.id) === e.target.value)
+                    setVmForm(f => ({
+                      ...f, profile_id: e.target.value,
+                      ...(p ? {
+                        vcpus: p.vm_vcpus ?? f.vcpus,
+                        ram_mb: p.vm_ram_mb ?? f.ram_mb,
+                        disk_gb: p.vm_disk_gb ?? f.disk_gb,
+                        data_disk_gb: p.vm_data_disk_gb ?? f.data_disk_gb,
+                      } : {}),
+                    }))
+                  }} className="osiris-input text-xs">
                   <option value="">Profil par défaut</option>
                   {profiles.filter(p => p.os === vmForm.os).map(p => (
                     <option key={p.id} value={p.id}>{p.name}{p.machine_type === 'server' ? ' [serveur]' : ''}</option>
@@ -271,9 +286,33 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
                   <label className="text-[10px] text-slate-500 shrink-0">RAM Mo</label>
                   <input type="number" min={512} step={512} value={vmForm.ram_mb} onChange={e => setVmForm(f => ({...f, ram_mb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
                 </div>
-                <div className="flex items-center gap-1 col-span-2">
+                <div className="flex items-center gap-1">
                   <label className="text-[10px] text-slate-500 shrink-0">Disque Go</label>
                   <input type="number" min={8} value={vmForm.disk_gb} onChange={e => setVmForm(f => ({...f, disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+                </div>
+                <div className="flex items-center gap-1">
+                  <label className="text-[10px] text-slate-500 shrink-0" title="Second disque, formaté et monté sur /data au premier démarrage. 0 = aucun.">/data Go</label>
+                  <input type="number" min={0} value={vmForm.data_disk_gb} onChange={e => setVmForm(f => ({...f, data_disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+                </div>
+
+                <div className="col-span-2 space-y-1 pt-1">
+                  <p className="text-[9px] uppercase tracking-widest text-slate-600">
+                    Adressage IP <span className="normal-case text-slate-700">(vide = DHCP)</span>
+                  </p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <input placeholder="10.0.0.60/24" value={vmForm.ip_cidr}
+                      onChange={e => setVmForm(f => ({...f, ip_cidr: e.target.value}))}
+                      className="osiris-input text-xs font-mono" />
+                    <input placeholder="Passerelle" value={vmForm.gateway}
+                      onChange={e => setVmForm(f => ({...f, gateway: e.target.value}))}
+                      className="osiris-input text-xs font-mono" />
+                    <input placeholder="DNS (séparés par ,)" value={vmForm.dns_servers}
+                      onChange={e => setVmForm(f => ({...f, dns_servers: e.target.value}))}
+                      className="osiris-input text-xs font-mono" />
+                  </div>
+                  <p className="text-[9px] text-slate-600">
+                    À renseigner sur un VLAN sans DHCP : sans adresse, la VM démarre et ne rappelle jamais OSIRIS.
+                  </p>
                 </div>
 
                 {vmForm.boot_mode === 'pxe' ? (
@@ -303,10 +342,18 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
         <p className="text-[9px] uppercase tracking-widest text-slate-600">Ajouter un hyperviseur</p>
         <div className="grid grid-cols-2 gap-2">
           <input required placeholder="Nom  (ex : Proxmox Lab)" value={newHv.name} onChange={e => setNewHv({ ...newHv, name: e.target.value })} className="osiris-input text-xs" />
-          <input required placeholder="URL  (https://proxmox.local:8006)" value={newHv.url} onChange={e => setNewHv({ ...newHv, url: e.target.value })} className="osiris-input text-xs font-mono" />
-          <input placeholder="Token ID  (osiris@pve!osiris-token)" value={newHv.token_id} onChange={e => setNewHv({ ...newHv, token_id: e.target.value })} className="osiris-input text-xs font-mono" />
-          <input type="password" placeholder="Token secret" value={newHv.token_secret} onChange={e => setNewHv({ ...newHv, token_secret: e.target.value })} className="osiris-input text-xs font-mono" />
-          <input placeholder="Stockage snippets cloud-init (ex: local) — optionnel" value={newHv.snippets_storage} onChange={e => setNewHv({ ...newHv, snippets_storage: e.target.value })} className="osiris-input text-xs font-mono col-span-2" title="Nom du stockage Proxmox avec content-type snippets, requis pour cloud-init complet" />
+          <select value={newHv.type} onChange={e => setNewHv({ ...newHv, type: e.target.value })} className="osiris-input text-xs">
+            <option value="proxmox">Proxmox VE</option>
+            <option value="vsphere">VMware vCenter</option>
+          </select>
+          <input required placeholder={newHv.type === 'vsphere' ? 'URL  (https://vcenter.local)' : 'URL  (https://proxmox.local:8006)'} value={newHv.url} onChange={e => setNewHv({ ...newHv, url: e.target.value })} className="osiris-input text-xs font-mono" />
+          <input placeholder={newHv.type === 'vsphere' ? 'Compte de service  (osiris@vsphere.local)' : 'Token ID  (osiris@pve!osiris-token)'} value={newHv.token_id} onChange={e => setNewHv({ ...newHv, token_id: e.target.value })} className="osiris-input text-xs font-mono" />
+          <input type="password" placeholder={newHv.type === 'vsphere' ? 'Mot de passe du compte' : 'Token secret'} value={newHv.token_secret} onChange={e => setNewHv({ ...newHv, token_secret: e.target.value })} className="osiris-input text-xs font-mono" />
+          {newHv.type === 'proxmox' && <input placeholder="Stockage snippets cloud-init (ex: local) — optionnel" value={newHv.snippets_storage} onChange={e => setNewHv({ ...newHv, snippets_storage: e.target.value })} className="osiris-input text-xs font-mono col-span-2" title="Nom du stockage Proxmox avec content-type snippets, requis pour cloud-init complet" />}
+          <input placeholder="URL d'OSIRIS vue par les VM de cet hyperviseur — vide = URL globale"
+            value={newHv.callback_url} onChange={e => setNewHv({ ...newHv, callback_url: e.target.value })}
+            className="osiris-input text-xs font-mono col-span-2"
+            title="À renseigner si les VM de cet hyperviseur joignent OSIRIS à une autre adresse que le réseau de déploiement. L'URL est gravée dans les scripts de premier démarrage." />
         </div>
         <div className="flex items-center justify-between">
           <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">

@@ -155,6 +155,34 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                 <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" value={newProfile.ssh_authorized_keys ?? ''} onChange={e => setNewProfile({ ...newProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
                 <p className="text-[9px] text-slate-600">Le compte local est créé au premier démarrage s'il n'existe pas, et ces clés lui ouvrent le SSH. Sans clé, une VM clonée reste inaccessible.</p>
               </div>
+              <div className="col-span-2 sm:col-span-3 space-y-1">
+                <p className="text-[9px] uppercase tracking-widest text-slate-600">Gabarit des VM créées avec ce profil</p>
+                <div className="grid grid-cols-4 gap-2">
+                  <input type="number" min={1} max={64} title="vCPU" placeholder="vCPU"
+                    value={newProfile.vm_vcpus ?? 2}
+                    onChange={e => setNewProfile({ ...newProfile, vm_vcpus: Number(e.target.value) })}
+                    className="osiris-input text-xs" />
+                  <input type="number" min={512} step={512} title="RAM (Mo)" placeholder="RAM Mo"
+                    value={newProfile.vm_ram_mb ?? 2048}
+                    onChange={e => setNewProfile({ ...newProfile, vm_ram_mb: Number(e.target.value) })}
+                    className="osiris-input text-xs" />
+                  <input type="number" min={8} title="Disque système (Go)" placeholder="Disque Go"
+                    value={newProfile.vm_disk_gb ?? 20}
+                    onChange={e => setNewProfile({ ...newProfile, vm_disk_gb: Number(e.target.value) })}
+                    className="osiris-input text-xs" />
+                  <input type="number" min={0} title="Disque de données /data (Go) — 0 = aucun" placeholder="/data Go"
+                    value={newProfile.vm_data_disk_gb ?? 0}
+                    onChange={e => setNewProfile({ ...newProfile, vm_data_disk_gb: Number(e.target.value) })}
+                    className="osiris-input text-xs" />
+                </div>
+                <p className="text-[9px] text-slate-600">vCPU · RAM (Mo) · disque système (Go) · disque /data (Go, 0 = aucun). Valeurs proposées par défaut à la création d'une VM.</p>
+              </div>
+              <label className="col-span-2 sm:col-span-3 flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                <input type="checkbox" checked={newProfile.set_root_password ?? false}
+                  onChange={e => setNewProfile({ ...newProfile, set_root_password: e.target.checked })}
+                  className="accent-blue-500" />
+                Mot de passe root de secours (généré, chiffré, visible dans la fiche machine)
+              </label>
             </>
           )}
           {newProfile.os === 'windows' && (
@@ -361,6 +389,32 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                   <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
                   <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" defaultValue={editingProfile.ssh_authorized_keys} onChange={e => setEditingProfile({ ...editingProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
                   <p className="text-[9px] text-slate-600">Le compte local est créé au premier démarrage s'il n'existe pas, et ces clés lui ouvrent le SSH. Sans clé, une VM clonée reste inaccessible.</p>
+                  <p className="text-[9px] uppercase tracking-widest text-slate-600 pt-2">Gabarit des VM créées avec ce profil</p>
+                  <div className="grid grid-cols-4 gap-2">
+                    <input type="number" min={1} max={64} title="vCPU"
+                      value={editingProfile.vm_vcpus ?? 2}
+                      onChange={e => setEditingProfile({ ...editingProfile, vm_vcpus: Number(e.target.value) })}
+                      className="osiris-input text-xs" />
+                    <input type="number" min={512} step={512} title="RAM (Mo)"
+                      value={editingProfile.vm_ram_mb ?? 2048}
+                      onChange={e => setEditingProfile({ ...editingProfile, vm_ram_mb: Number(e.target.value) })}
+                      className="osiris-input text-xs" />
+                    <input type="number" min={8} title="Disque système (Go)"
+                      value={editingProfile.vm_disk_gb ?? 20}
+                      onChange={e => setEditingProfile({ ...editingProfile, vm_disk_gb: Number(e.target.value) })}
+                      className="osiris-input text-xs" />
+                    <input type="number" min={0} title="Disque de données /data (Go) — 0 = aucun"
+                      value={editingProfile.vm_data_disk_gb ?? 0}
+                      onChange={e => setEditingProfile({ ...editingProfile, vm_data_disk_gb: Number(e.target.value) })}
+                      className="osiris-input text-xs" />
+                  </div>
+                  <p className="text-[9px] text-slate-600">vCPU · RAM (Mo) · disque système (Go) · disque /data (Go, 0 = aucun).</p>
+                  <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer pt-1">
+                    <input type="checkbox" checked={editingProfile.set_root_password ?? false}
+                      onChange={e => setEditingProfile({ ...editingProfile, set_root_password: e.target.checked })}
+                      className="accent-blue-500" />
+                    Mot de passe root de secours (généré, chiffré, visible dans la fiche machine)
+                  </label>
                 </div>
               )}
               {editingProfile.os === 'windows' && (() => {

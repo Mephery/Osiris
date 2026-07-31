@@ -11,14 +11,31 @@ osiris_url="{{ osiris_url }}"
 # les rappels partaient alors sur une MAC inconnue d'OSIRIS.
 _osiris_mac="{{ machine.mac }}"
 
+# Une erreur n'interrompt pas le script (pas de `set -e`) : on continue, mais on
+# retient qu'elle a eu lieu pour ne PAS annoncer un deploiement reussi a la fin.
+_osiris_failed=0
+
 _on_error() {
-    local line=$1
-    echo "[$(ts)] ERREUR FATALE a la ligne $line - firstboot interrompu" | tee -a "$LOG"
-    if [ -n "$_osiris_mac" ]; then
-        curl -s -X POST "$osiris_url/machines/$_osiris_mac/status?status=failed" || true
+    local line=$1 cmd=$2
+    echo "[$(ts)] ERREUR a la ligne $line : $cmd" | tee -a "$LOG"
+    # Le detail part vers OSIRIS : un « failed » sans la commande fautive oblige
+    # a se connecter a la machine pour comprendre, ce qui est rarement possible.
+    curl -s -G -X POST "$osiris_url/machines/$_osiris_mac/log" \
+        --data-urlencode "msg=firstboot ligne $line : $cmd" --max-time 10 > /dev/null || true
+    if [ "$_osiris_failed" -eq 0 ]; then
+        # Une seule fois : si le script mourait ici, l'echec serait quand meme visible.
+        curl -s -X POST "$osiris_url/machines/$_osiris_mac/status?status=failed" --max-time 10 > /dev/null || true
+        _osiris_failed=1
     fi
 }
-trap '_on_error $LINENO' ERR
+trap '_on_error $LINENO "$BASH_COMMAND"' ERR
+
+# Envoie une ligne au journal de deploiement d'OSIRIS. Sur une machine distante
+# sans acces console ni SSH, c'est le SEUL moyen de savoir ce qui s'est passe.
+_osiris_log() {
+    curl -s -G -X POST "$osiris_url/machines/$_osiris_mac/log" \
+        --data-urlencode "msg=$1" --max-time 10 > /dev/null || true
+}
 
 echo "[$(ts)] ============================================"
 echo "[$(ts)] OSIRIS First Boot - {{ machine.hostname }}"
@@ -214,6 +231,83 @@ echo "[$(ts)] Acces SSH par cle ouvert pour {{ profile.default_user }}"
 {% endif %}
 {% endif %}
 
+{% if profile.set_root_password %}
+# ── Mot de passe root de secours ──────────────────────────────────────────────
+# Acces CONSOLE de secours, pour le jour ou le reseau ou SSH est tombe. Root
+# reste interdit en SSH (cf. durcissement plus bas) : ce mot de passe ne sert
+# qu'en local, devant l'hyperviseur ou l'ecran.
+# Il est pose SEULEMENT si OSIRIS confirme l'avoir enregistre : dans l'autre
+# ordre, un rappel qui echoue laisserait un root dont plus personne n'a le mot
+# de passe — pire que pas de mot de passe du tout.
+_root_pw=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
+if curl -sf -X POST "$osiris_url/machines/$_osiris_mac/laps-password" \
+        -H "Content-Type: application/json" \
+        -d "{\"password\":\"$_root_pw\"}" --max-time 15 > /dev/null; then
+    echo "root:$_root_pw" | chpasswd
+    # Un mot de passe ne suffit pas si le compte est verrouille : les images
+    # cloud livrent root avec un « ! » dans /etc/shadow, et selon la version
+    # chpasswd ne le retire pas. Sans ce deverrouillage, l'acces console promis
+    # par OSIRIS n'existe pas — panne invisible jusqu'au jour ou on en a besoin.
+    passwd -u root > /dev/null 2>&1 || true
+    _root_state=$(passwd -S root 2>/dev/null | awk '{print $2}')
+    echo "[$(ts)] Mot de passe root applique - etat du compte : $_root_state"
+    _osiris_log "compte root : etat=$_root_state (P=utilisable, L=verrouille, NP=sans mot de passe)"
+else
+    echo "[$(ts)] AVERTISSEMENT : OSIRIS n'a pas confirme l'enregistrement - root reste verrouille"
+fi
+unset _root_pw
+{% endif %}
+
+{% if data_disk_gb %}
+# ── Disque de donnees ─────────────────────────────────────────────────────────
+# Le second disque est cree vierge par l'hyperviseur : c'est ici qu'il devient
+# utilisable. On ne touche QUE a un disque sans table de partition ni systeme de
+# fichiers — jamais au disque systeme, jamais a un disque deja formate (on ne
+# veut surtout pas ecraser des donnees lors d'un redeploiement).
+echo "[$(ts)] Recherche du disque de donnees ({{ data_disk_gb }} Go attendus)..."
+_root_src=$(findmnt -no SOURCE / 2>/dev/null)
+_root_disk=$(lsblk -no PKNAME "$_root_src" 2>/dev/null | head -1)
+[ -z "$_root_disk" ] && _root_disk=$(basename "$_root_src" 2>/dev/null)
+_data_disk=""
+# Filtres, dans l'ordre : type "disk", NON amovible, et au moins 1 Go.
+# VMware presente un lecteur de disquettes virtuel /dev/fd0 de 4 Ko que lsblk
+# classe comme un disque, sans partition ni systeme de fichiers — donc le profil
+# exact de ce qu'on cherche, et il passe avant sdb dans l'ordre alphabetique.
+# Sans ce filtre, OSIRIS tentait de formater la disquette.
+for _d in $(lsblk -dnob NAME,TYPE,RM,SIZE 2>/dev/null \
+            | awk '$2=="disk" && $3==0 && $4 > 1073741824 {print $1}'); do
+    [ "$_d" = "$_root_disk" ] && continue
+    # Vide = ni partition, ni systeme de fichiers, ni membre d'un LVM/RAID
+    if [ -z "$(lsblk -no FSTYPE,PARTTYPE "/dev/$_d" 2>/dev/null | tr -d ' \n')" ]; then
+        _data_disk="/dev/$_d"
+        break
+    fi
+done
+if [ -z "$_data_disk" ]; then
+    echo "[$(ts)] AVERTISSEMENT : aucun disque vierge trouve - /data non configure"
+else
+    echo "[$(ts)] Disque de donnees : $_data_disk"
+    # La sortie d'erreur de mkfs est capturee et renvoyee a OSIRIS : sans elle,
+    # un echec ici ne produisait que trois lignes « commande fautive » en
+    # cascade, sans jamais dire POURQUOI le formatage avait echoue.
+    if ! _mkfs_out=$(mkfs.ext4 -q -L osiris-data "$_data_disk" 2>&1); then
+        _osiris_log "echec mkfs sur $_data_disk : ${_mkfs_out:-aucune sortie}"
+        _osiris_log "disques vus : $(lsblk -dno NAME,SIZE,TYPE 2>/dev/null | tr '\n' ' ')"
+        _osiris_log "detail : $(lsblk -no NAME,FSTYPE,PARTTYPE,MOUNTPOINT 2>/dev/null | tr '\n' ' ')"
+        false   # declenche le piege, la machine reste en echec
+    fi
+    mkdir -p /data
+    _data_uuid=$(blkid -s UUID -o value "$_data_disk")
+    # Monte par UUID : l'ordre des disques (/dev/sdb) peut changer d'un
+    # demarrage a l'autre, l'UUID non.
+    if ! grep -q "$_data_uuid" /etc/fstab; then
+        printf 'UUID=%s /data ext4 defaults,nofail 0 2\n' "$_data_uuid" >> /etc/fstab
+    fi
+    mount /data
+    echo "[$(ts)] /data monte ({{ data_disk_gb }} Go)"
+fi
+{% endif %}
+
 {% if profile.machine_type == 'server' %}
 echo "[$(ts)] Durcissement SSH serveur..."
 
@@ -316,6 +410,16 @@ else
 fi
 {% endif %}
 
+{% if data_disk_gb %}
+# Volume de donnees : jusqu'ici son montage n'etait verifie par rien. On en
+# deduisait le succes de l'absence d'erreur, ce qui n'est pas la meme chose.
+if mountpoint -q /data 2>/dev/null; then
+    _add_test "Volume /data" true "$(df -h /data 2>/dev/null | awk 'NR==2{print $2}') disponibles"
+else
+    _add_test "Volume /data" false "Non monte"
+fi
+{% endif %}
+
 {% if ubuntu_packages %}
 # Presence des paquets installes
 {% for pkg in ubuntu_packages %}
@@ -342,6 +446,16 @@ fi
 # Fin reelle du deploiement. Sur le chemin PXE, l'installeur a deja poste
 # « deployed » avant le reboot ; ici c'est le firstboot qui fait foi, et sur le
 # chemin cloud-init (clone de template) c'est le SEUL signal de fin.
-curl -s -X POST "$osiris_url/machines/$_osiris_mac/status?status=deployed" --max-time 15 || true
+# On n'annonce « deployed » que si RIEN n'a echoue. Sinon le statut d'echec
+# deja poste reste en place : annoncer un succes apres coup masquerait le probleme.
+if [ "$_osiris_failed" -eq 0 ]; then
+    curl -s -X POST "$osiris_url/machines/$_osiris_mac/status?status=deployed" --max-time 15 > /dev/null || true
+    echo "[$(ts)] Deploiement signale comme reussi."
+else
+    echo "[$(ts)] Des erreurs ont eu lieu - la machine reste en echec cote OSIRIS."
+fi
 
-systemctl disable osiris-firstboot.service
+# L'unite n'existe que sur le chemin PXE : sur le chemin cloud-init, le script
+# est lance directement par runcmd. Sans le `|| true`, cet echec de fin
+# declenchait le piege d'erreur APRES le « deployed » et le transformait en echec.
+systemctl disable osiris-firstboot.service 2>/dev/null || true

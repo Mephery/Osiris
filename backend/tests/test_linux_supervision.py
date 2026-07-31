@@ -18,14 +18,14 @@ def Session(bind):
 def linux_setup(clean_db):
     """Une organisation avec collecteur Zabbix, un profil Ubuntu, une machine supervisée."""
     with Session(engine) as session:
-        org = Organization(name="Ferme IT", slug="ferme-it", zabbix_server="10.231.248.130")
+        org = Organization(name="Organisation test", slug="org-test", zabbix_server="192.0.2.130")
         profile = Profile(name="Ubuntu test", os="ubuntu", join_domain=False)
         session.add(org)
         session.add(profile)
         session.commit()
         session.refresh(org)
         session.refresh(profile)
-        machine = Machine(mac="0a0b0c0d0e0f", hostname="SRV-LINUX-01", client="Ferme IT",
+        machine = Machine(mac="0a0b0c0d0e0f", hostname="SRV-LINUX-01", client="Organisation test",
                           os="ubuntu", profile_id=profile.id, organization_id=org.id)
         session.add(machine)
         session.commit()
@@ -73,16 +73,16 @@ def test_firstboot_signale_la_fin_du_deploiement(client, linux_setup):
 
 def test_agent_zabbix_configure_en_mode_actif(client, linux_setup):
     script = _firstboot(client)
-    assert "ServerActive=10.231.248.130" in script
+    assert "ServerActive=192.0.2.130" in script
     assert "Hostname=SRV-LINUX-01" in script
     # Métadonnée lue par l'auto-enregistrement côté Zabbix
-    assert "HostMetadata=osiris linux ferme-it" in script
+    assert "HostMetadata=osiris linux org-test" in script
 
 
 def test_smoke_test_verifie_le_flux_vers_le_collecteur(client, linux_setup):
     """Distingue « agent mal configuré » de « règle de pare-feu manquante »."""
     script = _firstboot(client)
-    assert "/dev/tcp/10.231.248.130/10051" in script
+    assert "/dev/tcp/192.0.2.130/10051" in script
 
 
 def test_pas_dagent_si_machine_non_supervisee(client, linux_setup):
@@ -239,3 +239,195 @@ def test_unite_systemd_sans_delai_de_demarrage(client):
 
 def test_firstboot_linux_inconnu_renvoie_404(client, clean_db):
     assert client.get("/firstboot-linux/ffffffffffff").status_code == 404
+
+
+# ── Serveur : mot de passe root de secours et disque de données ────────────────
+
+def test_mot_de_passe_root_pose_seulement_si_osiris_confirme(client, linux_setup):
+    """
+    Dans l'autre ordre, un rappel qui échoue laisserait un root dont plus
+    personne n'a le mot de passe — pire que pas de mot de passe du tout.
+    """
+    with Session(engine) as session:
+        profile = session.get(Profile, linux_setup["profile"].id)
+        profile.set_root_password = True
+        session.add(profile)
+        session.commit()
+    script = _firstboot(client)
+    post_pos = script.index("laps-password")
+    chpasswd_pos = script.index('echo "root:$_root_pw" | chpasswd')
+    assert post_pos < chpasswd_pos
+    # Le mot de passe n'est PAS gravé dans le script : la machine le génère
+    assert "_root_pw=$(tr -dc" in script
+
+
+def test_pas_de_mot_de_passe_root_par_defaut(client, linux_setup):
+    script = _firstboot(client)
+    assert "chpasswd" not in script
+
+
+def test_disque_de_donnees_ne_touche_quun_disque_vierge(client, linux_setup):
+    with Session(engine) as session:
+        profile = session.get(Profile, linux_setup["profile"].id)
+        profile.vm_data_disk_gb = 100
+        session.add(profile)
+        session.commit()
+    script = _firstboot(client)
+    assert "mkfs.ext4" in script
+    # Jamais le disque système, jamais un disque déjà formaté
+    assert '[ "$_d" = "$_root_disk" ] && continue' in script
+    assert "FSTYPE,PARTTYPE" in script
+    # Monté par UUID : l'ordre des disques change d'un démarrage à l'autre
+    assert "UUID=%s /data ext4" in script
+
+
+def test_pas_de_formatage_sans_disque_de_donnees(client, linux_setup):
+    script = _firstboot(client)
+    assert "mkfs" not in script
+
+
+# ── URL de rappel par hyperviseur ─────────────────────────────────────────────
+
+def test_url_de_rappel_propre_a_lhyperviseur(client, linux_setup):
+    """
+    Une VM d'un autre site ne voit pas forcément OSIRIS à la même adresse. Sans
+    ça, elle télécharge son script puis n'arrive plus à rappeler personne.
+    """
+    from models import Hypervisor
+    with Session(engine) as session:
+        hv = Hypervisor(name="Nova", url="https://198.51.100.10:8006",
+                        callback_url="http://198.51.100.250:8000/")
+        session.add(hv)
+        session.commit()
+        session.refresh(hv)
+        machine = session.get(Machine, linux_setup["machine"].id)
+        machine.hypervisor_id = hv.id
+        session.add(machine)
+        session.commit()
+    script = _firstboot(client)
+    # Barre finale retirée, sinon toutes les URL construites auraient un //
+    assert 'osiris_url="http://198.51.100.250:8000"' in script
+
+
+def test_url_globale_si_lhyperviseur_nen_impose_pas(client, linux_setup):
+    script = _firstboot(client)
+    assert 'osiris_url="http://localhost:8000"' in script
+
+
+# ── Adressage IP fixe ─────────────────────────────────────────────────────────
+
+def test_metadata_vsphere_avec_adresse_fixe():
+    """Un VLAN serveur n'a pas de DHCP : sans adresse, la VM ne rappelle jamais."""
+    import vsphere
+
+    class Body:
+        hostname = "srv-test"
+        ip_cidr = "203.0.113.60/24"
+        gateway = "203.0.113.1"
+        dns_servers = "203.0.113.10,203.0.113.20"
+
+    meta = vsphere._metadata(Body(), "aabbccddeeff")
+    assert "addresses: [203.0.113.60/24]" in meta
+    assert "dhcp4: false" in meta
+    # `gateway4` est déprécié par netplan : on écrit une route par défaut
+    assert "to: default" in meta and "via: 203.0.113.1" in meta
+    assert "gateway4" not in meta
+    assert "addresses: [203.0.113.10, 203.0.113.20]" in meta
+
+
+def test_metadata_vsphere_sans_adresse_reste_en_dhcp():
+    import vsphere
+
+    class Body:
+        hostname = "srv-dhcp"
+        ip_cidr = ""
+        gateway = ""
+        dns_servers = ""
+
+    meta = vsphere._metadata(Body(), "aabbccddeeff")
+    assert "local-hostname: srv-dhcp" in meta
+    assert "network:" not in meta
+
+
+def test_adressage_conserve_sur_la_fiche(client, admin_headers, linux_setup):
+    res = client.patch("/machines/0a0b0c0d0e0f", headers=admin_headers, json={
+        "ip_cidr": "203.0.113.60/24", "gateway": "203.0.113.1",
+        "dns_servers": "203.0.113.10",
+    })
+    assert res.status_code == 200
+    machines = client.get("/machines", headers=admin_headers).json()
+    fiche = next(m for m in machines if m["mac"] == "0a0b0c0d0e0f")
+    assert fiche["ip_cidr"] == "203.0.113.60/24"
+    assert fiche["gateway"] == "203.0.113.1"
+
+
+# ── Signalement des erreurs du premier démarrage ──────────────────────────────
+
+def test_le_piege_derreur_remonte_la_commande_fautive(client, linux_setup):
+    """
+    Un « failed » nu oblige à se connecter à la machine pour comprendre — ce qui
+    est rarement possible, justement quand le déploiement a échoué.
+    """
+    script = _firstboot(client)
+    assert 'trap \'_on_error $LINENO "$BASH_COMMAND"\' ERR' in script
+    assert "/log" in script and "--data-urlencode" in script
+
+
+def test_deployed_nest_annonce_que_si_rien_na_echoue(client, linux_setup):
+    """Le statut final ne doit jamais contredire un échec déjà signalé."""
+    script = _firstboot(client)
+    fin = script[script.index("_osiris_failed"):]
+    assert 'if [ "$_osiris_failed" -eq 0 ]; then' in fin
+    deployed = script.index("status=deployed")
+    garde = script.rindex('if [ "$_osiris_failed" -eq 0 ]; then', 0, deployed)
+    assert garde < deployed
+
+
+def test_desactivation_de_lunite_ne_fait_pas_echouer_le_cloud_init(client, linux_setup):
+    """
+    Sur le chemin cloud-init l'unité n'existe pas : sans garde, son échec
+    repassait la machine en erreur APRÈS l'avoir déclarée déployée.
+    """
+    script = _firstboot(client)
+    assert "systemctl disable osiris-firstboot.service 2>/dev/null || true" in script
+
+
+def test_le_disque_de_donnees_ignore_le_lecteur_de_disquettes(client, linux_setup):
+    """
+    VMware expose un /dev/fd0 de 4 Ko que lsblk classe « disk », sans partition
+    ni système de fichiers — le profil exact d'un disque vierge, et premier dans
+    l'ordre alphabétique. OSIRIS tentait de le formater (constaté le 31/07).
+    """
+    with Session(engine) as session:
+        profile = session.get(Profile, linux_setup["profile"].id)
+        profile.vm_data_disk_gb = 100
+        session.add(profile)
+        session.commit()
+    script = _firstboot(client)
+    assert '$2=="disk" && $3==0 && $4 > 1073741824' in script, \
+        "il faut exclure les périphériques amovibles et ceux de moins de 1 Go"
+
+
+def test_le_compte_root_est_deverrouille(client, linux_setup):
+    """Les images cloud livrent root verrouillé : un mot de passe ne suffit pas."""
+    with Session(engine) as session:
+        profile = session.get(Profile, linux_setup["profile"].id)
+        profile.set_root_password = True
+        session.add(profile)
+        session.commit()
+    script = _firstboot(client)
+    assert "passwd -u root" in script
+    chpasswd = script.index("chpasswd")
+    assert script.index("passwd -u root") > chpasswd
+
+
+def test_le_volume_de_donnees_est_verifie_par_un_smoke_test(client, linux_setup):
+    """Déduire le succès de l'absence d'erreur n'est pas le vérifier."""
+    with Session(engine) as session:
+        profile = session.get(Profile, linux_setup["profile"].id)
+        profile.vm_data_disk_gb = 50
+        session.add(profile)
+        session.commit()
+    script = _firstboot(client)
+    assert "mountpoint -q /data" in script
+    assert '_add_test "Volume /data"' in script

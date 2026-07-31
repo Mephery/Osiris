@@ -562,6 +562,110 @@ Le suffixe est stocké chiffré (Fernet) et jamais renvoyé en clair via l'API.
 
 ---
 
+## Hyperviseurs
+
+OSIRIS pilote plusieurs hyperviseurs en parallèle, de types différents. Le type
+est porté par la fiche hyperviseur et détermine l'implémentation utilisée —
+c'est le seul endroit où le choix se fait (`_PROVIDERS` dans `main.py`).
+
+| Type | État | Authentification |
+|---|---|---|
+| `proxmox` | Complet (inventaire + création de VM, PXE et cloud-init) | Jeton d'API (`osiris@pve!osiris-token`) |
+| `vsphere` | Inventaire seulement — création non implémentée | Compte de service + mot de passe, chiffré Fernet |
+
+Le vocabulaire de l'interface est celui de Proxmox. Côté vSphere : un **nœud**
+est un cluster de calcul, un **stockage** un datastore, un **réseau** un port group.
+
+### Ajouter un second Proxmox
+
+Rien à développer : créer la fiche dans Administration › Infrastructure, avec un
+jeton d'API dont le rôle porte `VM.Allocate`, `VM.Clone`, `VM.Config.*`,
+`VM.PowerMgmt`, `VM.Monitor`, `Datastore.AllocateSpace`, `Datastore.Audit` et
+`Sys.Audit`. Il faut aussi que le pare-feu laisse passer OSIRIS vers le port
+**8006** du cluster.
+
+### Déployer sur plusieurs réseaux : l'URL de rappel
+
+Les scripts de premier démarrage gravent l'adresse d'OSIRIS. Une VM qui ne peut
+pas la joindre télécharge son script puis **ne rappelle plus personne** : elle
+reste « en attente » sans que rien n'explique pourquoi.
+
+Chaque hyperviseur porte donc un champ **URL de rappel** (`callback_url`), qui
+remplace `OSIRIS_BASE_URL` pour les VM créées dessus. Vide = adresse globale.
+À renseigner dès qu'un site voit OSIRIS à une autre adresse (NAT, interconnexion,
+seconde patte réseau).
+
+Le VLAN, lui, se choisit VM par VM : le formulaire liste les bridges du nœud. Il
+faut seulement que le réseau retenu sache router vers l'URL de rappel, et que le
+pare-feu laisse passer le HTTP.
+
+**En mode PXE**, il faut en plus que le VLAN soit sur le même domaine de diffusion
+DHCP qu'OSIRIS, ou disposer d'un relais (`ip-helper`) qui pointe vers lui — le
+DHCP et le TFTP ne se routent pas d'eux-mêmes. Le mode cloud-init n'a pas cette
+contrainte : il ne demande que du HTTP, ce qui en fait la voie naturelle pour
+déployer sur un site distant.
+
+### Prérequis vSphere
+
+À réunir avant de pouvoir terminer l'implémentation :
+
+- **Version exacte de vCenter.** Elle décide de la méthode de clonage : l'API REST
+  ne l'expose qu'à partir de vSphere 8 ; en 7.0 il faut passer par pyvmomi (SOAP).
+- **Compte de service** avec, sur le datacenter cible : lecture de l'inventaire,
+  `Virtual machine.Provisioning.Clone`, `Virtual machine.Configuration.*`,
+  `Resource.Assign VM to resource pool`, `Datastore.Allocate space`.
+- **Port 443** ouvert depuis OSIRIS vers le vCenter.
+- **Cible de déploiement** : noms du datacenter, du cluster, du datastore et du
+  port group.
+- **Un template Linux cloud-init** (l'équivalent du 9000 côté Proxmox).
+
+L'injection de configuration se fera par `guestinfo.userdata`, l'équivalent
+vSphere des snippets — avec l'avantage de ne pas souffrir du blocage d'upload
+rencontré sur Proxmox.
+
+---
+
+## Gabarit matériel des serveurs
+
+Un profil porte les caractéristiques des VM créées avec lui : vCPU, RAM, disque
+système, et disque de données. Choisir le profil dans le formulaire de création
+reprend ces valeurs, qui restent modifiables — le profil sait ce que demande ce
+type de serveur, l'opérateur garde la main.
+
+Le **disque de données** est un second disque, laissé vierge par l'hyperviseur et
+formaté au premier démarrage, monté sur `/data` **par UUID** (l'ordre des disques
+n'est pas stable d'un démarrage à l'autre). Le script ne touche qu'un disque
+**sans table de partition ni système de fichiers** : jamais le disque système,
+jamais un disque déjà formaté — un redéploiement n'écrase pas les données.
+
+### Adressage IP des VM
+
+À la création d'une VM, les champs **IP / passerelle / DNS** sont facultatifs :
+laissés vides, la machine reste en DHCP. Renseignés, cloud-init applique
+l'adresse au premier démarrage — `ipconfig0` sur Proxmox, configuration réseau
+`guestinfo` sur vSphere. Même réglage, deux véhicules.
+
+C'est indispensable sur un **VLAN serveur**, qui n'a généralement pas de DHCP.
+Sans adresse, la VM démarre, tourne, et ne rappelle jamais OSIRIS : elle reste
+« en attente » sans qu'aucun message n'explique pourquoi. Avec une adresse
+imposée, soit elle répond, soit la configuration est fausse et ça se voit.
+
+L'adresse est conservée sur la fiche machine : l'inventaire OSIRIS sait donc
+où joignent les serveurs qu'il a déployés.
+
+### Mot de passe root de secours
+
+Option de profil `set_root_password`. Au premier démarrage, la machine tire un
+mot de passe aléatoire, l'envoie à OSIRIS, et **ne le pose que si OSIRIS confirme
+l'avoir enregistré** — dans l'autre ordre, un rappel qui échoue laisserait un root
+dont plus personne n'a le mot de passe.
+
+C'est un accès **console** : root reste interdit en SSH sur les profils serveur.
+Le mot de passe est stocké chiffré et s'affiche dans la fiche machine, au même
+endroit que LAPS sous Windows.
+
+---
+
 ## VM Linux : template d'amorçage générique
 
 Une VM clonée depuis un template n'a pas d'installeur pour recevoir sa configuration :

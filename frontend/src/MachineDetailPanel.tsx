@@ -183,10 +183,14 @@ export function MachineDetailPanel({
             </div>
           )}
 
-          {/* ── LAPS ── */}
-          {isAdmin && machine.os === 'windows' && (
+          {/* ── Mot de passe admin local : LAPS sous Windows, root sous Linux ── */}
+          {isAdmin && (
             <div>
-              <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Mot de passe admin local (LAPS)</p>
+              <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">
+                {machine.os === 'windows'
+                  ? 'Mot de passe admin local (LAPS)'
+                  : 'Mot de passe root (secours console)'}
+              </p>
               {machine.has_laps ? (
                 <div className="space-y-1.5">
                   {lapsPassword ? (
@@ -204,7 +208,11 @@ export function MachineDetailPanel({
                   )}
                 </div>
               ) : (
-                <span className="text-[10px] font-mono text-slate-700">Aucun mot de passe LAPS enregistre</span>
+                <span className="text-[10px] font-mono text-slate-700">
+                  {machine.os === 'windows'
+                    ? 'Aucun mot de passe LAPS enregistre'
+                    : 'Aucun mot de passe root enregistre'}
+                </span>
               )}
             </div>
           )}
