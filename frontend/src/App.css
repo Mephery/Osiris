@@ -422,3 +422,110 @@ body {
     vertical-align: text-bottom;
   }
 }
+
+/* En-tête collant : le fond suivait la couleur sombre écrite en dur dans le JSX
+   et restait bleu nuit par-dessus l'interface claire. */
+.osiris-header {
+  background: color-mix(in srgb, var(--bg-deep) 95%, transparent);
+}
+
+/* ─── Thème clair ────────────────────────────────────────────────────────────
+   Activé par `data-theme="light"` sur <html> (cf. main.tsx).
+
+   Aucun composant n'a été touché : Tailwind v4 expose sa palette sous forme de
+   variables CSS, on les redéfinit donc ici. Les ~350 utilitaires `text-slate-*`,
+   `bg-slate-*` et `border-slate-*` déjà écrits dans le JSX suivent tout seuls.
+
+   L'échelle slate est reflétée (900 <-> 100, 800 <-> 200...), avec une petite
+   correction sur les tons ternes : une inversion stricte donnerait du texte
+   trop pâle sur fond blanc, or c'est précisément la lisibilité qu'on cherche. */
+:root[data-theme="light"] {
+  /* Tokens OSIRIS : surfaces claires, texte sombre */
+  --bg-deep:   #eef2f7;
+  --bg-panel:  rgba(255, 255, 255, 0.94);
+  --bg-modal:  #ffffff;
+  --bg-input:  #ffffff;
+
+  --border:       rgb(203, 213, 225);
+  --border-soft:  rgba(203, 213, 225, 0.75);
+  --border-input: rgb(203, 213, 225);
+
+  --accent:       rgb(29, 78, 216);
+  --accent-hover: rgb(37, 99, 235);
+  --accent-soft:  rgba(37, 99, 235, 0.07);
+
+  --text:        rgb(15, 23, 42);
+  --text-bright: rgb(2, 6, 23);
+  --text-muted:  rgb(71, 85, 105);
+  --text-dim:    rgb(100, 116, 139);
+
+  --scrollbar:       rgb(203, 213, 225);
+  --scrollbar-hover: rgb(148, 163, 184);
+
+  --danger:       rgb(185, 28, 28);
+  --danger-hover: rgb(220, 38, 38);
+  --warning:      rgb(180, 83, 9);
+  --warning-soft: rgba(180, 83, 9, 0.3);
+
+  /* Palette slate reflétée */
+  --color-slate-50:  #020617;
+  --color-slate-100: #020617;
+  --color-slate-200: #0f172a;
+  --color-slate-300: #1e293b;
+  --color-slate-400: #334155;
+  --color-slate-500: #475569;
+  /* Ces deux tons portent presque tout le texte secondaire. Une inversion
+     stricte donnait 2,56:1 pour slate-700 — sous le minimum WCAG de 4,5:1, et
+     donc exactement le défaut de lisibilité qu'on cherche à corriger. Valeurs
+     remontées jusqu'à passer le seuil, en gardant un écart visible entre les
+     deux niveaux de gris. */
+  --color-slate-600: #556274;   /* texte terne, le plus utilisé (121×) — 6,20:1 */
+  --color-slate-700: #6b7789;   /* indices et libellés discrets — 4,54:1 */
+  --color-slate-800: #cbd5e1;   /* bordures (57×) */
+  --color-slate-900: #f1f5f9;   /* fonds de champ */
+  --color-slate-950: #ffffff;   /* fonds de carte */
+
+  /* `text-white` sert aux titres : il doit devenir presque noir. Aucun
+     `bg-white` n'existe dans le JSX, l'inversion est donc sans effet de bord. */
+  --color-white: #0f172a;
+
+  /* Les teintes 300/400 sont lisibles sur fond sombre, pas sur fond blanc :
+     on les fonce. Les 500/600, utilisées comme FONDS de pastilles et de
+     boutons, restent intactes. */
+  --color-blue-300:    #1d4ed8;
+  --color-blue-400:    #1d4ed8;
+  --color-emerald-400: #047857;
+  --color-green-400:   #15803d;
+  --color-red-400:     #b91c1c;
+  --color-amber-400:   #b45309;
+  --color-amber-500:   #b45309;
+  --color-amber-950:   #fef3c7;   /* fonds d'encart d'avertissement */
+  --color-red-950:     #fee2e2;
+  --color-blue-950:    #dbeafe;
+  --color-emerald-950: #d1fae5;
+}
+
+/* Fond : dégradé et grille de points en version claire */
+:root[data-theme="light"] body {
+  background-color: var(--bg-deep);
+  background-image:
+    radial-gradient(ellipse 65% 45% at 8% 0%, rgba(37, 99, 235, 0.10) 0%, transparent 70%),
+    radial-gradient(rgba(100, 130, 170, 0.30) 1px, transparent 1px);
+}
+
+/* Survols et statuts : ces valeurs sont littérales dans les règles ci-dessus
+   (elles ne passent pas par la palette Tailwind), donc à reprendre une à une. */
+:root[data-theme="light"] .osiris-action-btn:hover { background: rgba(15, 23, 42, 0.06); }
+:root[data-theme="light"] .osiris-action-btn--danger:hover {
+  color: rgb(185, 28, 28);
+  background: rgba(239, 68, 68, 0.10);
+}
+:root[data-theme="light"] .osiris-status--pending   { color: rgb(100, 116, 139); }
+:root[data-theme="light"] .osiris-status--deploying { color: rgb(29, 78, 216); }
+:root[data-theme="light"] .osiris-status--deployed  { color: rgb(21, 128, 61); }
+:root[data-theme="light"] .osiris-status--failed    { color: rgb(185, 28, 28); }
+:root[data-theme="light"] .osiris-os-badge--windows { color: rgb(29, 78, 216); }
+:root[data-theme="light"] .osiris-os-badge--ubuntu  { color: rgb(194, 65, 12); }
+:root[data-theme="light"] .osiris-logo-shine::after {
+  background: linear-gradient(100deg, transparent 20%, rgba(15, 23, 42, 0.18) 50%, transparent 80%);
+}

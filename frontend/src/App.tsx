@@ -10,7 +10,9 @@ import type {
 import { IMAGE_STATUS, EMPTY_FORM, authHeader } from './types'
 import {
   IcoOsiris, IcoRefresh, IcoSearch, IcoPower, IcoPencil, IcoX, IcoChevRight, IcoGear,
+  IcoSun, IcoMoon,
 } from './icons'
+import { applyTheme, preferredTheme, type Theme } from './theme'
 import { LoginPage } from './LoginPage'
 import { DashboardTab } from './DashboardTab'
 import { JournalTab } from './JournalTab'
@@ -142,6 +144,9 @@ export default function App() {
   const [newAppAptPackage, setNewAppAptPackage] = useState('')
   const [newAppCategory, setNewAppCategory]   = useState('tools')
   const [newAppIcon, setNewAppIcon]           = useState('📦')
+  // Thème clair / sombre. Déjà appliqué sur <html> au démarrage (cf. main.tsx) :
+  // on ne fait que refléter l'état courant pour l'icône du bouton.
+  const [theme, setTheme] = useState<Theme>(preferredTheme)
   // Application dont le script de post-installation Linux est déplié, s'il y en a une
   const [editingAppScript, setEditingAppScript] = useState<number | null>(null)
 
@@ -850,7 +855,7 @@ export default function App() {
       <Toaster position="top-right" theme="dark" richColors closeButton duration={4000} />
 
       {/* ── En-tête ────────────────────────────────────────────────────────── */}
-      <header className="sticky top-0 z-10 bg-[#070b14]/95 backdrop-blur-sm border-b border-slate-800/60">
+      <header className="osiris-header sticky top-0 z-10 backdrop-blur-sm border-b border-slate-800/60">
         {/* ── Barre supérieure ─────────────────────────────────────────── */}
         <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-6">
@@ -865,6 +870,12 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <span className="text-xs font-mono text-slate-700 hidden sm:block">{auth.email}</span>
+            <button
+              onClick={() => { const next: Theme = theme === 'dark' ? 'light' : 'dark'; setTheme(next); applyTheme(next) }}
+              className="osiris-action-btn"
+              title={theme === 'dark' ? 'Passer en thème clair' : 'Passer en thème sombre'}>
+              {theme === 'dark' ? <IcoSun /> : <IcoMoon />}
+            </button>
             <button onClick={() => setShowSettingsModal(true)} className="osiris-action-btn" title="Parametres du compte"><IcoGear /></button>
             <button onClick={() => setAuth(null)} className="osiris-btn-ghost text-xs">Deconnexion</button>
           </div>

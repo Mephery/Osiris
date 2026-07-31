@@ -38,3 +38,19 @@ export const IcoTerminal  = ({ cls = 'w-3.5 h-3.5' }: IProps) => (
   </svg>
 )
 export const IcoCamera    = ({ cls = 'w-3.5 h-3.5' }: IProps) => <S cls={cls} p="M1 5h2l1.5-2h7L13 5h2v8H1zM8 12a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z" />
+
+export const IcoSun = ({ cls = 'w-3.5 h-3.5' }: IProps) => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
+    strokeLinecap="round" className={`inline-block shrink-0 ${cls}`} aria-hidden="true">
+    <circle cx="8" cy="8" r="3" />
+    <path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3 3l1 1M12 12l1 1M13 3l-1 1M4 12l-1 1" />
+  </svg>
+)
+
+export const IcoMoon = ({ cls = 'w-3.5 h-3.5' }: IProps) => (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"
+    strokeLinecap="round" strokeLinejoin="round"
+    className={`inline-block shrink-0 ${cls}`} aria-hidden="true">
+    <path d="M13.5 9.5A5.8 5.8 0 0 1 6.5 2.5a5.8 5.8 0 1 0 7 7Z" />
+  </svg>
+)
