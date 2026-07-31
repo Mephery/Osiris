@@ -19,11 +19,11 @@
   --accent-hover: rgb(59, 130, 246);
   --accent-soft:  rgba(37, 99, 235, 0.04);  /* fond de ligne au survol */
 
-  /* Texte */
+  /* Texte — voir la note sur les contrastes plus bas */
   --text:        rgb(241, 245, 249);
   --text-bright: rgb(226, 232, 240);
-  --text-muted:  rgb(100, 116, 139);
-  --text-dim:    rgb(71, 85, 105);
+  --text-muted:  #96a4b9;
+  --text-dim:    #7e8fa9;
 
   /* Scrollbar */
   --scrollbar:       rgb(30, 41, 59);
@@ -37,6 +37,27 @@
      même teinte que les utilitaires Tailwind amber-6xx/7xx déjà utilisés en JSX. */
   --warning:      rgb(217, 119, 6);
   --warning-soft: rgba(217, 119, 6, 0.35);
+}
+
+/* ─── Contrastes du thème sombre ─────────────────────────────────────────────
+   La palette slate de Tailwind est prévue pour du texte sur fond BLANC. Sur le
+   navy profond d'OSIRIS, ses tons ternes tombaient très bas :
+
+       slate-600 (utilisé 121×)  2,60:1        slate-700 (43×)  1,90:1
+       --text-dim                2,60:1        --text-muted     4,14:1
+
+   soit largement sous le minimum WCAG de 4,5:1 — lisible sur une dalle bien
+   calibrée dans une pièce sombre, illisible ailleurs.
+
+   On redéfinit donc les quatre tons qui portent le texte, en conservant la
+   teinte slate et l'écart entre les niveaux. Les 800/900/950 ne bougent pas :
+   ce sont des BORDURES et des FONDS, pas du texte. */
+:root {
+  --color-slate-300: #ced5de;   /* 13,31:1 */
+  --color-slate-400: #afbaca;   /* 10,03:1 */
+  --color-slate-500: #96a4b9;   /*  7,79:1 */
+  --color-slate-600: #7e8fa9;   /*  5,99:1 — le plus utilisé */
+  --color-slate-700: #687c9a;   /*  4,63:1 — indices et libellés discrets */
 }
 
 /* ─── Fond : navy profond + grille de points ─────────────────────────────── */
