@@ -312,7 +312,13 @@ body {
     outline: none;
   }
   .osiris-input:focus { border-color: var(--accent); }
-  .osiris-input::placeholder { color: rgb(45, 58, 78); }
+  /* Les placeholders servent d'étiquettes dans une bonne partie des formulaires
+     (« Collecteur Zabbix… », « Préfixe MAC imposé… ») : ils doivent se lire.
+     L'ancien rgb(45,58,78) donnait 1,76:1 sur le fond quasi noir d'un champ.
+     Ce ton-ci tient les 4,5:1 SUR LES DEUX THÈMES — 4,51:1 sur le sombre,
+     4,50:1 sur le blanc — tout en restant nettement en retrait du texte
+     saisi, qui culmine à 18,5:1. */
+  .osiris-input::placeholder { color: #647896; }
 
   /* ─── Overlay ────────────────────────────────────────────────────────────── */
   .osiris-overlay {
