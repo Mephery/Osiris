@@ -964,13 +964,30 @@ chaque pack (colonne `hw_ids`, remplie à la synchro du catalogue) :
 | HP     | `SystemId` (carte mère) | `81c3,8396` |
 | Lenovo | `Types` (Machine Type)  | `20s6,20s7` |
 
-Côté machine, WinPE remonte `Win32_ComputerSystemProduct.Name` (chez Lenovo, le MTM
-`20S6CTO1WW` dont les 4 premiers caractères sont le Machine Type) au moment de
-l'identification. Quand aucun pack n'a été choisi à la main sur la fiche machine,
-OSIRIS s'en sert pour injecter le bon pack — au lieu de déverser les ~15 Go du
-dossier `drivers/` complet comme il le faisait auparavant.
+Côté machine, WinPE remonte `Win32_ComputerSystemProduct.Name` au moment de
+l'identification. **Cette valeur n'a pas la même nature selon le constructeur**, et
+c'est tout l'enjeu :
 
-Un pack explicitement choisi dans l'UI reste toujours prioritaire.
+- chez **Lenovo**, c'est le MTM (`20S6CTO1WW`), dont les 4 premiers caractères sont
+  le Machine Type → il se compare directement à `hw_ids` ;
+- chez **Dell et HP**, c'est le **nom commercial** (`Dell Pro 14 Plus PB14250`), qui
+  ne ressemble en rien au code stocké dans `hw_ids` (`0cf9`) → aucune correspondance
+  possible par identifiant.
+
+OSIRIS résout donc le pack dans cet ordre, et s'arrête au premier qui répond :
+
+1. le pack **choisi à la main** sur la fiche machine — toujours prioritaire ;
+2. l'**identifiant matériel** (`hw_ids`), qui seul sépare un T15 d'un T15g ;
+3. le **nom commercial**, rapproché de `model_key` — c'est ce qui couvre Dell et HP ;
+4. à défaut, le dossier `drivers/` complet (~36 Go) : lent, mais il ne manque jamais
+   un pilote.
+
+Le rapprochement par nom (étape 3) est volontairement **strict** : égalité, ou l'un
+préfixe de l'autre. `/drivers/suggest` se permet d'être plus souple parce qu'un humain
+valide sa proposition ; ici l'injection est silencieuse. DISM n'installant que les
+`.inf` dont l'identifiant matériel correspond, un pack « presque bon » ne casse rien —
+il installe des pilotes **incomplets**, et le périphérique muet ne se découvre qu'à la
+livraison. Dans le doute, mieux vaut donc l'étape 4.
 
 ---
 

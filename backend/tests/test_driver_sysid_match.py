@@ -8,7 +8,7 @@ différentes que sépare une seule lettre. Le 2026-07-16, le T15g a effectivemen
 été assigné à un T15 — d'où le rapprochement par identifiant constructeur.
 """
 import pytest
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 import main
 from models import DriverPack
@@ -89,3 +89,110 @@ def test_un_pack_non_telecharge_n_est_jamais_propose(session):
 
 def _model(pack):
     return pack.model if pack else None
+
+
+# ── Repli par nom commercial (Dell / HP) ───────────────────────────────────
+# Chez Dell et HP, `hw_ids` contient un CODE ("0cf9") alors que la machine remonte
+# son NOM ("Dell Pro 14 Plus PB14250") : les deux ne se rencontrent jamais. Sans ce
+# repli, toute fiche Dell/HP sans pack choisi à la main se voyait injecter les ~36 Go
+# du dossier `drivers/` entier — constaté le 30/07 sur les Dell Pro 14 Plus.
+
+@pytest.fixture
+def session_dell(session):
+    session.add(DriverPack(vendor="dell", model="Dell Pro 14 Plus PB14250",
+                           model_key="dellpro14pluspb14250", os_code="Windows11",
+                           download_url="http://x/pb14250", status="ready",
+                           local_path="/srv/data/windows/drivers/dell/dellpro14pluspb14250",
+                           hw_ids="0cf9"))
+    # Même modèle en Windows 10, téléchargé lui aussi : Windows 11 doit primer.
+    session.add(DriverPack(vendor="dell", model="Dell Pro 14 Plus PB14250",
+                           model_key="dellpro14pluspb14250", os_code="Windows10",
+                           download_url="http://x/pb14250w10", status="ready",
+                           local_path="/srv/data/windows/drivers/dell/pb14250w10",
+                           hw_ids="0cf9"))
+    session.commit()
+    return session
+
+
+def test_le_nom_commercial_dell_designe_le_bon_pack(session_dell):
+    pack = main._pack_for_model_name(session_dell, "Dell Pro 14 Plus PB14250")
+    assert _model(pack) == "Dell Pro 14 Plus PB14250"
+    assert pack.os_code == "Windows11"       # préféré au pack Windows 10
+
+
+def test_le_nom_est_insensible_a_la_casse_et_aux_espaces(session_dell):
+    assert _model(main._pack_for_model_name(session_dell, "dell pro 14 plus PB14250")) \
+        == "Dell Pro 14 Plus PB14250"
+
+
+def test_un_nom_plus_long_que_le_catalogue_matche(session_dell):
+    """Le catalogue est parfois plus court que ce que remonte la machine."""
+    assert _model(main._pack_for_model_name(session_dell, "EliteBook 650 G10 Notebook PC")) \
+        == "EliteBook 650 G10"
+
+
+@pytest.mark.parametrize("nom", [
+    "",                                # jamais renseigné
+    "PC",                              # trop court pour discriminer
+    "Standard PC (Q35 + ICH9, 2009)",  # VM QEMU : ne doit RIEN matcher
+    "OptiPlex 7090",                   # absent du catalogue de test
+])
+def test_un_nom_inconnu_ou_trop_court_ne_matche_rien(session_dell, nom):
+    assert main._pack_for_model_name(session_dell, nom) is None
+
+
+def test_un_pack_non_telecharge_n_est_pas_propose_par_le_nom(session_dell):
+    assert main._pack_for_model_name(session_dell, "ThinkPad X1 Type 20XW") is None
+
+
+def test_le_nom_ne_prime_jamais_sur_l_identifiant_materiel(session_dell):
+    """L'identifiant reste le critère fort : c'est lui qui sépare T15 et T15g."""
+    assert _model(main._pack_for_sysid(session_dell, "20S6CTO1WW")) \
+        == "ThinkPad T15 Type 20S6 20S7"
+
+
+# ── Chaîne complète : ce qui finit réellement dans la commande DISM ────────
+
+@pytest.fixture
+def resolution(session_dell, monkeypatch):
+    """Branche `_resolve_driver_dir` sur la base de test (elle ouvre sa propre session)."""
+    monkeypatch.setattr(main, "engine", session_dell.get_bind())
+    return session_dell
+
+
+def _dir(**champs):
+    from models import Machine
+    return main._resolve_driver_dir(Machine(mac="aabbccddeeff", hostname="PC", **champs))
+
+
+def test_un_pack_choisi_a_la_main_prime_sur_tout(resolution):
+    pack = resolution.exec(
+        select(DriverPack).where(DriverPack.model_key == "thinkpadt15type20s620s7")
+    ).first()
+    assert _dir(driver_pack_id=pack.id, hw_sysid="Dell Pro 14 Plus PB14250") \
+        == "drivers\\lenovo\\t15"
+
+
+def test_l_identifiant_materiel_cible_le_pack(resolution):
+    assert _dir(hw_sysid="20S6CTO1WW") == "drivers\\lenovo\\t15"
+
+
+def test_le_nom_commercial_dell_cible_le_pack(resolution):
+    """La régression du 30/07 : sans pack manuel, on déversait tout le dossier."""
+    assert _dir(hw_sysid="Dell Pro 14 Plus PB14250") == "drivers\\dell\\dellpro14pluspb14250"
+
+
+def test_le_nom_du_firstboot_sert_de_dernier_recours(resolution):
+    """`hw_model` n'est renseigné qu'au firstboot : absent du 1er déploiement."""
+    assert _dir(hw_sysid="", hw_model="Dell Pro 14 Plus PB14250") \
+        == "drivers\\dell\\dellpro14pluspb14250"
+
+
+@pytest.mark.parametrize("champs", [
+    {},                                                  # machine toute neuve
+    {"hw_sysid": "Standard PC (Q35 + ICH9, 2009)"},       # VM QEMU
+    {"hw_sysid": "Modele Jamais Vu 9000"},                # hors catalogue
+])
+def test_sans_correspondance_on_retombe_sur_le_dossier_complet(resolution, champs):
+    """Repli sûr : lent, mais il ne manque jamais un pilote."""
+    assert _dir(**champs) == "drivers"

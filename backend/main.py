@@ -2749,6 +2749,38 @@ def _pack_for_sysid(session: Session, sysid: str) -> Optional[DriverPack]:
     return None
 
 
+def _pack_for_model_name(session: Session, name: str) -> Optional[DriverPack]:
+    """Pack pret dont le nom de modele correspond a celui remonte par la machine.
+
+    Chez Dell et HP, le catalogue publie un CODE comme identifiant materiel (systemID
+    "0cf9" chez Dell, SystemId de carte mere chez HP) alors que la machine remonte son
+    NOM COMMERCIAL via Win32_ComputerSystemProduct.Name ("Dell Pro 14 Plus PB14250").
+    Les deux ne se rencontrent jamais dans `hw_ids`, d'ou ce repli. Chez Lenovo la
+    question ne se pose pas : le MTM est deja un identifiant, `_pack_for_sysid` suffit.
+
+    Volontairement STRICT (egalite, ou l'un prefixe de l'autre) la ou /drivers/suggest
+    raccourcit le prefixe pour proposer un pack : la, un humain tranche ; ici l'injection
+    est silencieuse. Or DISM n'installe que les .inf dont l'identifiant materiel
+    correspond, donc un pack "presque bon" ne fait pas de degats, il installe des
+    pilotes INCOMPLETS — un peripherique muet qu'on ne decouvre qu'a la livraison.
+    Le repli historique (tout le dossier) ne coute lui que du temps. Dans le doute, on
+    ne cible donc rien.
+    """
+    key = normalize_model(name)
+    if len(key) < 6:      # trop court pour discriminer quoi que ce soit
+        return None
+    packs = session.exec(
+        select(DriverPack)
+        .where(DriverPack.status == "ready", DriverPack.local_path != "",
+               DriverPack.model_key != "")
+        .order_by(DriverPack.os_code.desc())   # Windows11 avant Windows10
+    ).all()
+    # L'egalite l'emporte toujours sur un prefixe, quel que soit l'ordre des packs.
+    return next((p for p in packs if p.model_key == key), None) or next(
+        (p for p in packs
+         if p.model_key.startswith(key) or key.startswith(p.model_key)), None)
+
+
 def _resolve_driver_dir(machine: Machine) -> str:
     """Chemin du dossier de drivers a injecter, relatif au partage SMB (Z:), en
     notation Windows (backslashes). 'drivers' = tout le dossier (fallback historique) ;
@@ -2757,9 +2789,14 @@ def _resolve_driver_dir(machine: Machine) -> str:
         pack = (
             session.get(DriverPack, machine.driver_pack_id)
             if machine.driver_pack_id
-            # Aucun pack choisi a la main : plutot que de deverser les ~15 GB du
-            # dossier entier, on tente l'identifiant materiel remonte par WinPE.
-            else _pack_for_sysid(session, machine.hw_sysid)
+            # Aucun pack choisi a la main : plutot que de deverser les ~36 GB du
+            # dossier entier, on tente d'abord l'identifiant materiel remonte par
+            # WinPE, puis son nom commercial — c'est ce que vaut `hw_sysid` chez
+            # Dell et HP. `hw_model` en dernier : il n'est renseigne qu'au firstboot,
+            # donc absent du tout premier deploiement.
+            else (_pack_for_sysid(session, machine.hw_sysid)
+                  or _pack_for_model_name(session, machine.hw_sysid)
+                  or _pack_for_model_name(session, machine.hw_model))
         )
     if not pack or pack.status != "ready" or not pack.local_path:
         return "drivers"
