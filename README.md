@@ -252,6 +252,40 @@ alembic upgrade head
 # "Running upgrade -> 0001, Initial schema" - les tables existantes ne sont pas touchées
 ```
 
+### Règle à respecter en écrivant une migration
+
+La `0001` fait un `SQLModel.metadata.create_all()`. Sur une base **vierge**, elle crée donc
+d'emblée *toutes* les tables déclarées dans `models.py` au jour où on l'exécute — y compris
+celles ajoutées par des migrations bien plus récentes. Chaque migration ultérieure doit donc
+tolérer que son objet existe déjà :
+
+```python
+# OUI - le style de toute la chaîne
+bind.execute(sa.text("ALTER TABLE machine ADD COLUMN IF NOT EXISTS truc VARCHAR NOT NULL DEFAULT ''"))
+bind.execute(sa.text("CREATE TABLE IF NOT EXISTS bidule (...)"))
+
+# NON - passe en production (déjà migrée), casse toute installation neuve
+op.add_column("machine", sa.Column("truc", sa.String()))
+op.create_table("bidule", ...)
+```
+
+Le piège est sournois : la base de production, déjà à jour, ne montre jamais rien.
+
+### Tester la chaîne sur une base vierge
+
+`backend/tests/test_migrations.py` rejoue `alembic upgrade head` sur une base neuve et compare
+le schéma obtenu à `models.py`. Il ne tourne que si on lui fournit une base Postgres **jetable**
+(les migrations sont du Postgres pur, le reste de la suite est sur SQLite) :
+
+```bash
+cd backend
+export OSIRIS_MIGRATION_TEST_DB="postgresql://user:motdepasse@localhost/osiris_migtest"
+python -m pytest tests/test_migrations.py
+```
+
+⚠️ Ce test fait un `DROP SCHEMA public CASCADE` sur la base visée. Il refuse de démarrer si le
+nom de la base ne contient pas `test`. La CI lui fournit un conteneur Postgres dédié.
+
 ---
 
 ## Tableau de bord

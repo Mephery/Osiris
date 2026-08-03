@@ -89,7 +89,7 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
 
         {/* Encart stratégie : 1 golden par modèle */}
         <div className="rounded-lg border border-sky-900/40 bg-sky-950/10 px-4 py-3 space-y-1.5">
-          <p className="text-xs font-semibold text-sky-400">💡 Stratégie : une golden par modèle</p>
+          <p className="text-xs font-semibold text-sky-400">Stratégie : une golden par modèle</p>
           <p className="text-[11px] text-slate-400">
             Une golden embarque les <span className="text-slate-300">pilotes du modèle depuis lequel elle a été capturée</span>{' '}
             (le magasin de pilotes survit au sysprep) : déployée sur le <span className="text-slate-300">même modèle</span>, elle est
