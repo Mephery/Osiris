@@ -243,6 +243,10 @@ class Machine(SQLModel, table=True):
     hypervisor_id: Optional[int] = Field(default=None, foreign_key="hypervisor.id")
     proxmox_vm_id: int = Field(default=0)   # ID de la VM dans Proxmox (ex: 101), 0 = physique
     proxmox_node: str = Field(default="")   # noeud Proxmox sur lequel tourne la VM
+    # Numero du deploiement en cours, incremente a chaque repassage en "pending".
+    # Sert a regrouper les lignes de DeployLogLine : relancer un deploiement ouvre un
+    # nouveau journal sans effacer celui de la tentative precedente.
+    deploy_log_run: int = Field(default=1)
 
 
 class OsImage(SQLModel, table=True):
@@ -282,6 +286,24 @@ class DriverPack(SQLModel, table=True):
     # par le nom commercial — c'est une lettre qui sépare un T15 d'un T15g.
     hw_ids: str = Field(default="", index=True)
     catalog_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class DeployLogLine(SQLModel, table=True):
+    """Une ligne du journal de deploiement, postee en direct par WinPE ou le firstboot.
+
+    Persistee, et non plus gardee dans un dict en memoire : le journal survit ainsi au
+    redemarrage du backend comme a un simple F5, et surtout il reste consultable APRES
+    le deploiement — c'est precisement la qu'on en a besoin, la fenetre WinPE ayant
+    disparu avec la machine qui reboote.
+    """
+    __tablename__ = "deploy_log_line"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    mac: str = Field(index=True)
+    # Deploiement auquel appartient la ligne (cf. Machine.deploy_log_run).
+    run: int = Field(default=1, index=True)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    line: str
 
 
 class DeploymentEvent(SQLModel, table=True):

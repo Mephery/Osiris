@@ -181,6 +181,33 @@ export default function App() {
       .catch(() => {})
   }
 
+  // Recharge le journal depuis le serveur. Sans ça, l'affichage ne vit que du flux
+  // WebSocket : un F5 ou une connexion en cours de déploiement montrait un panneau vide.
+  const fetchDeployLogs = (mac: string) => {
+    if (!auth) return
+    fetch(`${API_URL}/machines/${mac}/logs`, { headers: authHeader(auth.token) })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setDeployLogs(prev => ({ ...prev, [mac]: data.logs })))
+      .catch(() => {})
+  }
+
+  // Le téléchargement passe par fetch et non par un simple lien : la route est
+  // authentifiée, et un <a href> n'emporterait pas le jeton.
+  const downloadDeployLogs = (mac: string) => {
+    if (!auth) return
+    fetch(`${API_URL}/machines/${mac}/logs.txt`, { headers: authHeader(auth.token) })
+      .then(r => r.ok ? r.blob() : Promise.reject())
+      .then(blob => {
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `osiris-${machines.find(m => m.mac === mac)?.hostname ?? mac}.txt`
+        a.click()
+        URL.revokeObjectURL(url)
+      })
+      .catch(() => toast.error('Impossible de télécharger le journal'))
+  }
+
   const fetchBitlockerKey = (mac: string) => {
     if (!auth) return
     fetch(`${API_URL}/machines/${mac}/bitlocker-key`, { headers: authHeader(auth.token) })
@@ -621,6 +648,7 @@ export default function App() {
   const openDetail = (mac: string) => {
     setDetailMac(mac)
     fetchHistory(mac)
+    fetchDeployLogs(mac)
     const m = machines.find(x => x.mac === mac)
     if (m?.proxmox_vm_id) {
       fetchVmStatus(mac)
@@ -1566,6 +1594,7 @@ export default function App() {
             isAdmin={auth.role === 'admin'}
             profileName={profileName(machine.profile_id)}
             deployLog={deployLogs[machine.mac] ?? []}
+            onDownloadLog={() => downloadDeployLogs(machine.mac)}
             history={machineHistory[machine.mac] ?? []}
             bitlocker={bitlockerData[machine.mac]}
             onFetchBitlockerKey={() => fetchBitlockerKey(machine.mac)}

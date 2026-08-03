@@ -453,8 +453,30 @@ Dans chaque **Profil**, sélectionnez les applications à installer automatiquem
 ## Historique de déploiement
 
 Chaque machine conserve un journal des transitions de statut. Cliquer sur le chevron d'une ligne affiche :
-- Les logs temps réel de la session en cours (via WebSocket)
+- Le journal du déploiement en cours, complété en direct via WebSocket
 - L'historique des 20 derniers événements (date, statut, OS, profil utilisé)
+
+### Journal de déploiement
+
+Les lignes postées par WinPE et par le firstboot (`POST /machines/{mac}/log?msg=...`) sont
+**stockées en base** (table `deploy_log_line`). Elles survivent donc au redémarrage du backend
+comme au rechargement de la page — ce qui compte, puisque la fenêtre WinPE disparaît avec le
+reboot de la machine et qu'on ne consulte le journal qu'après coup.
+
+Relancer un déploiement **n'efface pas** le journal précédent : chaque passage en `pending`
+ouvre un nouveau numéro de tentative (`Machine.deploy_log_run`). C'est justement après un échec
+qu'on relance, et comparer deux tentatives est souvent ce qui met le doigt sur la cause.
+
+| Route | Contenu |
+|---|---|
+| `GET /machines/{mac}/logs` | Déploiement **en cours** — c'est ce qu'affiche le terminal live |
+| `GET /machines/{mac}/logs.txt` | **Toutes** les tentatives, en texte brut, servi en pièce jointe |
+
+Le bouton **.txt** de la fiche machine télécharge le second.
+
+Garde-fou : au-delà de `DEPLOY_LOG_MAX_LINES` (5000) lignes pour une même tentative, OSIRIS
+cesse d'enregistrer et l'indique dans le journal — une machine coincée en boucle PXE ne peut
+pas faire grossir la base indéfiniment.
 
 ---
 

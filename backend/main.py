@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from sqlmodel import SQLModel, Session, select
+from sqlmodel import SQLModel, Session, select, func
 
 from arq import create_pool
 from arq.connections import RedisSettings
@@ -33,7 +33,7 @@ from jinja2 import Environment, FileSystemLoader
 
 import pyotp
 import qrcode
-from models import ApiKey, Application, AuditLog, DeploymentEvent, DriverPack, DomainConfig, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
+from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
 import vpn
 import vsphere
 from auth import (
@@ -147,7 +147,12 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 _deploy_progress: dict[str, int] = {}
-_deploy_logs: dict[str, list[str]] = {}
+
+# Au-dela de cette limite, on cesse de persister les lignes d'un MEME deploiement.
+# Une machine coincee dans une boucle PXE peut poster sans fin ; passe quelques
+# milliers de lignes le journal n'a de toute facon plus aucune valeur de diagnostic,
+# et rien ne doit pouvoir faire grossir la base indefiniment.
+DEPLOY_LOG_MAX_LINES = 5000
 
 # ── Mode capture : mac → {wim_name, registered_at, status} ───────────────────
 _capture_jobs: dict[str, dict] = {}
@@ -2219,7 +2224,7 @@ def redeploy_now(mac: str):
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
-        machine.status = "pending"
+        _open_new_deploy_run(machine)
         session.add(machine)
         session.commit()
     formatted = ":".join(clean_mac[i:i+2] for i in range(0, 12, 2))
@@ -2365,14 +2370,17 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
             # suivante sans conflit (l'index unique refuserait un doublon). L'identité
             # du poste reste intacte : elle tient à `mac` et `hw_serial`.
             if machine.deploy_mac:
-                _deploy_logs.setdefault(clean_mac, []).append(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] Adaptateur {machine.deploy_mac} "
-                    f"libere : reutilisable sur une autre machine"
+                _append_log_line(
+                    session, clean_mac, machine.deploy_log_run,
+                    _stamp(f"Adaptateur {machine.deploy_mac} libere : "
+                           f"reutilisable sur une autre machine"),
                 )
                 machine.deploy_mac = None
         if status == "pending":
-            _deploy_logs.pop(clean_mac, None)
-            _deploy_progress.pop(clean_mac, None)
+            # Un redeploiement ouvre un NOUVEAU journal au lieu d'effacer le precedent :
+            # c'est justement apres une tentative ratee qu'on relance, et c'est cette
+            # trace-la qu'on veut encore pouvoir lire.
+            _open_new_deploy_run(machine)
         if status_changed:
             _record_deploy_event(session, machine, status)
         elif status == "deployed":
@@ -2443,23 +2451,114 @@ async def report_deploy_progress(request: Request, mac: str, p: int):
     return {"ok": True}
 
 
+def _open_new_deploy_run(machine: Machine) -> None:
+    """Repasse une machine en attente et ouvre un nouveau journal de déploiement.
+
+    À appeler PARTOUT où une machine retourne en "pending" — le statut est remis à
+    zéro depuis quatre endroits (rapport de la machine, redeploy-now, lot, capture),
+    et un seul qui incrémenterait le compteur suffirait à mélanger les journaux de
+    deux tentatives.
+    """
+    machine.status = "pending"
+    machine.deploy_log_run += 1
+    _deploy_progress.pop(machine.mac, None)
+
+
+def _stamp(msg: str) -> str:
+    """Horodate une ligne de journal (UTC, comme tout le reste de l'API)."""
+    return f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}"
+
+
+def _current_run(session: Session, clean_mac: str) -> int:
+    """Numéro du déploiement en cours pour cette MAC.
+
+    Porté par la fiche machine ; les lignes postées par une MAC inconnue (machine
+    supprimée en plein déploiement, par exemple) atterrissent dans le run 1 plutôt
+    que d'être perdues.
+    """
+    machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+    return machine.deploy_log_run if machine else 1
+
+
+def _append_log_line(session: Session, clean_mac: str, run: int, line: str) -> None:
+    """Ajoute une ligne au journal, en s'arrêtant net au-delà du plafond.
+
+    N'appelle pas `commit()` : la ligne part avec la transaction de l'appelant.
+    """
+    written = session.exec(
+        select(func.count()).select_from(DeployLogLine)
+        .where(DeployLogLine.mac == clean_mac, DeployLogLine.run == run)
+    ).one()
+    if written > DEPLOY_LOG_MAX_LINES:
+        return
+    if written == DEPLOY_LOG_MAX_LINES:
+        line = _stamp(f"journal tronque : plus de {DEPLOY_LOG_MAX_LINES} lignes "
+                      f"pour ce deploiement")
+    session.add(DeployLogLine(mac=clean_mac, run=run, line=line))
+
+
 @app.post("/machines/{mac}/log")
 @limiter.limit("120/minute")
 async def append_deploy_log(request: Request, mac: str, msg: str):
-    """Appelé par WinPE pour envoyer une ligne de log en temps réel."""
+    """Appelé par WinPE et le firstboot pour envoyer une ligne de log en temps réel."""
     clean_mac = validate_mac(mac)
-    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    line = f"[{ts}] {msg}"
-    _deploy_logs.setdefault(clean_mac, []).append(line)
+    line = _stamp(msg)
+    with Session(engine) as session:
+        _append_log_line(session, clean_mac, _current_run(session, clean_mac), line)
+        session.commit()
     await manager.broadcast({"mac": clean_mac, "log_line": line})
     return {"ok": True}
 
 
 @app.get("/machines/{mac}/logs", dependencies=[Depends(get_current_user)])
 def get_deploy_logs(mac: str):
-    """Retourne les logs de déploiement en mémoire pour une machine."""
+    """Journal du déploiement EN COURS — celui qu'affiche le terminal live."""
     clean_mac = validate_mac(mac)
-    return {"logs": _deploy_logs.get(clean_mac, [])}
+    with Session(engine) as session:
+        lines = session.exec(
+            select(DeployLogLine)
+            .where(DeployLogLine.mac == clean_mac,
+                   DeployLogLine.run == _current_run(session, clean_mac))
+            .order_by(DeployLogLine.id)
+        ).all()
+        return {"logs": [entry.line for entry in lines]}
+
+
+@app.get("/machines/{mac}/logs.txt", dependencies=[Depends(get_current_user)])
+def download_deploy_logs(mac: str):
+    """Journal complet en texte brut, TOUS déploiements confondus.
+
+    C'est la réponse à la demande d'origine : récupérer la console de déploiement
+    dans un .txt, la fenêtre WinPE disparaissant avec le reboot de la machine. On
+    sert l'historique entier et pas seulement le déploiement courant — sur une
+    machine qu'on a dû reprendre plusieurs fois, c'est la comparaison entre les
+    tentatives qui a de la valeur.
+    """
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        lines = session.exec(
+            select(DeployLogLine)
+            .where(DeployLogLine.mac == clean_mac)
+            .order_by(DeployLogLine.run, DeployLogLine.id)
+        ).all()
+
+    hostname = machine.hostname if machine else clean_mac
+    body, run = [f"# OSIRIS — journal de déploiement de {hostname} ({clean_mac})"], None
+    for entry in lines:
+        if entry.run != run:
+            run = entry.run
+            body.append(f"\n--- Déploiement n°{run} — {entry.timestamp:%Y-%m-%d %H:%M:%S} UTC ---")
+        body.append(entry.line)
+    if not lines:
+        body.append("\n(aucune ligne enregistrée)")
+
+    return Response(
+        content="\n".join(body) + "\n",
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="osiris-{hostname}-{clean_mac}.txt"'},
+    )
 
 
 def _ip_to_mac(ip: str) -> Optional[str]:
@@ -2798,7 +2897,7 @@ def register_capture(mac: str, wim_name: str):
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if machine and machine.status == "deployed":
-            machine.status = "pending"
+            _open_new_deploy_run(machine)
             session.add(machine)
             session.commit()
     return {"mac": clean_mac, "wim_name": wim_name, "status": "waiting"}
@@ -2971,7 +3070,10 @@ async def batch_status(body: BatchStatusBody, current_user: User = Depends(get_c
                 continue
             machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
             if machine:
-                machine.status = body.status
+                if body.status == "pending":
+                    _open_new_deploy_run(machine)
+                else:
+                    machine.status = body.status
                 _record_deploy_event(session, machine, body.status)
                 session.add(machine)
                 updated.append(clean_mac)

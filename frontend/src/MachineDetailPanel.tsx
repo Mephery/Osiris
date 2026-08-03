@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react'
 import { toast } from 'sonner'
 import type { Machine, DeploymentEvent, SnapshotEntry } from './types'
-import { IcoX, IcoTerminal, IcoCamera } from './icons'
+import { IcoX, IcoTerminal, IcoCamera, IcoDownload } from './icons'
 
 interface VmProps {
   consoleUrl: string
@@ -28,6 +28,7 @@ interface MachineDetailPanelProps {
   isAdmin: boolean
   profileName: string | null
   deployLog: string[]
+  onDownloadLog: () => void
   history: DeploymentEvent[]
   bitlocker?: { key: string | null; pin: string | null }
   onFetchBitlockerKey: () => void
@@ -46,7 +47,7 @@ const copy = (text: string, label: string) => {
 }
 
 export function MachineDetailPanel({
-  machine, isAdmin, profileName, deployLog, history, bitlocker, onFetchBitlockerKey,
+  machine, isAdmin, profileName, deployLog, onDownloadLog, history, bitlocker, onFetchBitlockerKey,
   lapsPassword, onFetchLapsPassword, onSaveUserName, onSaveUserEmail, onSaveNotes, onClose, vm,
 }: MachineDetailPanelProps) {
   const logRef = useRef<HTMLPreElement | null>(null)
@@ -74,16 +75,31 @@ export function MachineDetailPanel({
         </div>
 
         <div className="osiris-sheet-body p-5 space-y-4">
-          {/* ── Logs live (style terminal) ── */}
-          {deployLog.length > 0 && (
-            <div>
-              <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Logs en direct</p>
+          {/* ── Journal de déploiement (style terminal) ── */}
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-[9px] uppercase tracking-widest text-slate-600">
+                {machine.status === 'deploying' ? 'Logs en direct' : 'Journal de déploiement'}
+              </p>
+              {/* Toujours proposé, même sans ligne à l'écran : le .txt sert l'historique
+                  complet, y compris les tentatives précédant le déploiement courant. */}
+              <button
+                onClick={onDownloadLog}
+                className="osiris-btn text-[10px] px-2 py-0.5 flex items-center gap-1"
+                title="Télécharger le journal complet (toutes les tentatives) au format .txt"
+              >
+                <IcoDownload cls="w-3 h-3" /> .txt
+              </button>
+            </div>
+            {deployLog.length > 0 ? (
               <pre ref={logRef} className="osiris-terminal text-[11px] font-mono leading-relaxed whitespace-pre-wrap">
                 {deployLog.join('\n')}
                 {machine.status === 'deploying' && <span className="osiris-terminal-cursor" />}
               </pre>
-            </div>
-          )}
+            ) : (
+              <p className="text-[10px] font-mono text-slate-700">Aucune ligne pour le déploiement en cours</p>
+            )}
+          </div>
 
           {/* ── Historique ── */}
           <div>
