@@ -1783,10 +1783,14 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                 <div className="space-y-1.5">
                   <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">
                     Pack de drivers
-                    <span className="ml-1 text-slate-700 normal-case font-normal">(optionnel — injection ciblée du bon modèle)</span>
+                    <span className="ml-1 text-slate-700 normal-case font-normal">(optionnel — laisser sur automatique dans la plupart des cas)</span>
                   </label>
+                  {/* La valeur vide ne veut plus dire « tout le dossier » : depuis le
+                      repli par nom commercial, OSIRIS résout seul le pack (identifiant
+                      matériel, puis modèle) et ne déverse le dossier entier qu'en
+                      dernier recours. Le libellé disait l'inverse et a fait douter. */}
                   <select value={formData.driver_pack_id ?? ''} onChange={(e) => setFormData({ ...formData, driver_pack_id: e.target.value ? Number(e.target.value) : null })} className="osiris-input text-xs">
-                    <option value="">— Tous les drivers téléchargés (plus lent) —</option>
+                    <option value="">— Choix automatique (identifiant matériel, puis modèle) —</option>
                     {driverPacks.map((p: any) => <option key={p.id} value={p.id}>{p.vendor.toUpperCase()} · {p.model} [{p.os_code}]</option>)}
                   </select>
                   {driverPacks.length === 0 && <p className="text-[10px] text-slate-600">Aucun pack téléchargé — va dans l'onglet Drivers pour en télécharger un.</p>}
