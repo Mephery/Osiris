@@ -192,8 +192,41 @@ if ($csDom -and $csDom.PartOfDomain) {
 {{ machine.ou }}
 '@.Trim()
 {% endif %}
-        Add-Computer @djArgs
-        Write-Log "Domaine : jonction reussie a {{ profile.domain }} (effective au redemarrage final)"
+        # Reprise sur echec RESEAU uniquement. La jonction se joue quelques secondes
+        # apres le demarrage du firstboot : le lien vers le DC (tunnel VPN chez les
+        # clients distants) n'est pas toujours etabli. Constate le 04/08 sur M2KL099 :
+        # tunnel midi2i tombe -> "Le domaine specifie n'existe pas ou n'a pas pu etre
+        # contacte" -> jonction a refaire a la main.
+        #
+        # On ne reessaie JAMAIS une erreur d'identifiants (0x52e) : le compte de
+        # jonction est un compte de service, et cinq tentatives de suite le feraient
+        # verrouiller par la strategie AD. Mauvais mot de passe = on s'arrete net.
+        $djMaxEssais = 5
+        $djAttente   = 30
+        for ($djEssai = 1; $djEssai -le $djMaxEssais; $djEssai++) {
+            try {
+                Add-Computer @djArgs
+                Write-Log "Domaine : jonction reussie a {{ profile.domain }} (effective au redemarrage final)"
+                break
+            } catch {
+                $djErr = "$_"
+                # 0x52e / 1326 : identifiants refuses. Inutile et dangereux d'insister.
+                # \b autour de 1326 : sans lui, un hote nomme "M2KL1326" ferait
+                # passer une panne reseau pour un refus d'identifiants.
+                if ($djErr -match '0x52e|\b1326\b|mot de passe|password|informations d.identification|credential') {
+                    Write-Log "ERREUR jonction domaine {{ profile.domain }} : identifiants refuses - $djErr"
+                    Write-Log "  (compte de jonction incorrect : aucune nouvelle tentative, pour ne pas le verrouiller)"
+                    break
+                }
+                if ($djEssai -eq $djMaxEssais) {
+                    Write-Log "ERREUR jonction domaine {{ profile.domain }} apres $djMaxEssais essais : $djErr"
+                    Write-Log "  (le domaine est reste injoignable : verifier le lien reseau / le tunnel VPN)"
+                    break
+                }
+                Write-Log "Domaine injoignable (essai $djEssai/$djMaxEssais) - nouvelle tentative dans $djAttente s..."
+                Start-Sleep -Seconds $djAttente
+            }
+        }
     } catch {
         Write-Log "ERREUR jonction domaine {{ profile.domain }} : $_"
     }

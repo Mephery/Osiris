@@ -161,3 +161,28 @@ def test_la_liberation_du_dongle_est_journalisee(client, test_machine, admin_hea
 
     logs = client.get(f"/machines/{MAC}/logs", headers=admin_headers).json()["logs"]
     assert any("001122334455" in l and "libere" in l for l in logs)
+
+
+# ── Fuseau horaire ─────────────────────────────────────────────────────────
+
+def test_la_colonne_timestamp_est_en_utc_comme_le_texte(client, test_machine):
+    """Le texte de la ligne est horodaté en UTC ; la colonne doit l'être aussi.
+
+    La colonne Postgres est un TIMESTAMP WITHOUT TIME ZONE : y écrire un datetime
+    *avisé* le fait convertir vers le fuseau de la session, donc en heure locale.
+    On stockait ainsi deux heures différentes dans une même ligne, et l'export .txt
+    annonçait « UTC » en affichant l'heure locale (constaté le 2026-08-04).
+    """
+    # Le contrôle porte sur l'objet NEUF, avant tout aller-retour en base : SQLite
+    # dépouille le fuseau à la relecture, donc un test qui relit la ligne passerait
+    # aussi bien avec l'ancienne définition avisée. C'est ici que la différence vit.
+    from datetime import datetime, timezone
+    neuve = DeployLogLine(mac=MAC, line="x")
+    assert neuve.timestamp.tzinfo is None
+    ecart = abs((neuve.timestamp - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds())
+    assert ecart < 60, "l'horodatage n'est pas en UTC (probable heure locale)"
+
+    _post(client, MAC, "Montage SMB")
+    with Session(engine) as session:
+        ligne = session.exec(select(DeployLogLine).where(DeployLogLine.mac == MAC)).one()
+    assert ligne.timestamp.strftime("%H:%M:%S") == ligne.line[1:9]   # "[HH:MM:SS] ..."

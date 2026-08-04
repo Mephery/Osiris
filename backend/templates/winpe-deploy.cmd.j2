@@ -111,7 +111,11 @@ REM Chemin SANS guillemets : model_key n'a jamais d'espace, et un chemin quote
 REM finissant par \" casse le parsing DISM (le \ echappe le guillemet fermant).
 if exist Z:\{{ driver_dir }}\ (
     echo [OSIRIS] Injection de drivers depuis Z:\{{ driver_dir }}\...
-    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Injection+drivers+constructeur..." >nul 2>&1
+    REM Le dossier retenu part dans le journal : sans lui, verifier quel pack a ete
+    REM injecte oblige a rejouer _resolve_driver_dir sur la fiche (fait a la main le
+    REM 04/08). Antislashs remplaces par des slashs : le journal passe par une URL, et
+    REM un %5C dans un .cmd serait mange par l'expansion des parametres du batch.
+    X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Injection+drivers+depuis+Z:/{{ driver_dir | replace('\\', '/') }}" >nul 2>&1
     dism /Image:W:\ /Add-Driver /Driver:Z:\{{ driver_dir }}\ /Recurse /ForceUnsigned
     if errorlevel 1 (
         X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+:+certains+drivers+KO+(non+bloquant)" >nul 2>&1

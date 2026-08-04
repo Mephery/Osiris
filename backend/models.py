@@ -302,7 +302,14 @@ class DeployLogLine(SQLModel, table=True):
     mac: str = Field(index=True)
     # Deploiement auquel appartient la ligne (cf. Machine.deploy_log_run).
     run: int = Field(default=1, index=True)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # UTC *naif*, et pas `datetime.now(timezone.utc)` : la colonne Postgres est un
+    # TIMESTAMP WITHOUT TIME ZONE, dans lequel un datetime avise est converti vers le
+    # fuseau de la session — on y stockait donc l'heure LOCALE, alors que le texte de
+    # `line` est horodate en UTC. Deux heures d'ecart dans le meme fichier, et un
+    # export .txt qui annoncait « UTC » en affichant autre chose (constate le 04/08).
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
     line: str
 
 
