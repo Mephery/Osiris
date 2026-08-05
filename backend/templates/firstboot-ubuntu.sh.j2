@@ -290,7 +290,12 @@ _data_disk=""
 # classe comme un disque, sans partition ni systeme de fichiers — donc le profil
 # exact de ce qu'on cherche, et il passe avant sdb dans l'ordre alphabetique.
 # Sans ce filtre, OSIRIS tentait de formater la disquette.
-for _d in $(lsblk -dnob NAME,TYPE,RM,SIZE 2>/dev/null \
+# Options separees, et surtout PAS `-dnob` : dans un groupe, le `-o` avale le `b`
+# comme son argument, lsblk repond « unknown column: b » et n'affiche RIEN. La
+# boucle ne tournait donc jamais et /data n'a jamais pu etre configure, sur aucun
+# hyperviseur, depuis le premier jour. Le message « aucun disque vierge trouve »
+# accusait l'hyperviseur d'un defaut qui etait ici.
+for _d in $(lsblk -d -n -b -o NAME,TYPE,RM,SIZE 2>/dev/null \
             | awk '$2=="disk" && $3==0 && $4 > 1073741824 {print $1}'); do
     [ "$_d" = "$_root_disk" ] && continue
     # Vide = ni partition, ni systeme de fichiers, ni membre d'un LVM/RAID

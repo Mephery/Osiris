@@ -523,3 +523,35 @@ def test_les_etapes_cles_sont_tracees():
     script = _firstboot_ubuntu_rendu()
     for etape in ("Application du nom d'hote", "Supervision Zabbix", "Disque de donnees"):
         assert f'_log "{etape}' in script or f'_log "{etape}"' in script
+
+
+# ── Détection du disque de données ─────────────────────────────────────────
+# Le 2026-08-05, `/data` n'était monté sur aucune VM : la commande de détection
+# s'écrivait `lsblk -dnob NAME,TYPE,RM,SIZE`, où le `-o` du groupe avale le `b`
+# comme argument. lsblk répondait « unknown column: b » et n'affichait rien, donc
+# la boucle ne tournait jamais. Le script accusait alors l'hyperviseur de ne pas
+# fournir de disque vierge. Jamais fonctionné, sur aucun hyperviseur.
+
+def test_la_detection_de_disque_s_execute_vraiment():
+    """On EXÉCUTE la commande : vérifier sa forme n'aurait pas attrapé le bug,
+    puisque `-dnob` est une écriture parfaitement plausible."""
+    import re, subprocess
+    script = _firstboot_ubuntu_rendu()
+    m = re.search(r'^\s*for _d in \$\((lsblk [^\n]+?) \\$', script, re.M)
+    assert m, "commande de detection des disques introuvable dans le script"
+
+    res = subprocess.run(m.group(1), shell=True, capture_output=True, text=True)
+    assert res.returncode == 0, f"la commande echoue : {res.stderr.strip()}"
+    assert "unknown column" not in res.stderr, f"option mal groupee : {res.stderr.strip()}"
+    assert res.stdout.strip(), "aucun disque listé : la boucle de détection tournerait à vide"
+
+
+def test_les_tailles_sont_bien_en_octets():
+    """Le filtre compare à 1073741824 : sans `-b`, lsblk renvoie « 10G » et la
+    comparaison numérique d'awk vaut 0, donc tout disque serait écarté."""
+    import re, subprocess
+    script = _firstboot_ubuntu_rendu()
+    m = re.search(r'^\s*for _d in \$\((lsblk [^\n]+?) \\$', script, re.M)
+    res = subprocess.run(m.group(1), shell=True, capture_output=True, text=True)
+    tailles = [l.split()[3] for l in res.stdout.strip().splitlines() if len(l.split()) >= 4]
+    assert tailles and all(t.isdigit() for t in tailles), f"tailles non numériques : {tailles}"
