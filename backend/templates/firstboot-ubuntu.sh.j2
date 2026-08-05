@@ -34,18 +34,34 @@ trap '_on_error $LINENO "$BASH_COMMAND"' ERR
 # sans acces console ni SSH, c'est le SEUL moyen de savoir ce qui s'est passe.
 _osiris_log() {
     curl -s -G -X POST "$osiris_url/machines/$_osiris_mac/log" \
-        --data-urlencode "msg=$1" --max-time 10 > /dev/null || true
+        --data-urlencode "msg=$1" --max-time 5 > /dev/null || true
+}
+
+# Trace une etape : dans le fichier local ET dans le journal d'OSIRIS.
+#
+# Le script redirige tout son stdout vers $LOG (`exec >>` plus haut), donc un
+# simple `echo` ne quitte JAMAIS la machine. Le 2026-08-05, une VM deployee a
+# distance n'a renvoye qu'UNE ligne a OSIRIS pour 41 ecrites en local : comprendre
+# pourquoi un service n'etait pas installe et un volume pas monte imposait d'ouvrir
+# une console sur la VM, ce qui est precisement ce qu'on ne peut pas faire sur un
+# site client. Le firstboot Windows, lui, remonte ses 88 etapes depuis le 09/07.
+#
+# --max-time 5 (et non 10) : ces appels sont maintenant des dizaines, et un OSIRIS
+# injoignable ne doit pas transformer le premier demarrage en interminable attente.
+_log() {
+    echo "[$(ts)] $1"
+    _osiris_log "$1"
 }
 
 echo "[$(ts)] ============================================"
-echo "[$(ts)] OSIRIS First Boot - {{ machine.hostname }}"
+_log "OSIRIS First Boot - {{ machine.hostname }}"
 echo "[$(ts)] ============================================"
 
 # ── Nom d'hote ────────────────────────────────────────────────────────────────
 # Pose en tout premier : la jonction AD, l'agent de supervision et le bail DHCP
 # reprennent tous ce nom. Sans ca, une VM clonee depuis un template garde celui
 # du template (« ubuntu ») et s'annonce sous ce nom partout.
-echo "[$(ts)] Application du nom d'hote : {{ machine.hostname }}"
+_log "Application du nom d'hote : {{ machine.hostname }}"
 hostnamectl set-hostname {{ machine.hostname | bash_squote }} \
     || echo "{{ machine.hostname }}" > /etc/hostname
 if grep -q '^127\.0\.1\.1' /etc/hosts; then
@@ -60,22 +76,22 @@ mkdir -p /etc/cloud/cloud.cfg.d
 printf 'preserve_hostname: true\n' > /etc/cloud/cloud.cfg.d/99-osiris-hostname.cfg
 
 # ── Inventaire materiel ───────────────────────────────────────────────────────
-echo "[$(ts)] Collecte des informations materiel..."
+_log "Collecte des informations materiel..."
 HW_SERIAL=$(cat /sys/class/dmi/id/product_serial 2>/dev/null | tr -d '[:space:]') || HW_SERIAL=""
 HW_MODEL=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null | tr -d '\n')
 HW_PRODUCT=$(cat /sys/class/dmi/id/product_name 2>/dev/null | tr -d '\n')
 HW_MODEL="$HW_MODEL $HW_PRODUCT"
 HW_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 HW_RAM_GB=$(( (HW_RAM_KB + 524288) / 1048576 ))
-echo "[$(ts)] Materiel : $HW_MODEL | S/N : $HW_SERIAL | RAM : ${HW_RAM_GB} Go"
+_log "Materiel : $HW_MODEL | S/N : $HW_SERIAL | RAM : ${HW_RAM_GB} Go"
 
 curl -s -X POST "$osiris_url/machines/$_osiris_mac/hardware" \
     -H "Content-Type: application/json" \
     -d "{\"serial\":\"$HW_SERIAL\",\"model\":\"$HW_MODEL\",\"ram_gb\":$HW_RAM_GB}" || true
-echo "[$(ts)] Inventaire envoye a OSIRIS"
+_log "Inventaire envoye a OSIRIS"
 
 {% if tv_password %}
-echo "[$(ts)] Installation de TeamViewer Host..."
+_log "Installation de TeamViewer Host..."
 wget -q https://download.teamviewer.com/download/linux/teamviewer-host_amd64.deb \
      -O /tmp/osiris-tv.deb
 apt-get install -y /tmp/osiris-tv.deb
@@ -84,7 +100,7 @@ rm -f /tmp/osiris-tv.deb
 systemctl enable teamviewerd
 systemctl start teamviewerd
 
-echo "[$(ts)] Attente du daemon TeamViewer..."
+_log "Attente du daemon TeamViewer..."
 for i in $(seq 1 10); do
     sleep 3
     if teamviewer info 2>/dev/null | grep -q "TeamViewer ID"; then
@@ -93,17 +109,17 @@ for i in $(seq 1 10); do
 done
 
 teamviewer passwd {{ tv_password | bash_squote }}
-echo "[$(ts)] TeamViewer configure - ID : $(teamviewer info 2>/dev/null | grep 'TeamViewer ID' | awk '{print $NF}')"
+_log "TeamViewer configure - ID : $(teamviewer info 2>/dev/null | grep 'TeamViewer ID' | awk '{print $NF}')"
 {% endif %}
 
 {% if linux_apps %}
-echo "[$(ts)] Installation des applications via apt..."
+_log "Installation des applications via apt..."
 apt-get update -qq
 {% for app in linux_apps %}
 apt-get install -y {{ app.apt_package }} 2>&1 | tail -1
-echo "[$(ts)] Installe : {{ app.name }}"
+_log "Installe : {{ app.name }}"
 {% if app.linux_post_install %}
-echo "[$(ts)] Post-installation : {{ app.name }}"
+_log "Post-installation : {{ app.name }}"
 (
 {{ app.linux_post_install }}
 ) || echo "[$(ts)] AVERTISSEMENT : post-installation de {{ app.name }} terminee en erreur"
@@ -115,7 +131,7 @@ echo "[$(ts)] Post-installation : {{ app.name }}"
 # ── Supervision Zabbix ────────────────────────────────────────────────────────
 # Agent en mode ACTIF : c'est lui qui sort vers le collecteur en TCP 10051.
 # Le VLAN est isole, rien n'entre — le collecteur ne joint jamais la machine.
-echo "[$(ts)] Supervision Zabbix : agent actif vers {{ zabbix.server }}"
+_log "Supervision Zabbix : agent actif vers {{ zabbix.server }}"
 apt-get update -qq
 # zabbix-agent2 quand la distribution le fournit, zabbix-agent sinon. Aucun depot
 # tiers : on reste sur des paquets signes par la distro.
@@ -124,7 +140,7 @@ for _p in zabbix-agent2 zabbix-agent; do
     if apt-get install -y "$_p" > /dev/null 2>&1; then _zbx_pkg="$_p"; break; fi
 done
 if [ -z "$_zbx_pkg" ]; then
-    echo "[$(ts)] AVERTISSEMENT : aucun paquet d'agent Zabbix disponible - supervision non configuree"
+    _log "AVERTISSEMENT : aucun paquet d'agent Zabbix disponible - supervision non configuree"
 else
     if [ "$_zbx_pkg" = "zabbix-agent2" ]; then
         _zbx_dir=/etc/zabbix/zabbix_agent2.d; _zbx_svc=zabbix-agent2
@@ -143,12 +159,12 @@ HostMetadata={{ zabbix.metadata }}
 ZBXEOF
     systemctl enable "$_zbx_svc" > /dev/null 2>&1 || true
     systemctl restart "$_zbx_svc" || echo "[$(ts)] AVERTISSEMENT : demarrage de $_zbx_svc en echec"
-    echo "[$(ts)] Agent Zabbix configure ($_zbx_pkg) - hote : {{ zabbix.hostname }}"
+    _log "Agent Zabbix configure ($_zbx_pkg) - hote : {{ zabbix.hostname }}"
 fi
 {% endif %}
 
 {% if profile.join_domain and profile.domain and profile.domain_join_user and profile.domain_join_password %}
-echo "[$(ts)] Jonction au domaine AD : {{ profile.domain }}"
+_log "Jonction au domaine AD : {{ profile.domain }}"
 
 apt-get install -y realmd sssd sssd-tools adcli krb5-user samba-common-bin \
     libnss-sss libpam-sss packagekit 2>&1 | tail -3
@@ -174,7 +190,7 @@ printf '%s' {{ profile.domain_join_password | bash_squote }} | realm join \
 {% endif %}
 
 if realm list 2>/dev/null | grep -q "{{ profile.domain }}"; then
-    echo "[$(ts)] Jonction AD reussie"
+    _log "Jonction AD reussie"
 
     # Login sans suffixe @domaine (utilisateur au lieu de utilisateur@domain.local)
     sed -i 's/use_fully_qualified_names = True/use_fully_qualified_names = False/' /etc/sssd/sssd.conf
@@ -188,9 +204,9 @@ if realm list 2>/dev/null | grep -q "{{ profile.domain }}"; then
 
     systemctl restart sssd
 
-    echo "[$(ts)] Connexion AD disponible - login : utilisateur (sans @{{ profile.domain }})"
+    _log "Connexion AD disponible - login : utilisateur (sans @{{ profile.domain }})"
 else
-    echo "[$(ts)] ECHEC jonction AD - verifier que le DNS resout {{ profile.domain }} et que les identifiants sont corrects"
+    _log "ECHEC jonction AD - verifier que le DNS resout {{ profile.domain }} et que les identifiants sont corrects"
 fi
 {% endif %}
 
@@ -201,11 +217,11 @@ fi
 # compte est HERMETIQUE : ni SSH ni console, plus personne n'entre. On le cree
 # donc si besoin, quel que soit le type de machine.
 if id -u {{ profile.default_user | bash_squote }} > /dev/null 2>&1; then
-    echo "[$(ts)] Compte local {{ profile.default_user }} deja present"
+    _log "Compte local {{ profile.default_user }} deja present"
 else
     useradd -m -s /bin/bash {{ profile.default_user | bash_squote }}
     usermod -aG sudo {{ profile.default_user | bash_squote }} || true
-    echo "[$(ts)] Compte local {{ profile.default_user }} cree"
+    _log "Compte local {{ profile.default_user }} cree"
 fi
 # Aucun mot de passe n'est pose sur ce compte (choix OSIRIS : acces par cle
 # uniquement). Sans sudo sans mot de passe il serait donc inutilisable — c'est
@@ -227,7 +243,7 @@ chown -R {{ profile.default_user }}:{{ profile.default_user }} "$_osiris_home/.s
 # avoir : on s'assure qu'il est la ET demarre.
 dpkg -s openssh-server > /dev/null 2>&1 || apt-get install -y openssh-server 2>&1 | tail -1
 systemctl enable --now ssh > /dev/null 2>&1 || systemctl enable --now sshd > /dev/null 2>&1 || true
-echo "[$(ts)] Acces SSH par cle ouvert pour {{ profile.default_user }}"
+_log "Acces SSH par cle ouvert pour {{ profile.default_user }}"
 {% endif %}
 {% endif %}
 
@@ -250,10 +266,10 @@ if curl -sf -X POST "$osiris_url/machines/$_osiris_mac/laps-password" \
     # par OSIRIS n'existe pas — panne invisible jusqu'au jour ou on en a besoin.
     passwd -u root > /dev/null 2>&1 || true
     _root_state=$(passwd -S root 2>/dev/null | awk '{print $2}')
-    echo "[$(ts)] Mot de passe root applique - etat du compte : $_root_state"
+    _log "Mot de passe root applique - etat du compte : $_root_state"
     _osiris_log "compte root : etat=$_root_state (P=utilisable, L=verrouille, NP=sans mot de passe)"
 else
-    echo "[$(ts)] AVERTISSEMENT : OSIRIS n'a pas confirme l'enregistrement - root reste verrouille"
+    _log "AVERTISSEMENT : OSIRIS n'a pas confirme l'enregistrement - root reste verrouille"
 fi
 unset _root_pw
 {% endif %}
@@ -264,7 +280,7 @@ unset _root_pw
 # utilisable. On ne touche QUE a un disque sans table de partition ni systeme de
 # fichiers — jamais au disque systeme, jamais a un disque deja formate (on ne
 # veut surtout pas ecraser des donnees lors d'un redeploiement).
-echo "[$(ts)] Recherche du disque de donnees ({{ data_disk_gb }} Go attendus)..."
+_log "Recherche du disque de donnees ({{ data_disk_gb }} Go attendus)..."
 _root_src=$(findmnt -no SOURCE / 2>/dev/null)
 _root_disk=$(lsblk -no PKNAME "$_root_src" 2>/dev/null | head -1)
 [ -z "$_root_disk" ] && _root_disk=$(basename "$_root_src" 2>/dev/null)
@@ -284,9 +300,9 @@ for _d in $(lsblk -dnob NAME,TYPE,RM,SIZE 2>/dev/null \
     fi
 done
 if [ -z "$_data_disk" ]; then
-    echo "[$(ts)] AVERTISSEMENT : aucun disque vierge trouve - /data non configure"
+    _log "AVERTISSEMENT : aucun disque vierge trouve - /data non configure"
 else
-    echo "[$(ts)] Disque de donnees : $_data_disk"
+    _log "Disque de donnees : $_data_disk"
     # La sortie d'erreur de mkfs est capturee et renvoyee a OSIRIS : sans elle,
     # un echec ici ne produisait que trois lignes « commande fautive » en
     # cascade, sans jamais dire POURQUOI le formatage avait echoue.
@@ -304,12 +320,12 @@ else
         printf 'UUID=%s /data ext4 defaults,nofail 0 2\n' "$_data_uuid" >> /etc/fstab
     fi
     mount /data
-    echo "[$(ts)] /data monte ({{ data_disk_gb }} Go)"
+    _log "/data monte ({{ data_disk_gb }} Go)"
 fi
 {% endif %}
 
 {% if profile.machine_type == 'server' %}
-echo "[$(ts)] Durcissement SSH serveur..."
+_log "Durcissement SSH serveur..."
 
 # Durcissement sshd
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
@@ -318,21 +334,21 @@ sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_con
 grep -q '^PasswordAuthentication' /etc/ssh/sshd_config || echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config
 grep -q '^PermitRootLogin' /etc/ssh/sshd_config       || echo 'PermitRootLogin no'       >> /etc/ssh/sshd_config
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-echo "[$(ts)] SSH : auth par mot de passe desactivee, root interdit"
+_log "SSH : auth par mot de passe desactivee, root interdit"
 {% endif %}
 
 {% if profile.post_script %}
-echo "[$(ts)] Execution du script post-install personnalise..."
+_log "Execution du script post-install personnalise..."
 (
 {{ profile.post_script }}
 ) || echo "[$(ts)] AVERTISSEMENT : Script post-install termine avec une erreur"
-echo "[$(ts)] Script post-install termine."
+_log "Script post-install termine."
 {% endif %}
 
-echo "[$(ts)] Premier demarrage OSIRIS termine."
+_log "Premier demarrage OSIRIS termine."
 
 # ── Smoke tests ───────────────────────────────────────────────────────────────
-echo "[$(ts)] Smoke tests post-deploiement..."
+_log "Smoke tests post-deploiement..."
 _smoke_json="["
 _smoke_first=true
 
@@ -341,7 +357,7 @@ _add_test() {
     local ok_val=$([ "$ok" = "true" ] && echo "true" || echo "false")
     local icon=$([ "$ok" = "true" ] && echo "OK" || echo "FAIL")
     local detail_safe=$(echo "$detail" | sed 's/"/\\"/g')
-    echo "[$(ts)]   [$icon] $name${detail:+ : $detail}"
+    _log "  [$icon] $name${detail:+ : $detail}"
     [ "$_smoke_first" = "true" ] && _smoke_first=false || _smoke_json+=","
     _smoke_json+="{\"name\":\"$(echo "$name" | sed 's/"/\\"/g')\",\"ok\":$ok_val,\"detail\":\"$detail_safe\"}"
 }
@@ -438,9 +454,9 @@ _smoke_body="{\"tests\":${_smoke_json}}"
 if curl -s -X POST "$osiris_url/machines/$_osiris_mac/smoke-tests" \
     -H "Content-Type: application/json" \
     -d "$_smoke_body" --max-time 15; then
-    echo "[$(ts)] Rapport smoke tests envoye."
+    _log "Rapport smoke tests envoye."
 else
-    echo "[$(ts)] AVERTISSEMENT : Echec envoi rapport smoke tests."
+    _log "AVERTISSEMENT : Echec envoi rapport smoke tests."
 fi
 
 # Fin reelle du deploiement. Sur le chemin PXE, l'installeur a deja poste
@@ -450,9 +466,9 @@ fi
 # deja poste reste en place : annoncer un succes apres coup masquerait le probleme.
 if [ "$_osiris_failed" -eq 0 ]; then
     curl -s -X POST "$osiris_url/machines/$_osiris_mac/status?status=deployed" --max-time 15 > /dev/null || true
-    echo "[$(ts)] Deploiement signale comme reussi."
+    _log "Deploiement signale comme reussi."
 else
-    echo "[$(ts)] Des erreurs ont eu lieu - la machine reste en echec cote OSIRIS."
+    _log "Des erreurs ont eu lieu - la machine reste en echec cote OSIRIS."
 fi
 
 # L'unite n'existe que sur le chemin PXE : sur le chemin cloud-init, le script

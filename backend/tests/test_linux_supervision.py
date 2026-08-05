@@ -470,3 +470,56 @@ def test_les_routes_appelees_par_les_machines_sont_surveillees():
     assert "/firstboot-linux/000000000000" in main._ROUTES_MACHINES
     assert "/bootstrap/linux" in main._ROUTES_MACHINES
     assert "/boot" in main._ROUTES_MACHINES
+
+
+# ── Le firstboot Linux doit rendre compte à OSIRIS ─────────────────────────
+# Le 2026-08-05, une VM déployée a renvoyé UNE ligne à OSIRIS pour 41 écrites en
+# local : le script redirige tout son stdout vers un fichier, donc un `echo` ne
+# quitte jamais la machine. Diagnostiquer l'agent Zabbix absent et le /data non
+# monté imposait d'ouvrir une console — impossible sur un site client.
+
+def _firstboot_ubuntu_rendu():
+    from jinja2 import Environment, FileSystemLoader
+    import main
+    env = Environment(loader=FileSystemLoader("templates"), trim_blocks=True,
+                      lstrip_blocks=True, autoescape=False)
+    env.filters["bash_squote"] = main.jinja_env.filters["bash_squote"]
+    return env.get_template("firstboot-ubuntu.sh.j2").render(
+        machine=type("M", (), {"hostname": "SRV-TEST", "mac": "aabbccddeeff", "ou": ""})(),
+        profile={"locale": "fr_FR.UTF-8", "keyboard": "fr", "timezone": "Europe/Paris",
+                 "default_user": "osiris", "join_domain": False, "domain": "",
+                 "domain_join_user": "", "domain_join_password": "", "post_script": "",
+                 "ssh_authorized_keys": "", "extra_packages": ""},
+        osiris_url="http://osiris", osiris_ip="10.0.0.1", tv_password="",
+        linux_apps=[], zabbix={"server": "10.0.0.2", "hostname": "SRV-TEST",
+                               "metadata": "osiris linux hc"},
+        data_disk_gb=10, root_password="",
+    )
+
+
+def test_les_etapes_du_firstboot_partent_vers_osiris():
+    """Sans ça, une VM distante est un trou noir : le journal reste sur la machine."""
+    script = _firstboot_ubuntu_rendu()
+    envoyees = script.count('_log "')
+    restees_locales = len([l for l in script.splitlines()
+                           if l.strip().startswith('echo "[$(ts)]')])
+    # 25 sur un profil minimal (ni applications, ni TeamViewer, ni jonction AD :
+    # les etapes correspondantes sont derriere des conditions Jinja non rendues).
+    assert envoyees >= 20, f"seulement {envoyees} etapes remontees a OSIRIS"
+    # Ne restent en local que les separateurs decoratifs et le gestionnaire d'erreur.
+    assert restees_locales <= 4, f"{restees_locales} etapes encore invisibles depuis OSIRIS"
+
+
+def test_la_fonction_de_log_n_est_pas_recursive():
+    """Piège de la réécriture automatique : `_log() { _log ...; }` boucle à l'infini."""
+    script = _firstboot_ubuntu_rendu()
+    # Ancre sur le debut de ligne : "_osiris_log() {" contient "_log() {".
+    corps = script.split("\n_log() {", 1)[1].split("}", 1)[0]
+    assert "_log " not in corps.replace("_osiris_log ", "")
+    assert 'echo "[$(ts)] $1"' in corps
+
+
+def test_les_etapes_cles_sont_tracees():
+    script = _firstboot_ubuntu_rendu()
+    for etape in ("Application du nom d'hote", "Supervision Zabbix", "Disque de donnees"):
+        assert f'_log "{etape}' in script or f'_log "{etape}"' in script
