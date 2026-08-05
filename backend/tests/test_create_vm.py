@@ -202,3 +202,44 @@ def test_create_vm_windows_rejects_cloudinit(client, admin_headers, monkeypatch)
         "cloud_template_id": 900,
     })
     assert resp.status_code == 400
+
+
+# ── Lecteur cloud-init deja present sur le template ────────────────────────
+# Le 2026-08-05, la creation d'une VM depuis un template regenere echouait sur
+# « rbd create 'vm-106-cloudinit' error: (17) File exists », et le clone etait
+# detruit dans la foulee. Cause : OSIRIS reclamait un lecteur cloud-init sans
+# regarder si le clone en avait deja herite un.
+
+import main
+
+
+def test_un_template_avec_lecteur_cloudinit_est_reconnu():
+    """Cas reel du 05/08 : `size=4M` = image materialisee, donc recopiee au clone."""
+    assert main._a_un_lecteur_cloudinit({
+        "ide2": "Lab_CEPH:vm-9001-cloudinit,media=cdrom,size=4M",
+        "scsi0": "Lab_CEPH:base-9001-disk-0,size=3584M",
+    })
+
+
+def test_un_lecteur_sur_un_autre_emplacement_compte_aussi():
+    """L'emplacement depend de la main qui a fabrique le template."""
+    assert main._a_un_lecteur_cloudinit({"sata0": "local-lvm:vm-100-cloudinit"})
+    assert main._a_un_lecteur_cloudinit({"scsi3": "ceph:vm-100-cloudinit,media=cdrom"})
+
+
+def test_un_template_sans_lecteur_cloudinit():
+    """Le cas nominal : OSIRIS doit alors en ajouter un."""
+    assert not main._a_un_lecteur_cloudinit({
+        "scsi0": "Lab_CEPH:base-9000-disk-0,size=3584M",
+        "net0": "virtio=BC:24:11:A3:D6:5B,bridge=vmbr0.238",
+        "boot": "order=scsi0",
+    })
+
+
+def test_une_config_vide_n_a_pas_de_lecteur():
+    assert not main._a_un_lecteur_cloudinit({})
+
+
+def test_les_valeurs_non_textuelles_ne_cassent_pas_le_balayage():
+    """La config Proxmox mele chaines et entiers (cores, memory, onboot)."""
+    assert not main._a_un_lecteur_cloudinit({"cores": 2, "memory": 2048, "onboot": 1})
