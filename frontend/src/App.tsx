@@ -1185,6 +1185,7 @@ export default function App() {
             token={auth.token}
             hypervisors={hypervisors}
             profiles={profiles}
+            organizations={orgs}
             selectedOrg={selectedOrg}
             onRefreshHypervisors={() => fetchHypervisors(auth.token)}
             onVmCreated={() => fetchAll(auth.token, selectedOrg)}

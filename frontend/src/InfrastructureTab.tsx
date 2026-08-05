@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { useState } from 'react'
 import { toast } from 'sonner'
-import type { Hypervisor, Profile, ProxmoxNode, ProxmoxTemplate } from './types'
+import type { Hypervisor, Organization, Profile, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { IcoX } from './icons'
 
@@ -12,12 +12,13 @@ interface InfrastructureTabProps {
   token: string
   hypervisors: Hypervisor[]
   profiles: Profile[]
+  organizations: Organization[]
   selectedOrg: number | null
   onRefreshHypervisors: () => void
   onVmCreated: () => void
 }
 
-export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
+export function InfrastructureTab({ token, hypervisors, profiles, organizations, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
   const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: false, snippets_storage: '', callback_url: '' })
   const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; error?: string } | null>>({})
   const [hvTesting, setHvTesting]       = useState<Record<number, boolean>>({})
@@ -27,7 +28,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
   const [vmStorages, setVmStorages]     = useState<{storage:string;type:string;avail_gb:number;total_gb:number}[]>([])
   const [vmNetworks, setVmNetworks]     = useState<{iface:string;type:string;address:string}[]>([])
   const [vmNodes, setVmNodes]           = useState<ProxmoxNode[]>([])
-  const [vmForm, setVmForm]             = useState({ hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', cloud_template_id: '' })
+  const [vmForm, setVmForm]             = useState({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', cloud_template_id: '' })
   const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
   const [vmCreating, setVmCreating]     = useState(false)
 
@@ -104,15 +105,21 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
         node: vmNode,
         profile_id: vmForm.profile_id ? Number(vmForm.profile_id) : null,
         cloud_template_id: vmForm.cloud_template_id ? Number(vmForm.cloud_template_id) : null,
-        organization_id: selectedOrg,
+        organization_id: vmForm.organization_id === '' ? null : Number(vmForm.organization_id),
       }),
     }).then(async r => {
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Erreur') }
       return r.json()
     }).then(data => {
-      toast.success(`VM "${data.hostname}" créée (VMID ${data.vm_id}) - en attente de boot PXE`)
+      // Une VM cloud-init démarre seule et rappelle OSIRIS : annoncer « en attente de
+      // boot PXE » laissait croire qu'il restait une action à faire.
+      toast.success(
+        vmForm.boot_mode === 'cloudinit'
+          ? `VM "${data.hostname}" créée (VMID ${data.vm_id}) - démarrage en cours`
+          : `VM "${data.hostname}" créée (VMID ${data.vm_id}) - en attente de boot PXE`
+      )
       setShowVmForm(false)
-      setVmForm({ hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', cloud_template_id: '' })
+      setVmForm({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', cloud_template_id: '' })
       onVmCreated()
     }).catch(err => toast.error(err.message))
       .finally(() => setVmCreating(false))
@@ -205,6 +212,15 @@ export function InfrastructureTab({ token, hypervisors, profiles, selectedOrg, o
               <div className="grid grid-cols-2 gap-2">
                 <input required placeholder="Hostname" value={vmForm.hostname} onChange={e => setVmForm(f => ({...f, hostname: e.target.value}))} className="osiris-input text-xs font-mono" />
                 <input required placeholder="Client / label" value={vmForm.client} onChange={e => setVmForm(f => ({...f, client: e.target.value}))} className="osiris-input text-xs" />
+                {/* L'organisation portait la supervision, le webhook et les reglages
+                    materiel, mais n'apparaissait nulle part ici : le formulaire reprenait
+                    en silence le filtre « Client » du haut de page. Une VM creee filtre sur
+                    « Tous les clients » naissait sans organisation, donc sans agent Zabbix,
+                    sans que rien ne le signale. Vecu le 2026-08-05. */}
+                <select value={vmForm.organization_id} onChange={e => setVmForm(f => ({...f, organization_id: e.target.value === '' ? '' : Number(e.target.value)}))} className="osiris-input text-xs">
+                  <option value="">— Aucune organisation (pas de supervision) —</option>
+                  {organizations.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                </select>
                 <select value={vmForm.os} onChange={e => setVmForm(f => ({
                     ...f, os: e.target.value, profile_id: '',
                     // Windows = PXE uniquement (WinPE) : le cloud-init est spécifique Linux.
