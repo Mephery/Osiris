@@ -22,24 +22,62 @@ def _make_hypervisor() -> int:
         return h.id
 
 
-def _patch_proxmox(monkeypatch, captured: dict):
+def _iso_bidon(tmp_path, monkeypatch, taille: int = 4096) -> int:
+    """Pose une fausse ISO WinPE locale. L'ISO réelle est gitignorée, donc absente en CI."""
+    faux = tmp_path / main.WINPE_ISO_NAME
+    faux.write_bytes(b"\0" * taille)
+    monkeypatch.setattr(main, "WINPE_ISO_PATH", str(faux))
+    return taille
+
+
+def _patch_proxmox(monkeypatch, captured: dict, *, iso_distante: int | None = 4096,
+                   type_storage: str = "lvmthin"):
+    """
+    Simule Proxmox.
+
+    `iso_distante` = taille de l'ISO déjà présente sur le nœud (None = absente),
+    ce qui permet de rejouer les trois cas : à jour, périmée, manquante.
+    """
     async def fake_get(h, path):
         if path.endswith("/cluster/nextid"):
             return "150"
+        if path.endswith("/storage"):
+            return [
+                {"storage": "local", "type": "dir", "active": 1,
+                 "content": "iso,vztmpl,backup"},
+                {"storage": "local-lvm", "type": type_storage, "active": 1,
+                 "content": "images,rootdir"},
+            ]
+        if "/content" in path:
+            if iso_distante is None:
+                return []
+            return [{"volid": f"local:iso/{main.WINPE_ISO_NAME}", "size": iso_distante}]
         return {}
 
     async def fake_post(h, path, data=None):
         if path.endswith("/qemu"):
             captured["qemu"] = data
+        if path.endswith("/download-url"):
+            captured["download"] = data
         return "UPID:pve:task"
+
+    async def fake_delete(h, path):
+        captured["delete"] = path
+        return {}
+
+    async def fake_wait(h, node, upid, max_wait=120):
+        captured["wait_max"] = max_wait
 
     monkeypatch.setattr(main, "_proxmox_get", fake_get)
     monkeypatch.setattr(main, "_proxmox_post", fake_post)
+    monkeypatch.setattr(main, "_proxmox_delete", fake_delete)
+    monkeypatch.setattr(main, "_proxmox_wait_task", fake_wait)
 
 
-def test_create_vm_windows_hardware(client, admin_headers, monkeypatch):
+def test_create_vm_windows_hardware(client, admin_headers, monkeypatch, tmp_path):
     hv_id = _make_hypervisor()
     captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch)
     _patch_proxmox(monkeypatch, captured)
 
     resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
@@ -61,10 +99,11 @@ def test_create_vm_windows_hardware(client, admin_headers, monkeypatch):
     assert "virtio" not in cfg["net0"]
 
 
-def test_create_vm_windows_ostype_override(client, admin_headers, monkeypatch):
+def test_create_vm_windows_ostype_override(client, admin_headers, monkeypatch, tmp_path):
     """win_ostype permet de cibler Server 2016/2019 (win10)."""
     hv_id = _make_hypervisor()
     captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch)
     _patch_proxmox(monkeypatch, captured)
 
     resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
@@ -73,6 +112,139 @@ def test_create_vm_windows_ostype_override(client, admin_headers, monkeypatch):
     })
     assert resp.status_code == 201, resp.text
     assert captured["qemu"]["ostype"] == "win10"
+
+
+def test_windows_demarre_sur_le_cd_winpe_et_pas_en_pxe(client, admin_headers,
+                                                       monkeypatch, tmp_path):
+    """WinPE est livré en CD-ROM : l'OVMF de Proxmox n'a aucune entrée de boot réseau."""
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch)
+    _patch_proxmox(monkeypatch, captured)
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "SRV-WIN", "client": "Acme", "os": "windows",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+    assert resp.status_code == 201, resp.text
+
+    cfg = captured["qemu"]
+    assert cfg["ide2"] == f"local:iso/{main.WINPE_ISO_NAME},media=cdrom"
+    # Le CD d'abord : la VM naît pour être déployée.
+    assert cfg["boot"] == "order=ide2;sata0"
+    assert "net0" not in cfg["boot"]
+
+
+def test_windows_exige_un_cpu_avec_popcnt_et_sse42(client, admin_headers,
+                                                    monkeypatch, tmp_path):
+    """
+    Sans `cpu`, Proxmox retombe sur kvm64 — dépourvu de POPCNT/SSE4.2, que Windows
+    Server 2025 et Win11 24H2 exigent. Le boot.wim se charge alors entièrement puis
+    la VM meurt sans un octet émis : rien ne désigne le CPU dans le symptôme.
+    """
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch)
+    _patch_proxmox(monkeypatch, captured)
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "SRV-WIN", "client": "Acme", "os": "windows",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+    assert resp.status_code == 201, resp.text
+    assert captured["qemu"]["cpu"] == "x86-64-v2-AES"
+
+
+def test_iso_winpe_telechargee_quand_absente_du_noeud(client, admin_headers,
+                                                      monkeypatch, tmp_path):
+    """Aucun stockage d'ISO n'est partagé : chaque nœud doit recevoir la sienne."""
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch)
+    _patch_proxmox(monkeypatch, captured, iso_distante=None)
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "SRV-WIN", "client": "Acme", "os": "windows",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+    assert resp.status_code == 201, resp.text
+    assert captured["download"]["filename"] == main.WINPE_ISO_NAME
+    assert captured["download"]["url"].endswith(f"/static/{main.WINPE_ISO_NAME}")
+    # 660 Mo : les 120 s par défaut du clone ne suffisent pas.
+    assert captured["wait_max"] > 120
+
+
+def test_iso_winpe_perimee_est_remplacee(client, admin_headers, monkeypatch, tmp_path):
+    """
+    Rien ne régénère l'ISO quand boot.wim change : sans ce contrôle de taille, un
+    nœud déploierait indéfiniment un WinPE périmé, en silence.
+    """
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch, taille=8192)
+    _patch_proxmox(monkeypatch, captured, iso_distante=4096)   # taille différente
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "SRV-WIN", "client": "Acme", "os": "windows",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+    assert resp.status_code == 201, resp.text
+    assert "delete" in captured, "l'ISO périmée doit être supprimée avant de retélécharger"
+    assert "download" in captured
+
+
+def test_iso_winpe_a_jour_nest_pas_retelechargee(client, admin_headers,
+                                                 monkeypatch, tmp_path):
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch, taille=4096)
+    _patch_proxmox(monkeypatch, captured, iso_distante=4096)   # même taille
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "SRV-WIN", "client": "Acme", "os": "windows",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+    assert resp.status_code == 201, resp.text
+    assert "download" not in captured and "delete" not in captured
+
+
+def test_pas_de_qcow2_sur_un_stockage_qui_ne_sait_pas_le_porter(
+        client, admin_headers, monkeypatch, tmp_path):
+    """
+    Lab_CEPH (RBD) n'accepte que du raw : lui passer format=qcow2 fait échouer la
+    création. Le format ne se déduit donc pas du nom mais du TYPE de stockage.
+    """
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch)
+    _patch_proxmox(monkeypatch, captured, type_storage="rbd")
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "SRV-WIN", "client": "Acme", "os": "windows",
+        "node": "pve", "storage": "local-lvm", "disk_gb": 60,
+        "data_disk_gb": 10, "boot_mode": "pxe",
+    })
+    assert resp.status_code == 201, resp.text
+
+    cfg = captured["qemu"]
+    assert "format=qcow2" not in cfg["sata0"]
+    assert "format=qcow2" not in cfg["sata1"]
+    assert "format=qcow2" not in cfg["efidisk0"]
+
+
+def test_qcow2_conserve_sur_un_stockage_fichier(client, admin_headers,
+                                                monkeypatch, tmp_path):
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch)
+    _patch_proxmox(monkeypatch, captured, type_storage="dir")
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "SRV-WIN", "client": "Acme", "os": "windows",
+        "node": "pve", "storage": "local-lvm", "disk_gb": 60, "boot_mode": "pxe",
+    })
+    assert resp.status_code == 201, resp.text
+    assert captured["qemu"]["sata0"].endswith(",format=qcow2")
 
 
 def test_create_vm_linux_stays_virtio(client, admin_headers, monkeypatch):

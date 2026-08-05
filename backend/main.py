@@ -2272,7 +2272,7 @@ def post_smoke_tests(mac: str, data: dict):
 
 
 @app.post("/machines/{mac}/redeploy-now", dependencies=[Depends(get_current_user)])
-def redeploy_now(mac: str):
+def redeploy_now(mac: str, background_tasks: BackgroundTasks):
     """Remet la machine en pending ET envoie un magic packet WoL en une seule action."""
     clean_mac = validate_mac(mac)
     with Session(engine) as session:
@@ -2282,6 +2282,9 @@ def redeploy_now(mac: str):
         _open_new_deploy_run(machine)
         session.add(machine)
         session.commit()
+    # Une VM n'a pas de WoL : ce qui la fait redeployer, c'est de la renvoyer sur son
+    # CD WinPE. Sans ca, elle rebooterait sur le Windows deja installe.
+    background_tasks.add_task(_orienter_boot_vm_windows, clean_mac, True)
     formatted = ":".join(clean_mac[i:i+2] for i in range(0, 12, 2))
     try:
         wakeonlan.send_magic_packet(formatted, ip_address="10.0.0.255", port=9)
@@ -2398,6 +2401,43 @@ def get_audit_logs(
         ]
 
 
+async def _orienter_boot_vm_windows(mac: str, vers_winpe: bool) -> None:
+    """
+    Fait pointer le démarrage d'une VM Windows vers le CD WinPE ou vers son disque.
+
+    Une VM ne sait pas amorcer par le réseau (l'OVMF de Proxmox n'expose aucune
+    entrée PXE) : WinPE lui arrive par CD-ROM. Il faut donc dire à la VM quand
+    regarder ce CD, et c'est OSIRIS qui le sait.
+
+    - `vers_winpe=True`  (création, redéploiement) : CD d'abord.
+    - `vers_winpe=False` (déploiement terminé)     : disque seul.
+
+    Sans la seconde bascule, la VM rebooterait sur WinPE à chaque démarrage et ne
+    lancerait jamais son Windows. Sans la première, un redéploiement resterait sans
+    effet : le disque, désormais amorçable, garderait la main.
+
+    Best-effort : ce réglage ne doit jamais faire échouer le rapport de statut d'une
+    machine, qui est la seule voix qu'elle ait.
+    """
+    try:
+        with Session(engine) as session:
+            machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+            if not machine or not machine.proxmox_vm_id or not machine.hypervisor_id:
+                return
+            if (machine.os or "").lower() != "windows":
+                return
+            h = session.get(Hypervisor, machine.hypervisor_id)
+            node, vm_id = machine.proxmox_node, machine.proxmox_vm_id
+        # vSphere gère ses lecteurs autrement : rien à faire ici pour l'instant.
+        if not h or h.type != "proxmox":
+            return
+        ordre = "order=ide2;sata0" if vers_winpe else "order=sata0"
+        await _proxmox_put(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/config", {"boot": ordre})
+        _hv_log.info("VM %s (%s) : ordre de démarrage → %s", vm_id, mac, ordre)
+    except Exception as e:
+        _hv_log.warning("Ordre de démarrage non appliqué sur la VM de %s : %s", mac, e)
+
+
 @app.post("/machines/{mac}/status")
 @limiter.limit("10/minute")
 def report_machine_status(request: Request, mac: str, status: str, background_tasks: BackgroundTasks):
@@ -2436,6 +2476,13 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
             # c'est justement apres une tentative ratee qu'on relance, et c'est cette
             # trace-la qu'on veut encore pouvoir lire.
             _open_new_deploy_run(machine)
+        # WinPE poste "deployed" JUSTE AVANT de rebooter : c'est le seul instant ou
+        # l'on sait que le disque est amorcable et que le CD ne doit plus servir.
+        # Attendre le "deployed" du firstboot serait trop tard — la VM aurait deja
+        # redemarre sur WinPE entre-temps.
+        if status in ("deployed", "pending"):
+            background_tasks.add_task(_orienter_boot_vm_windows, clean_mac,
+                                      status == "pending")
         if status_changed:
             _record_deploy_event(session, machine, status)
         elif status == "deployed":
@@ -3347,6 +3394,95 @@ async def _proxmox_upload_snippet(h: Hypervisor, node: str, storage: str, filena
         raise HTTPException(status_code=502, detail=f"Impossible d'uploader le snippet : {e}")
 
 
+# Nom FIXE de l'ISO WinPE, côté OSIRIS comme côté hyperviseurs. Elle est construite
+# à partir de backend/static/winpe/ et DOIT être régénérée en même temps que boot.wim
+# (cf. README) : rien ne le fait automatiquement aujourd'hui.
+WINPE_ISO_NAME = "osiris-winpe.iso"
+# Chemin local, en constante : l'ISO est gitignorée (`**/*.iso`) et absente en CI,
+# les tests détournent donc cette variable plutôt que de fabriquer 660 Mo.
+WINPE_ISO_PATH = os.path.join(os.path.dirname(__file__), "static", WINPE_ISO_NAME)
+
+# Types de stockage Proxmox capables de porter un qcow2. Les autres (RBD, LVM-thin,
+# ZFS…) n'acceptent que du raw, et leur passer `format=qcow2` fait échouer la
+# création de la VM — Lab_CEPH sur le cluster FIT est précisément dans ce cas.
+_STORAGE_TYPES_FICHIER = {"dir", "nfs", "cifs", "glusterfs", "cephfs"}
+
+
+def _suffixe_format(storages: list[dict], nom: str) -> str:
+    """Renvoie ',format=qcow2' si le stockage sait le porter, sinon ''."""
+    st = next((s for s in storages if s.get("storage") == nom), None)
+    return ",format=qcow2" if st and st.get("type") in _STORAGE_TYPES_FICHIER else ""
+
+
+async def _ensure_winpe_iso(h: Hypervisor, node: str, storages: list[dict]) -> str:
+    """
+    Garantit que l'ISO WinPE est présente ET à jour sur `node`, et renvoie son volid.
+
+    Il n'existe pas de stockage d'ISO partagé sur ces clusters (Lab_CEPH est du RBD,
+    qui ne stocke pas d'ISO) : l'ISO doit exister sur CHAQUE nœud. On la fait donc
+    télécharger par le nœud lui-même (`download-url`), ce qui contourne le
+    téléversement par ticket que les jetons d'API ne savent pas faire.
+
+    La comparaison de taille n'est pas du zèle : rien ne régénère l'ISO quand
+    `boot.wim` change, et une ISO périmée déploierait silencieusement l'ancien WinPE
+    — exactement le scénario du Caddyfile installé resté figé au 21/07.
+    """
+    import urllib.parse
+
+    if not os.path.exists(WINPE_ISO_PATH):
+        raise HTTPException(status_code=500, detail=(
+            f"ISO WinPE introuvable sur OSIRIS ({WINPE_ISO_PATH}). La construire depuis "
+            "backend/static/winpe/ avant de déployer une VM Windows."))
+    taille_locale = os.path.getsize(WINPE_ISO_PATH)
+
+    candidats = [s["storage"] for s in storages
+                 if s.get("active") and "iso" in (s.get("content") or "")]
+    if not candidats:
+        raise HTTPException(status_code=502, detail=(
+            f"Aucun stockage acceptant les ISO sur le nœud {node} — activer le contenu "
+            "« ISO image » sur un stockage de ce nœud."))
+    # « local » d'abord : c'est le stockage d'ISO par défaut de Proxmox.
+    storage = "local" if "local" in candidats else candidats[0]
+    volid = f"{storage}:iso/{WINPE_ISO_NAME}"
+
+    contenu = await _proxmox_get(
+        h, f"/api2/json/nodes/{node}/storage/{storage}/content?content=iso")
+    presente = next((i for i in (contenu or []) if i.get("volid") == volid), None)
+    if presente and int(presente.get("size") or 0) == taille_locale:
+        return volid
+    if presente:
+        # Taille différente = ISO périmée, et `download-url` refuse d'écraser.
+        await _proxmox_delete(
+            h, f"/api2/json/nodes/{node}/storage/{storage}/content/"
+               f"{urllib.parse.quote(volid, safe='')}")
+
+    osiris_url = (h.callback_url or OSIRIS_BASE_URL).rstrip("/")
+    try:
+        upid = await _proxmox_post(
+            h, f"/api2/json/nodes/{node}/storage/{storage}/download-url",
+            {"content": "iso", "filename": WINPE_ISO_NAME,
+             "url": f"{osiris_url}/static/{WINPE_ISO_NAME}"})
+    except HTTPException as e:
+        # Les deux causes réelles sont invisibles dans le message de Proxmox, qui se
+        # contente d'un « Permission check failed ». Les nommer évite la demi-journée
+        # de recherche qu'a coûtée le même silence côté Caddy.
+        raise HTTPException(status_code=502, detail=(
+            f"Dépôt de l'ISO WinPE refusé sur {node}/{storage} ({e.detail}). Il faut "
+            "« Datastore.AllocateTemplate » sur le stockage ET « Sys.AccessNetwork » "
+            "sur / pour le COMPTE Proxmox (rôle sur mesure : aucun rôle intégré ne "
+            "porte Sys.AccessNetwork hors Administrator)."))
+
+    # ~660 Mo à télécharger : les 120 s par défaut du clone sont trop courtes.
+    try:
+        await _proxmox_wait_task(h, node, str(upid), max_wait=600)
+    except HTTPException as e:
+        raise HTTPException(status_code=502, detail=(
+            f"Téléchargement de l'ISO WinPE échoué sur {node} ({e.detail}). Vérifier "
+            f"que le nœud atteint OSIRIS en HTTP sur {osiris_url} — c'est le nœud qui "
+            "va chercher le fichier, un sens de trafic souvent fermé par le pare-feu."))
+    return volid
+
+
 async def _proxmox_wait_task(h: Hypervisor, node: str, upid: str, max_wait: int = 120) -> None:
     """Attend la fin d'une tâche Proxmox (polling toutes les 2 secondes)."""
     import asyncio, urllib.parse
@@ -3826,23 +3962,48 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
 
     if body.boot_mode == "pxe":
         # ── Chemin PXE ──────────────────────────────────────────────────────────
+        # Le format des disques dépend du stockage : Lab_CEPH (RBD) refuse le qcow2.
+        storages = await _proxmox_get(h, f"/api2/json/nodes/{body.node}/storage")
+        fmt = _suffixe_format(storages, body.storage)
         if body.os == "windows":
             # VM Windows : matériel compatible pilotes *inbox* (aucune injection virtio).
             #  - SATA (sata0) + NIC e1000  => WinPE voit disque et réseau sans driver.
             #  - OVMF/q35 + efidisk0       => le déploiement WinPE fait du GPT/UEFI
             #    (bcdboot /f UEFI) : le firmware DOIT être UEFI, pas SeaBIOS.
-            #  - SecureBoot désactivé (pre-enrolled-keys=0) pour ne pas bloquer le boot PXE/WinPE.
+            #  - SecureBoot désactivé (pre-enrolled-keys=0) pour ne pas bloquer WinPE.
             #    TPM non nécessaire : DISM applique le WIM sans passer par setup.exe.
+            #
+            # WinPE est livré en CD-ROM, PAS en PXE : l'OVMF de Proxmox n'expose
+            # aucune entrée de boot réseau (vérifié en e1000 comme en virtio) et la
+            # chaîne iPXE+wimboot n'a jamais rendu la main. Le même boot.wim de
+            # 635 Mo démarre sans broncher depuis un CD (validé le 2026-08-05).
+            iso_volid = body.iso or await _ensure_winpe_iso(h, body.node, storages)
             vm_config: dict = {
                 "vmid": vm_id, "name": body.hostname,
                 "cores": body.vcpus, "sockets": 1, "memory": body.ram_mb,
                 "net0": f"e1000={mac_colons},bridge={body.bridge}",
                 "ostype": body.win_ostype or "win11",
                 "bios": "ovmf", "machine": "q35",
-                "efidisk0": f"{body.storage}:1,efitype=4m,pre-enrolled-keys=0,format=qcow2",
+                # Sans `cpu`, l'API Proxmox retombe sur `kvm64`, qui n'expose ni
+                # POPCNT ni SSE4.2 — or Windows Server 2025 et Windows 11 24H2 les
+                # EXIGENT, WinPE compris. Le symptôme est trompeur : le boot.wim se
+                # charge entièrement en mémoire (~940 Mo), puis la machine meurt
+                # sans un octet émis sur le réseau. Constaté le 2026-08-05.
+                # `x86-64-v2-AES` plutôt que `host` : mêmes instructions requises,
+                # mais la VM reste migrable entre des nœuds hétérogènes.
+                "cpu": "x86-64-v2-AES",
+                "efidisk0": f"{body.storage}:1,efitype=4m,pre-enrolled-keys=0{fmt}",
                 "agent": "enabled=1", "onboot": 1,
-                "boot": "order=net0;sata0",
-                "sata0": f"{body.storage}:{body.disk_gb},format=qcow2",
+                "ide2": f"{iso_volid},media=cdrom",
+                # Le CD d'abord : la VM naît pour être déployée. C'est
+                # `_orienter_boot_vm_windows` qui la renvoie sur son disque quand
+                # WinPE annonce la fin, et qui la ramène sur le CD au redéploiement.
+                # Mettre le disque en premier « pour éviter la boucle » semblait plus
+                # simple — le firmware finit par retomber sur le CD — mais coûtait
+                # ~170 s d'expiration à chaque déploiement ET rendait tout
+                # redéploiement impossible, le disque installé gardant la main.
+                "boot": "order=ide2;sata0",
+                "sata0": f"{body.storage}:{body.disk_gb}{fmt}",
             }
         else:
             vm_config = {
@@ -3852,17 +4013,17 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
                 "ostype": "l26", "agent": "enabled=1", "onboot": 1,
                 "boot": "order=net0;scsi0;ide2",
                 "scsihw": "virtio-scsi-pci",
-                "scsi0": f"{body.storage}:{body.disk_gb},format=qcow2",
+                "scsi0": f"{body.storage}:{body.disk_gb}{fmt}",
             }
         if body.data_disk_gb:
             # Disque de donnees, laisse VIERGE : c'est le premier demarrage qui le
             # formate et le monte sur /data. Sur le materiel Windows (SATA), il
             # prend la place suivante sur le meme controleur.
             if body.os == "windows":
-                vm_config["sata1"] = f"{body.storage}:{body.data_disk_gb},format=qcow2"
+                vm_config["sata1"] = f"{body.storage}:{body.data_disk_gb}{fmt}"
             else:
-                vm_config["scsi1"] = f"{body.storage}:{body.data_disk_gb},format=qcow2"
-        if body.iso:
+                vm_config["scsi1"] = f"{body.storage}:{body.data_disk_gb}{fmt}"
+        if body.iso and "ide2" not in vm_config:
             vm_config["ide2"] = f"{body.iso},media=cdrom"
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu", vm_config)
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
