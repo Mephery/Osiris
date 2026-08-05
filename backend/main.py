@@ -47,6 +47,59 @@ from crypto import encrypt, decrypt
 
 arq_pool = None
 
+# Routes que les machines en cours de deploiement appellent en HTTP CLAIR : elles
+# n'ont ni navigateur, ni magasin de certificats, et leur client (iPXE, curl de
+# WinPE, amorcage Linux) ne suit pas les redirections. Elles doivent donc etre
+# proxifiees telles quelles par le frontal.
+_ROUTES_MACHINES = (
+    "/boot",
+    "/bootstrap/linux",
+    "/firstboot-linux/000000000000",
+    "/firstboot-windows/000000000000",
+    "/winpe-script/000000000000",
+    "/preseed/000000000000",
+)
+
+
+async def _verifier_routes_machines() -> None:
+    """Alerte si le frontal ne sert pas en clair les routes du deploiement.
+
+    Le 2026-08-05, `/firstboot-linux/*` manquait au matcher du Caddyfile *installe*
+    — le depot avait ete mis a jour 15 jours plus tot, pas la machine. Caddy
+    repondait 308 vers HTTPS, l'amorcage des VM Linux echouait en boucle, et rien
+    nulle part ne signalait la derive.
+
+    On ne teste PAS le code exact (404 sur une MAC bidon est normal et prouve que la
+    route arrive bien jusqu'a l'application) : seule une **redirection** trahit une
+    route absente du frontal.
+    """
+    await asyncio.sleep(10)   # laisser le frontal et l'application se poser
+    suspectes = []
+    try:
+        import aiohttp
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for route in _ROUTES_MACHINES:
+                try:
+                    async with session.get(f"{OSIRIS_BASE_URL}{route}",
+                                           allow_redirects=False) as rep:
+                        if 300 <= rep.status < 400:
+                            suspectes.append(f"{route} -> HTTP {rep.status}")
+                except Exception as exc:
+                    suspectes.append(f"{route} -> injoignable ({type(exc).__name__})")
+    except Exception:
+        return   # une verification de confort ne doit jamais gener le demarrage
+
+    if suspectes:
+        logging.getLogger("osiris.routes").warning(
+            "Routes de deploiement NON servies en clair par le frontal : %s. "
+            "Les machines ne suivent pas les redirections : PXE, WinPE et l'amorcage "
+            "Linux echoueront. Verifier le matcher du Caddyfile installe "
+            "(/etc/caddy/Caddyfile) face a celui du depot.",
+            " ; ".join(suspectes),
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global arq_pool
@@ -56,7 +109,9 @@ async def lifespan(app: FastAPI):
     _seed_apps()
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
     arq_pool = await create_pool(RedisSettings.from_dsn(redis_url))
+    verif = asyncio.create_task(_verifier_routes_machines())
     yield
+    verif.cancel()
     await arq_pool.aclose()
 
 limiter = Limiter(key_func=get_remote_address)
@@ -2451,6 +2506,16 @@ async def report_deploy_progress(request: Request, mac: str, p: int):
     return {"ok": True}
 
 
+def _a_un_lecteur_cloudinit(config: dict) -> bool:
+    """Cette config de VM Proxmox porte-t-elle deja un lecteur cloud-init ?
+
+    On balaie toutes les valeurs plutot que le seul `ide2` : le lecteur peut vivre
+    sur n'importe quel emplacement IDE/SATA/SCSI selon la main qui a fabrique le
+    template, et un doublon a un autre emplacement casserait tout autant.
+    """
+    return any("cloudinit" in str(v) for v in config.values())
+
+
 def _open_new_deploy_run(machine: Machine) -> None:
     """Repasse une machine en attente et ouvre un nouveau journal de déploiement.
 
@@ -3832,8 +3897,18 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
             "agent":  "enabled=1",
             "onboot": 1,
             "boot":   "order=scsi0",
-            "ide2":   f"{body.storage}:cloudinit",
         }
+        # Le lecteur cloud-init n'est ajoute QUE s'il manque. Un template qui a deja
+        # le sien voit son image recopiee par le clone ; en redemander une au meme nom
+        # fait echouer Proxmox sur « rbd create 'vm-<id>-cloudinit' : File exists »,
+        # et le clone est detruit dans la foulee. Un template porte son lecteur des
+        # qu'il a ete regenere une fois (un simple `qm set --ipconfig0` materialise
+        # l'image), donc supposer qu'il n'en a pas ne tient pas.
+        if not _a_un_lecteur_cloudinit(await _proxmox_get(
+            h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config"
+        )):
+            cloud_config["ide2"] = f"{body.storage}:cloudinit"
+
         if body.data_disk_gb:
             # Le template n'a qu'un disque : celui-ci s'ajoute, vierge, et sera
             # formate puis monte sur /data au premier demarrage.

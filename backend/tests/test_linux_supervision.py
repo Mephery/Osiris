@@ -431,3 +431,42 @@ def test_le_volume_de_donnees_est_verifie_par_un_smoke_test(client, linux_setup)
     script = _firstboot(client)
     assert "mountpoint -q /data" in script
     assert '_add_test "Volume /data"' in script
+
+
+# ── Diagnostic de l'amorçage Linux ─────────────────────────────────────────
+# Le 2026-08-05, une VM a bouclé 30 fois sur « aucune fiche OSIRIS » alors que la
+# fiche existait : le frontal renvoyait 308 (route absente du matcher Caddy) et le
+# script confondait redirection, absence de fiche et serveur injoignable.
+
+def _bootstrap_rendu():
+    from jinja2 import Environment, FileSystemLoader
+    env = Environment(loader=FileSystemLoader("templates"), trim_blocks=True,
+                      lstrip_blocks=True, autoescape=False)
+    return env.get_template("bootstrap-linux.sh.j2").render(osiris_url="http://osiris")
+
+
+def test_l_amorcage_lit_le_code_http_au_lieu_de_le_masquer():
+    """`curl -f` rendait 404, 308 et panne réseau indiscernables."""
+    script = _bootstrap_rendu()
+    assert "curl -s -o \"$SCRIPT\" -w '%{http_code}'" in script
+    assert "curl -sf -o" not in script
+
+
+def test_chaque_cause_a_son_message():
+    script = _bootstrap_rendu()
+    for cause in ("serveur injoignable", "pas de fiche pour cette MAC", "REDIRECTION"):
+        assert cause in script
+
+
+def test_le_code_http_apparait_dans_le_journal():
+    assert 'details="$details $mac->HTTP $code' in _bootstrap_rendu()
+
+
+# ── Détection d'une route non proxifiée par le frontal ─────────────────────
+
+def test_les_routes_appelees_par_les_machines_sont_surveillees():
+    """Celles qui ont réellement cassé : l'amorçage Linux et le PXE."""
+    import main
+    assert "/firstboot-linux/000000000000" in main._ROUTES_MACHINES
+    assert "/bootstrap/linux" in main._ROUTES_MACHINES
+    assert "/boot" in main._ROUTES_MACHINES

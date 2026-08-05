@@ -64,17 +64,30 @@ SCRIPT=/run/osiris-firstboot.sh
 # 30 tentatives x 10 s = 5 min : de quoi laisser le bail DHCP s'etablir, et
 # couvrir le cas ou la VM demarre avant que sa fiche existe cote OSIRIS.
 for attempt in $(seq 1 30); do
+    details=""
     for mac in $(macs); do
-        code=$(curl -sf -o "$SCRIPT" -w '%{http_code}' --max-time 20 \
-               "$OSIRIS_URL/firstboot-linux/$mac" 2>/dev/null) || code=""
+        # Pas de -f : on veut LIRE le code HTTP, pas seulement echouer dessus. Avec
+        # -f, une 404 (fiche absente), une 308 (route non proxifiee) et un serveur
+        # injoignable donnaient tous le meme silence, et le journal accusait
+        # l'absence de fiche dans les trois cas. Diagnostic fausse pendant 5 min.
+        code=$(curl -s -o "$SCRIPT" -w '%{http_code}' --max-time 20 \
+               "$OSIRIS_URL/firstboot-linux/$mac" 2>/dev/null || echo 000)
         if [ "$code" = "200" ] && [ -s "$SCRIPT" ]; then
             echo "[$(ts)] Fiche trouvee pour la MAC $mac - execution du premier demarrage."
             curl -sf -X POST "$OSIRIS_URL/machines/$mac/status?status=deploying" --max-time 15 || true
             chmod +x "$SCRIPT"
             exec /bin/bash "$SCRIPT"
         fi
+        case "$code" in
+            000) indice="serveur injoignable" ;;
+            404) indice="pas de fiche pour cette MAC" ;;
+            30*) indice="REDIRECTION : $OSIRIS_URL/firstboot-linux/* n'est pas servi en clair (matcher du reverse proxy ?)" ;;
+            *)   indice="reponse inattendue" ;;
+        esac
+        details="$details $mac->HTTP $code ($indice);"
+        : > "$SCRIPT"
     done
-    echo "[$(ts)] Tentative $attempt/30 : aucune fiche OSIRIS pour $(macs | tr '\n' ' ')- nouvel essai dans 10 s."
+    echo "[$(ts)] Tentative $attempt/30 :$details nouvel essai dans 10 s."
     sleep 10
 done
 
