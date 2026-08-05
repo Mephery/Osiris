@@ -2895,8 +2895,18 @@ def _pack_for_model_name(session: Session, name: str) -> Optional[DriverPack]:
 
 def _resolve_driver_dir(machine: Machine) -> str:
     """Chemin du dossier de drivers a injecter, relatif au partage SMB (Z:), en
-    notation Windows (backslashes). 'drivers' = tout le dossier (fallback historique) ;
-    'drivers\\<vendor>\\<key>' = injection ciblee du pack explicite de la machine."""
+    notation Windows (backslashes). '' = ne rien injecter ; 'drivers' = tout le
+    dossier (fallback historique) ; 'drivers\\<vendor>\\<key>' = pack cible.
+
+    Une VM ne recoit RIEN : son materiel est virtuel et standard (SATA + e1000 ont
+    ete choisis exactement pour ca, les pilotes sont *inbox*). Aucun pack Dell/HP/
+    Lenovo ne peut correspondre a « Standard PC (Q35 + ICH9, 2009) », donc sans ce
+    court-circuit on retombe sur le fallback et DISM injecte les ~36 GB du dossier
+    entier — 2046 fichiers .inf a travers SMB, des heures de travail pour du
+    materiel qui n'existera jamais. Constate sur SRV-WIN-ISO le 2026-08-05.
+    """
+    if machine.proxmox_vm_id:
+        return ""
     with Session(engine) as session:
         pack = (
             session.get(DriverPack, machine.driver_pack_id)

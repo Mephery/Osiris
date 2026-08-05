@@ -102,10 +102,19 @@ if errorlevel 1 (
     exit /b 1
 )
 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/deploy-progress?p=85" >nul 2>&1
-X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=DISM+100%25+OK" >nul 2>&1
+REM `%%25` et non `%25` : dans un .cmd, cmd.exe consomme `%2` comme paramètre du
+REM script et il ne reste que le `5` — le journal affichait « DISM 1005 OK ».
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=DISM+100%%25+OK" >nul 2>&1
 
 REM ── Injection de drivers constructeurs ───────────────────────────────────
-REM {{ driver_dir }} = "drivers" (tout le dossier) ou "drivers\<vendor>\<key>" (pack cible)
+REM {{ driver_dir }} = "" (rien a injecter : VM) | "drivers" (tout le dossier)
+REM                  | "drivers\<vendor>\<key>" (pack cible)
+{% if not driver_dir %}
+REM Materiel virtuel : les pilotes sont inbox. Injecter le dossier complet ici
+REM coutait des heures de DISM pour du materiel qui n'existe pas.
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=VM+:+pilotes+constructeurs+inutiles+(materiel+virtuel+standard)" >nul 2>&1
+echo [OSIRIS] VM - injection de drivers ignoree ^(pilotes inbox^)
+{% else %}
 echo [OSIRIS] Recherche de drivers constructeurs sur le partage...
 REM Chemin SANS guillemets : model_key n'a jamais d'espace, et un chemin quote
 REM finissant par \" casse le parsing DISM (le \ echappe le guillemet fermant).
@@ -128,6 +137,7 @@ if exist Z:\{{ driver_dir }}\ (
     X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Aucun+dossier+drivers+(etape+ignoree)" >nul 2>&1
     echo [OSIRIS] Aucun dossier drivers sur le partage - etape ignoree
 )
+{% endif %}
 
 REM ── Configuration du demarrage UEFI ──────────────────────────────────────
 echo [OSIRIS] Configuration du boot UEFI...
