@@ -875,6 +875,7 @@ Les binaires et images ISO ne sont pas inclus dans le dépôt. A placer dans `ba
 | `wimboot` | github.com/ipxe/wimboot/releases |
 | `curl.exe` (Windows 8.x) | curl.se/windows |
 | `installers/DellBIOSProvider.zip` | PowerShell Gallery — voir ci-dessous |
+| `installers/zabbix-agent2.deb` | zabbix.com — voir ci-dessous |
 
 ### Module DellBIOSProvider (mot de passe BIOS Dell)
 
@@ -892,6 +893,32 @@ zip -qr backend/static/installers/DellBIOSProvider.zip .
 
 Le firstboot le télécharge, le décompacte dans `%ProgramFiles%\WindowsPowerShell\Modules\`
 et l'importe — sans accès Internet depuis le poste du client.
+
+### Agent Zabbix (supervision des VM Linux)
+
+Nécessaire seulement si une organisation a un collecteur Zabbix renseigné.
+
+**Ubuntu 24.04 « noble » ne fournit plus d'agent Zabbix** — le paquet a été retiré des
+dépôts (vérifié le 2026-08-05 ; seul `pcp-export-zabbix-agent`, qui est autre chose,
+subsiste). Le firstboot essaie donc d'abord les dépôts de la distribution — Debian les
+fournit encore — puis retombe sur le paquet **servi par OSIRIS**, comme le MSI WithSecure
+et le module DellBIOSProvider côté Windows.
+
+Aucun dépôt tiers n'est ajouté aux machines : elles n'ont pas à joindre `repo.zabbix.com`
+depuis le réseau du client, souvent filtré. Seules les dépendances viennent des dépôts de
+la distribution.
+
+Récupérer le paquet correspondant à la distribution déployée sur
+[zabbix.com/download](https://www.zabbix.com/download) (section *Agent*, paquet
+`zabbix-agent2` pour Ubuntu 24.04), puis :
+
+```bash
+cp zabbix-agent2_*_amd64.deb backend/static/installers/zabbix-agent2.deb
+```
+
+Le nom de fichier est **fixe** : le firstboot ne connaît pas le numéro de version. Pour
+mettre à jour l'agent, il suffit de remplacer ce fichier — aucun template de VM n'est à
+refabriquer.
 
 ### Images Ubuntu
 

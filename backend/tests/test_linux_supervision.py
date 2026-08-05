@@ -555,3 +555,42 @@ def test_les_tailles_sont_bien_en_octets():
     res = subprocess.run(m.group(1), shell=True, capture_output=True, text=True)
     tailles = [l.split()[3] for l in res.stdout.strip().splitlines() if len(l.split()) >= 4]
     assert tailles and all(t.isdigit() for t in tailles), f"tailles non numériques : {tailles}"
+
+
+# ── Agent Zabbix servi par OSIRIS ──────────────────────────────────────────
+# Ubuntu 24.04 « noble » ne fournit plus d'agent Zabbix (vérifié le 2026-08-05).
+# Le firstboot retombe donc sur le .deb servi par OSIRIS, comme le MSI WithSecure
+# côté Windows : aucune VM n'a à joindre repo.zabbix.com depuis le réseau client.
+
+def test_l_agent_est_recupere_depuis_osiris_si_absent_des_depots():
+    script = _firstboot_ubuntu_rendu()
+    assert "/static/installers/zabbix-agent2.deb" in script
+    # Les dépôts de la distribution restent essayés d'abord (Debian les fournit).
+    assert script.index("apt-get install -y \"$_p\"") < script.index("zabbix-agent2.deb")
+
+
+def test_aucun_depot_tiers_n_est_ajoute_a_la_machine():
+    """Le .deb vient d'OSIRIS, pas de repo.zabbix.com : c'est tout l'intérêt.
+
+    L'assertion ignore les commentaires : elle porte sur ce que le script FAIT,
+    pas sur ce qu'il explique — un commentaire a le droit de nommer le dépôt
+    qu'on a justement choisi de ne pas utiliser.
+    """
+    code = "\n".join(l for l in _firstboot_ubuntu_rendu().splitlines()
+                     if not l.lstrip().startswith("#"))
+    assert "repo.zabbix.com" not in code
+    assert "add-apt-repository" not in code
+
+
+def test_l_echec_dit_quoi_faire():
+    """« aucun paquet disponible » n'indiquait aucune action à l'opérateur."""
+    script = _firstboot_ubuntu_rendu()
+    assert "backend/static/installers/zabbix-agent2.deb" in script
+
+
+def test_la_configuration_suit_l_installation_par_deb():
+    """Le .deb installe zabbix-agent2 : la conf doit viser le bon service."""
+    script = _firstboot_ubuntu_rendu()
+    apres = script.split("zabbix-agent2.deb", 1)[1]
+    assert '_zbx_pkg="zabbix-agent2"' in apres
+    assert 'if [ -n "$_zbx_pkg" ]; then' in apres

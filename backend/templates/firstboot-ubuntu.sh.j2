@@ -133,15 +133,33 @@ _log "Post-installation : {{ app.name }}"
 # Le VLAN est isole, rien n'entre — le collecteur ne joint jamais la machine.
 _log "Supervision Zabbix : agent actif vers {{ zabbix.server }}"
 apt-get update -qq
-# zabbix-agent2 quand la distribution le fournit, zabbix-agent sinon. Aucun depot
-# tiers : on reste sur des paquets signes par la distro.
+# D'abord les depots de la distribution (Debian fournit encore l'agent), puis le
+# paquet servi par OSIRIS. Aucun depot tiers n'est ajoute a la machine.
 _zbx_pkg=""
 for _p in zabbix-agent2 zabbix-agent; do
     if apt-get install -y "$_p" > /dev/null 2>&1; then _zbx_pkg="$_p"; break; fi
 done
 if [ -z "$_zbx_pkg" ]; then
-    _log "AVERTISSEMENT : aucun paquet d'agent Zabbix disponible - supervision non configuree"
-else
+    # Ubuntu 24.04 « noble » ne fournit PLUS d'agent Zabbix : le paquet a ete
+    # retire des depots (verifie le 2026-08-05, seul `pcp-export-zabbix-agent`
+    # subsiste). On sert donc le .deb depuis OSIRIS, exactement comme le MSI
+    # WithSecure et le zip DellBIOSProvider cote Windows : aucune VM n'a besoin
+    # de joindre repo.zabbix.com depuis le reseau du client, souvent filtre.
+    # Les dependances, elles, viennent des depots de la distribution.
+    _zbx_deb=/tmp/osiris-zabbix-agent.deb
+    _log "Agent absent des depots de la distribution - recuperation depuis OSIRIS..."
+    if curl -sf -o "$_zbx_deb" --max-time 120 \
+            "$osiris_url/static/installers/zabbix-agent2.deb" \
+       && apt-get install -y "$_zbx_deb" > /dev/null 2>&1; then
+        _zbx_pkg="zabbix-agent2"
+        _log "Agent Zabbix installe depuis OSIRIS."
+    else
+        _log "AVERTISSEMENT : agent Zabbix introuvable, ni dans les depots ni sur OSIRIS"
+        _log "  -> deposer le paquet dans backend/static/installers/zabbix-agent2.deb (voir README)"
+    fi
+    rm -f "$_zbx_deb"
+fi
+if [ -n "$_zbx_pkg" ]; then
     if [ "$_zbx_pkg" = "zabbix-agent2" ]; then
         _zbx_dir=/etc/zabbix/zabbix_agent2.d; _zbx_svc=zabbix-agent2
     else
