@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    OSIRIS - Fichier de reponses GENERIQUE, pour sceller un template Windows.
+
+    A ne pas confondre avec `unattend.xml.j2`, rendu POUR UNE MACHINE et grave par
+    WinPE au moment du deploiement. Celui-ci est cuit dans un template et sert a
+    TOUS ses clones : il ne doit donc contenir ni nom de machine, ni domaine, ni
+    secret, ni rien qui distingue un clone d'un autre.
+
+    Utilise par sysprep :
+        sysprep /generalize /oobe /shutdown /unattend:C:\Windows\Panther\unattend-osiris.xml
+
+    Ce qu'il fait, et pourquoi :
+      - il saute l'OOBE, sinon chaque clone attendrait qu'un humain choisisse une
+        langue et cree un compte ;
+      - il recree `osiris-admin` avec ouverture de session automatique, parce que
+        c'est le compte sous lequel le firstboot d'OSIRIS s'execute deja sur les
+        postes physiques (il y configure TeamViewer, y planifie sa propre
+        suppression, puis redemarre) ;
+      - sa premiere commande de session lance l'AMORCAGE, pas un script par
+        machine : sur un clone, ce script n'existe pas encore. C'est l'amorcage qui
+        lira la MAC et ira le chercher aupres d'OSIRIS.
+
+    Volontairement ABSENT : l'element ComputerName. Windows en genere un
+    aleatoire, et le firstboot d'OSIRIS renomme ensuite la machine avec son vrai
+    nom. En graver un ici le donnerait, identique, a tous les clones.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-International-Core"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
+            <InputLocale>{{ locale }}</InputLocale>
+            <SystemLocale>{{ locale }}</SystemLocale>
+            <UserLocale>{{ locale }}</UserLocale>
+        </component>
+        <component name="Microsoft-Windows-Shell-Setup"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
+            <TimeZone>{{ win_timezone }}</TimeZone>
+        </component>
+    </settings>
+
+    <settings pass="oobeSystem">
+        <component name="Microsoft-Windows-International-Core"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
+            <InputLocale>{{ locale }}</InputLocale>
+            <SystemLocale>{{ locale }}</SystemLocale>
+            <UILanguage>{{ locale }}</UILanguage>
+            <UserLocale>{{ locale }}</UserLocale>
+        </component>
+        <component name="Microsoft-Windows-Shell-Setup"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral" versionScope="nonSxS">
+            <OOBE>
+                <HideEULAPage>true</HideEULAPage>
+                <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+                <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+                <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+                <ProtectYourPC>3</ProtectYourPC>
+            </OOBE>
+            <UserAccounts>
+                <!-- Obligatoire sur Windows Server : sans lui, l'OOBE s'arrete sur
+                     « Personnaliser les parametres » et attend le mot de passe du
+                     compte Administrateur integre. La passe oobeSystem ne se termine
+                     alors jamais, donc pas de session automatique et pas d'amorcage. -->
+                <AdministratorPassword>
+                    <Value>{{ admin_password | e }}</Value>
+                    <PlainText>true</PlainText>
+                </AdministratorPassword>
+                <LocalAccounts>
+                    <LocalAccount wcm:action="add">
+                        <Password>
+                            <Value>{{ admin_password | e }}</Value>
+                            <PlainText>true</PlainText>
+                        </Password>
+                        <DisplayName>Administrateur OSIRIS</DisplayName>
+                        <Group>Administrators</Group>
+                        <Name>osiris-admin</Name>
+                    </LocalAccount>
+                </LocalAccounts>
+            </UserAccounts>
+            <AutoLogon>
+                <Password>
+                    <Value>{{ admin_password | e }}</Value>
+                    <PlainText>true</PlainText>
+                </Password>
+                <Enabled>true</Enabled>
+                <LogonCount>1</LogonCount>
+                <Username>osiris-admin</Username>
+            </AutoLogon>
+            <FirstLogonCommands>
+                <SynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Description>OSIRIS Bootstrap</Description>
+                    <CommandLine>powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Program Files\OSIRIS\osiris-bootstrap.ps1"</CommandLine>
+                    <RequiresUserInput>false</RequiresUserInput>
+                </SynchronousCommand>
+            </FirstLogonCommands>
+        </component>
+    </settings>
+
+</unattend>

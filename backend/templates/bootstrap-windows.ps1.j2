@@ -1,0 +1,222 @@
+<#
+==============================================================================
+ OSIRIS - Installation du mecanisme d'amorcage generique (Windows)
+
+ A executer UNE SEULE FOIS, en administrateur, sur la VM qui servira de
+ template, AVANT le sysprep :
+
+     irm {{ osiris_url }}/bootstrap/windows | iex
+
+ Puis, juste avant de sceller (ecrit le fichier de reponses et lance sysprep) :
+
+     & ([scriptblock]::Create((irm {{ osiris_url }}/bootstrap/windows))) -Seal
+
+ Ce qu'il installe ne contient AUCUN identifiant et AUCUNE logique metier :
+ juste « lis ta MAC, demande ton script a OSIRIS, execute-le ». Tout le reste
+ (profil, applications, jonction au domaine, supervision, BitLocker, LAPS) est
+ decide par OSIRIS au demarrage de chaque clone. Consequence : on ne refabrique
+ PAS le template quand un profil change - seulement si ce mecanisme-ci evolue,
+ c'est-a-dire quasiment jamais.
+
+ Pendant du `bootstrap/linux`, avec deux differences imposees par Windows :
+ le declencheur est l'ouverture de session automatique du fichier de reponses
+ (le firstboot d'OSIRIS a besoin d'une session `osiris-admin`, pas de SYSTEM),
+ et le scellement passe par sysprep au lieu d'un vidage de machine-id.
+==============================================================================
+#>
+param(
+    [string] $OsirisUrl = "{{ osiris_url }}",
+    # Ecrit le fichier de reponses generique et lance sysprep. A ne faire qu'une
+    # fois tout le reste pret : la VM s'eteint et ne doit PLUS etre redemarree
+    # avant d'avoir ete convertie en template.
+    [switch] $Seal
+)
+
+$ErrorActionPreference = "Stop"
+
+# Pas de `#Requires -RunAsAdministrator` : cette directive n'est valable que dans
+# un fichier .ps1, or ce script est concu pour etre execute via `irm | iex`, ou
+# elle leverait une erreur. On verifie donc les droits nous-memes.
+$estAdmin = ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $estAdmin) {
+    throw "A executer dans un terminal PowerShell ADMINISTRATEUR."
+}
+$dossierProg = "C:\Program Files\OSIRIS"
+$dossierData = "C:\ProgramData\OSIRIS"
+$reponses    = "C:\Windows\Panther\unattend-osiris.xml"
+
+Write-Host "[OSIRIS] Serveur : $OsirisUrl"
+
+New-Item -ItemType Directory -Force -Path $dossierProg, $dossierData | Out-Null
+
+# Seule donnee propre a l'installation : l'URL d'OSIRIS. Ce n'est pas un secret.
+Set-Content -Path "$dossierData\bootstrap.conf" -Encoding ASCII `
+            -Value "OSIRIS_URL=$OsirisUrl"
+
+# ── Le script d'amorcage lui-meme ────────────────────────────────────────────
+# Identique sur toutes les machines : ni secret, ni configuration, ni metier.
+$amorcage = @'
+<#
+ OSIRIS - Amorcage du premier demarrage. Generique : ce fichier est identique
+ sur toutes les machines. Il decouvre sa propre MAC, demande son script de
+ premier demarrage a OSIRIS, et l'execute.
+#>
+$ErrorActionPreference = "Continue"
+$dossierData = "C:\ProgramData\OSIRIS"
+$journal     = "C:\osiris-bootstrap.log"
+$verrou      = "$dossierData\firstboot-en-cours.marker"
+
+function Ecrire($msg) {
+    $ligne = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg"
+    Write-Host $ligne
+    Add-Content -Path $journal -Value $ligne -ErrorAction SilentlyContinue
+}
+
+# Deux declencheurs existent (session automatique du fichier de reponses, et la
+# tache planifiee de secours). Ils peuvent se chevaucher au tout premier
+# demarrage : sans ce verrou, le firstboot tournerait DEUX FOIS en parallele.
+if (Test-Path $verrou) {
+    $age = (Get-Date) - (Get-Item $verrou).LastWriteTime
+    if ($age.TotalHours -lt 2) {
+        Ecrire "Un premier demarrage est deja en cours (marqueur de $([int]$age.TotalMinutes) min) - abandon."
+        exit 0
+    }
+    Ecrire "Marqueur perime ($([int]$age.TotalHours) h) - on reprend."
+}
+
+$OsirisUrl = ""
+if (Test-Path "$dossierData\bootstrap.conf") {
+    $ligne = Select-String -Path "$dossierData\bootstrap.conf" -Pattern '^OSIRIS_URL=(.+)$'
+    if ($ligne) { $OsirisUrl = $ligne.Matches.Groups[1].Value.Trim() }
+}
+if (-not $OsirisUrl) {
+    Ecrire "Aucune URL OSIRIS dans bootstrap.conf - abandon."
+    exit 1
+}
+Ecrire "===== Amorcage OSIRIS - serveur $OsirisUrl ====="
+
+# Cartes physiques uniquement : un adaptateur de bouclage, un pont Hyper-V ou une
+# carte virtuelle ne correspond a aucune fiche OSIRIS.
+function Macs {
+    Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+        Where-Object { $_.Status -eq "Up" } |
+        ForEach-Object { $_.MacAddress -replace '[-:]', '' } |
+        ForEach-Object { $_.ToLower() } |
+        Where-Object { $_ -and $_ -ne "000000000000" }
+}
+
+$script = "$env:TEMP\osiris-firstboot.ps1"
+
+# 30 tentatives x 10 s = 5 min : de quoi laisser le bail DHCP s'etablir, et
+# couvrir le cas ou la VM demarre avant que sa fiche existe cote OSIRIS.
+for ($essai = 1; $essai -le 30; $essai++) {
+    $details = ""
+    foreach ($mac in (Macs)) {
+        $code = 0
+        try {
+            # -MaximumRedirection 0 : une 3xx doit se voir. Sans ca, une route
+            # absente du frontal (qui redirige vers HTTPS) ressemblerait a une
+            # fiche introuvable, et le journal accuserait la mauvaise cause -
+            # exactement le piege tombe cote Linux le 05/08.
+            $r = Invoke-WebRequest -Uri "$OsirisUrl/firstboot-windows/$mac" `
+                                   -OutFile $script -PassThru -UseBasicParsing `
+                                   -MaximumRedirection 0 -TimeoutSec 20
+            $code = [int] $r.StatusCode
+        } catch {
+            if ($_.Exception.Response) {
+                $code = [int] $_.Exception.Response.StatusCode
+            } else {
+                $code = 0
+            }
+        }
+
+        if ($code -eq 200 -and (Test-Path $script) -and (Get-Item $script).Length -gt 0) {
+            Ecrire "Fiche trouvee pour la MAC $mac - execution du premier demarrage."
+            New-Item -ItemType File -Path $verrou -Force | Out-Null
+            try {
+                Invoke-WebRequest -Uri "$OsirisUrl/machines/$mac/status?status=deploying" `
+                                  -Method POST -UseBasicParsing -TimeoutSec 15 | Out-Null
+            } catch {
+                Ecrire "AVERTISSEMENT : statut 'deploying' non poste - $_"
+            }
+            # Le firstboot se supprime puis redemarre la machine : rien apres.
+            & powershell -ExecutionPolicy Bypass -File $script
+            exit 0
+        }
+
+        switch ($code) {
+            0       { $indice = "serveur injoignable" }
+            404     { $indice = "pas de fiche pour cette MAC" }
+            default {
+                if ($code -ge 300 -and $code -lt 400) {
+                    $indice = "REDIRECTION : /firstboot-windows/* n'est pas servi en clair (matcher du frontal ?)"
+                } else {
+                    $indice = "reponse inattendue"
+                }
+            }
+        }
+        $details += " $mac->HTTP $code ($indice);"
+        Remove-Item $script -Force -ErrorAction SilentlyContinue
+    }
+    Ecrire "Tentative $essai/30 :$details nouvel essai dans 10 s."
+    Start-Sleep -Seconds 10
+}
+
+# On sort SANS supprimer la tache planifiee : seul le firstboot la retire, une
+# fois qu'il a reellement tourne. Une VM demarree trop tot retentera donc au
+# prochain demarrage au lieu de rester orpheline pour toujours.
+Ecrire "Abandon apres 5 minutes - nouvelle tentative au prochain demarrage."
+exit 0
+'@
+
+Set-Content -Path "$dossierProg\osiris-bootstrap.ps1" -Value $amorcage -Encoding UTF8
+Write-Host "[OSIRIS] Amorcage installe : $dossierProg\osiris-bootstrap.ps1"
+
+# ── Tache planifiee de secours ───────────────────────────────────────────────
+# La session automatique du fichier de reponses ne se declenche QU'UNE FOIS. Un
+# clone demarre pendant une coupure reseau serait alors orphelin pour toujours,
+# sans aucun moyen de se rattraper - c'est precisement ce que la conception
+# Linux evite. Cette tache rejoue l'amorcage a chaque demarrage tant que le
+# firstboot n'a pas tourne ; c'est lui qui la retire ensuite.
+# Retard de 5 min : le chemin normal (session automatique) a ainsi le temps
+# d'aboutir, et le verrou empeche de toute facon les deux de se marcher dessus.
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument '-ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Program Files\OSIRIS\osiris-bootstrap.ps1"'
+$declencheur = New-ScheduledTaskTrigger -AtStartup
+$declencheur.Delay = "PT5M"
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+$reglages = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+Register-ScheduledTask -TaskName "OsirisFirstBoot" -Action $action `
+    -Trigger $declencheur -Principal $principal -Settings $reglages -Force | Out-Null
+Write-Host "[OSIRIS] Tache de secours 'OsirisFirstBoot' enregistree."
+
+# ── Scellement ───────────────────────────────────────────────────────────────
+if (-not $Seal) {
+    Write-Host ""
+    Write-Host "[OSIRIS] Amorcage en place. Avant de convertir cette VM en template :"
+    Write-Host "         & ([scriptblock]::Create((irm $OsirisUrl/bootstrap/windows))) -Seal"
+    return
+}
+
+Write-Host "[OSIRIS] Recuperation du fichier de reponses generique..."
+Invoke-WebRequest -Uri "$OsirisUrl/bootstrap/windows/unattend.xml" `
+                  -OutFile $reponses -UseBasicParsing -TimeoutSec 30
+Write-Host "[OSIRIS] Fichier de reponses ecrit : $reponses"
+
+# Journaux de l'installation : ils ne doivent pas se retrouver dans tous les clones.
+Remove-Item "C:\osiris-bootstrap.log", "C:\osiris-firstboot.log" `
+            -Force -ErrorAction SilentlyContinue
+Remove-Item "$dossierData\firstboot-en-cours.marker" -Force -ErrorAction SilentlyContinue
+
+Write-Host ""
+Write-Host "[OSIRIS] Lancement de sysprep. La VM va s'eteindre."
+Write-Host "         NE PAS la redemarrer ensuite : la rallumer consommerait le"
+Write-Host "         passage OOBE, et le template naitrait deja personnalise."
+Write-Host "         Enchainer directement sur : qm template <vmid>"
+Start-Sleep -Seconds 3
+
+& "$env:SystemRoot\System32\Sysprep\sysprep.exe" /generalize /oobe /shutdown /unattend:$reponses

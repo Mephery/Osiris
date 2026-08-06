@@ -54,6 +54,7 @@ arq_pool = None
 _ROUTES_MACHINES = (
     "/boot",
     "/bootstrap/linux",
+    "/bootstrap/windows",
     "/firstboot-linux/000000000000",
     "/firstboot-windows/000000000000",
     "/winpe-script/000000000000",
@@ -137,6 +138,14 @@ SSH_PUBKEY      = os.environ.get("OSIRIS_SSH_PUBKEY", "").strip()
 ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL", "admin@osiris.local")
 ADMIN_PASSWORD  = os.environ.get("ADMIN_PASSWORD", "changeme")
 WIN_SHARE_PATH  = os.environ.get("WIN_SHARE_PATH", "/srv/data/windows")
+
+# Mot de passe du compte `osiris-admin` posé par les fichiers de réponses. Ce
+# compte est un ÉCHAFAUDAGE : il ouvre la session du premier démarrage, puis le
+# firstboot planifie sa suppression dès que LAPS a pris le relais. La valeur est
+# donc identique sur toutes les machines et vit quelques minutes — la changer
+# reste possible, mais ce n'est pas elle qui protège la machine déployée.
+WINDOWS_TEMPLATE_ADMIN_PASSWORD = os.environ.get(
+    "WINDOWS_TEMPLATE_ADMIN_PASSWORD", "OsirisAdmin2026!")
 
 # Mapping IANA → noms Windows (subset courant MSP France)
 _LINUX_TO_WIN_TZ: dict[str, str] = {
@@ -1604,6 +1613,7 @@ def get_unattend_xml(mac: str):
         ou=escape(machine.ou or ""),
         profile=profile_ctx,
         win_timezone=escape(_win_timezone(profile_ctx["timezone"])),
+        admin_password=WINDOWS_TEMPLATE_ADMIN_PASSWORD,
     )
     return Response(content=content, media_type="application/xml")
 
@@ -1724,6 +1734,51 @@ def get_linux_bootstrap():
         osiris_url=OSIRIS_BASE_URL,
     )
     return Response(content=content, media_type="text/plain")
+
+
+@app.get("/bootstrap/windows")
+def get_windows_bootstrap():
+    """
+    Pendant Windows de `/bootstrap/linux` : installateur à passer une fois dans la
+    VM qui servira de template, avant le sysprep.
+
+        irm <osiris>/bootstrap/windows | iex
+        & ([scriptblock]::Create((irm <osiris>/bootstrap/windows))) -Seal
+
+    Même raison qu'en Linux de ne pas authentifier : le script ne contient que
+    l'adresse d'OSIRIS. Tout ce qui est propre à une machine reste derrière
+    /firstboot-windows/{mac}, qui exige une MAC déjà enregistrée.
+
+    Là où Linux pose une unité systemd, Windows s'appuie sur l'ouverture de
+    session automatique du fichier de réponses : le firstboot d'OSIRIS a besoin
+    d'une session `osiris-admin` (il y configure TeamViewer, y planifie la
+    suppression de son propre compte), pas d'un contexte SYSTEM.
+    """
+    content = jinja_env.get_template("bootstrap-windows.ps1.j2").render(
+        osiris_url=OSIRIS_BASE_URL,
+    )
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/bootstrap/windows/unattend.xml")
+def get_windows_sysprep_unattend(locale: str = "fr-FR",
+                                 timezone: str = "Romance Standard Time"):
+    """
+    Fichier de réponses GÉNÉRIQUE, celui que sysprep applique pour sceller un
+    template. À ne pas confondre avec `/unattend.xml?mac=…`, rendu POUR UNE
+    machine et gravé par WinPE au moment du déploiement.
+
+    Il ne contient rien qui distingue un clone d'un autre — pas même un
+    `<ComputerName>`, que le firstboot d'OSIRIS pose ensuite. Le mot de passe
+    d'`osiris-admin` n'est pas un secret durable : le compte est supprimé en fin
+    de premier démarrage, une fois LAPS en place.
+    """
+    content = jinja_env.get_template("unattend-sysprep.xml.j2").render(
+        locale=locale.replace("_", "-")[:5],
+        win_timezone=timezone,
+        admin_password=WINDOWS_TEMPLATE_ADMIN_PASSWORD,
+    )
+    return Response(content=content, media_type="application/xml")
 
 
 @app.get("/firstboot-linux/{mac}")

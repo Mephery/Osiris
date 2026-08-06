@@ -825,6 +825,24 @@ Remove-Item -LiteralPath "C:\osiris-cleanup-admin.ps1" -Force
     Write-Log "osiris-admin CONSERVE (aucun admin local de secours : LAPS a echoue)"
 }
 
+# ── Decrochage de l'amorcage (clones de template uniquement) ─────────────────
+# La tache "OsirisFirstBoot" est le filet de securite que /bootstrap/windows pose
+# dans les templates : elle rejoue le mecanisme a CHAQUE demarrage tant que le
+# premier demarrage a echoue, pour eviter au clone allume trop tot de rester
+# orphelin a jamais. Ici, et seulement ici, on sait que ce premier demarrage a
+# vraiment eu lieu.
+#
+# Volontairement en fin de course : decrocher plus tot rendrait definitive toute
+# panne survenue en cours de route. La tache est absente sur un poste physique,
+# deploye par WinPE, qui ne pose pas ce filet : le silence est donc normal.
+try {
+    Unregister-ScheduledTask -TaskName "OsirisFirstBoot" -Confirm:$false -EA Stop
+    Write-Log "Amorcage OSIRIS decroche (tache OsirisFirstBoot supprimee)"
+} catch {
+    Write-Log "Pas de tache OsirisFirstBoot a decrocher (deploiement WinPE classique)"
+}
+Remove-Item "C:\ProgramData\OSIRIS\firstboot-en-cours.marker" -Force -EA SilentlyContinue
+
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 Start-Sleep -Seconds 2
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -EA SilentlyContinue

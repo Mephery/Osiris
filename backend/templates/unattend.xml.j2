@@ -96,11 +96,23 @@
                 <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                 <ProtectYourPC>3</ProtectYourPC>
             </OOBE>
+{# Windows SERVER en experience utilisateur exige le mot de passe du compte
+   Administrateur integre : sans <AdministratorPassword>, l'OOBE s'arrete sur
+   « Personnaliser les parametres » et attend une saisie. La passe specialize
+   est deja passee (la machine porte son nom), mais oobeSystem ne se termine
+   jamais : ni compte local, ni ouverture de session automatique, donc AUCUN
+   FirstLogonCommands et aucun firstboot. Constate sur SRV-WIN-TPL le
+   2026-08-06 - la machine repondait en WinRM mais rejetait osiris-admin, qui
+   n'avait jamais ete cree. Sans effet sur Windows 11, qui s'en passe. #}
             <UserAccounts>
+                <AdministratorPassword>
+                    <Value>{{ admin_password | e }}</Value>
+                    <PlainText>true</PlainText>
+                </AdministratorPassword>
                 <LocalAccounts>
                     <LocalAccount wcm:action="add">
                         <Password>
-                            <Value>OsirisAdmin2026!</Value>
+                            <Value>{{ admin_password | e }}</Value>
                             <PlainText>true</PlainText>
                         </Password>
                         <DisplayName>Administrateur OSIRIS</DisplayName>
@@ -111,7 +123,7 @@
             </UserAccounts>
             <AutoLogon>
                 <Password>
-                    <Value>OsirisAdmin2026!</Value>
+                    <Value>{{ admin_password | e }}</Value>
                     <PlainText>true</PlainText>
                 </Password>
                 <Enabled>true</Enabled>
