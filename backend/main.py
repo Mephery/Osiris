@@ -3840,12 +3840,16 @@ class VmCreateBody(SQLModel):
     ip_cidr: str = ""        # ex. "203.0.113.60/24"
     gateway: str = ""
     dns_servers: str = ""    # séparés par des virgules
-    # Mode de boot
-    boot_mode: str = "pxe"          # "pxe" | "cloudinit"
+    # Mode de boot :
+    #  - pxe       : VM vierge amorcée sur le réseau OSIRIS (Linux) ou en CD WinPE (Windows).
+    #  - template  : clone d'un template Proxmox, SANS injection (Windows sysprep, ou Linux nu).
+    #                Le clone lit sa MAC et rappelle OSIRIS via l'agent cuit dans le template.
+    #  - cloudinit : clone d'un template Linux AVEC injection cloud-init (user-data/snippet).
+    boot_mode: str = "pxe"          # "pxe" | "template" | "cloudinit"
     # PXE : ISO a booter (ex: "local:iso/ubuntu-24.04.iso") — optionnel
     iso: str = ""
-    # Cloud-init : VMID du template Proxmox a cloner
-    cloud_template_id: Optional[int] = None
+    # template / cloudinit : VMID du template Proxmox a cloner
+    template_id: Optional[int] = None
 
 
 def _rollback_vm_machine(user: User, body, hv_id: int, vm_id: int,
@@ -3940,14 +3944,15 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     - PXE : crée une VM vierge qui boote sur le réseau OSIRIS.
     - Cloud-init : clone un template existant, injecte le user-data via snippets Proxmox.
     """
-    if body.boot_mode not in ("pxe", "cloudinit"):
-        raise HTTPException(status_code=400, detail="boot_mode invalide (pxe ou cloudinit)")
-    if body.boot_mode == "cloudinit" and not body.cloud_template_id:
-        raise HTTPException(status_code=400, detail="cloud_template_id requis pour le mode cloud-init")
-    # Windows = PXE uniquement : le chemin cloud-init est spécifique Linux (user-data, apt).
-    # Le déploiement Windows passe par WinPE (booté en PXE), piloté par MAC comme un poste physique.
-    if body.os == "windows" and body.boot_mode != "pxe":
-        raise HTTPException(status_code=400, detail="Windows nécessite le mode PXE (cloud-init est Linux uniquement)")
+    if body.boot_mode not in ("pxe", "template", "cloudinit"):
+        raise HTTPException(status_code=400, detail="boot_mode invalide (pxe, template ou cloudinit)")
+    if body.boot_mode in ("template", "cloudinit") and not body.template_id:
+        raise HTTPException(status_code=400, detail=f"template_id requis pour le mode {body.boot_mode}")
+    # cloud-init est spécifique Linux (user-data, apt). Windows se masterise en mode
+    # `template` (clone d'un template sysprepé) ou se déploie en `pxe` (WinPE) ; il ne
+    # passe jamais par cloud-init.
+    if body.os == "windows" and body.boot_mode == "cloudinit":
+        raise HTTPException(status_code=400, detail="cloud-init est Linux uniquement — pour Windows, utiliser « template » (clone sysprep) ou « pxe » (WinPE)")
 
     with Session(engine) as session:
         h = session.get(Hypervisor, hv_id)
@@ -4054,6 +4059,28 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     }
 
 
+async def _agrandir_disque_si_besoin(h: Hypervisor, node: str, vm_id: int,
+                                     disque: str, taille_gb: int) -> None:
+    """
+    Agrandit `disque` à `taille_gb` Go, mais UNIQUEMENT s'il est plus petit.
+
+    Un clone hérite de la taille du template. Proxmox refuse de rétrécir un disque
+    (« can't shrink disk »), et un resize à taille égale échoue aussi ; sans ce
+    garde-fou, cloner à la taille du template ferait planter le déploiement.
+    """
+    if not taille_gb:
+        return
+    cfg = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/config")
+    m = re.search(r"size=(\d+)([GMT])", str(cfg.get(disque, "")))
+    actuel_gb = 0
+    if m:
+        n, unite = int(m.group(1)), m.group(2)
+        actuel_gb = n * 1024 if unite == "T" else n // 1024 if unite == "M" else n
+    if taille_gb > actuel_gb:
+        await _proxmox_request(h, "PUT", f"/api2/json/nodes/{node}/qemu/{vm_id}/resize",
+                               {"disk": disque, "size": f"{taille_gb}G"})
+
+
 async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
                         mac_plain: str, user_data: str = "") -> None:
     """Crée et démarre la VM côté Proxmox (PXE : VM vierge ; cloud-init : clone de template)."""
@@ -4127,9 +4154,55 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu", vm_config)
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
 
+    elif body.boot_mode == "template":
+        # ── Chemin template : clone nu (Windows sysprepé ou Linux) ────────────────
+        # Ni user-data, ni snippet, ni lecteur cloud-init : le clone porte déjà tout
+        # ce qu'il faut (agent d'amorçage cuit dans le template). Il lit sa propre
+        # MAC au premier démarrage et rappelle OSIRIS, qui lui sert son script.
+        clone_result = await _proxmox_post(
+            h, f"/api2/json/nodes/{body.node}/qemu/{body.template_id}/clone", {
+                "newid": vm_id, "name": body.hostname, "full": 1, "storage": body.storage,
+            })
+        upid = clone_result if isinstance(clone_result, str) else str(clone_result)
+        await _proxmox_wait_task(h, body.node, upid)
+
+        # Matériel selon l'OS, comme à la création PXE : Windows en SATA + e1000
+        # (pilotes inbox), Linux en virtio. La MAC est OBLIGATOIREMENT neuve — sinon
+        # le clone hérite de celle du template et deux VM se disputent le réseau.
+        if body.os == "windows":
+            disque = "sata0"
+            cfg = {"net0": f"e1000={mac_colons},bridge={body.bridge}", "boot": "order=sata0"}
+        else:
+            disque = "scsi0"
+            cfg = {"net0": f"virtio={mac_colons},bridge={body.bridge}", "boot": "order=scsi0"}
+        cfg.update({"cores": body.vcpus, "memory": body.ram_mb,
+                    "agent": "enabled=1", "onboot": 1})
+        if body.data_disk_gb:
+            # Disque de données vierge : formaté et monté au premier démarrage.
+            cle = "sata1" if body.os == "windows" else "scsi1"
+            cfg[cle] = f"{body.storage}:{body.data_disk_gb}"
+        await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config", cfg)
+
+        # Un template fabriqué depuis un déploiement PXE traîne le lecteur CD WinPE
+        # (ide2). Inutile sur un clone sysprepé — il ne s'en sert pas (boot disque) —
+        # et il garde une référence vers une ISO qui peut être supprimée ou mise à
+        # jour. On l'ôte quand il est là.
+        conf = await _proxmox_get(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config")
+        if "cdrom" in str(conf.get("ide2", "")):
+            await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config",
+                               {"delete": "ide2"})
+
+        # Le disque système hérite de la taille du template. On ne l'agrandit que s'il
+        # est demandé PLUS grand : Proxmox refuse de rétrécir, et un resize à taille
+        # égale est une erreur inutile. (L'extension de la partition côté invité reste
+        # à la charge du premier démarrage / de l'admin — ici on n'ajoute que l'espace.)
+        await _agrandir_disque_si_besoin(h, body.node, vm_id, disque, body.disk_gb)
+
+        await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
+
     else:
         # ── Chemin cloud-init (clone de template) ────────────────────────────────
-        clone_result = await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{body.cloud_template_id}/clone", {
+        clone_result = await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{body.template_id}/clone", {
             "newid":   vm_id,
             "name":    body.hostname,
             "full":    1,            # clone complet (indépendant du template)

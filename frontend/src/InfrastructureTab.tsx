@@ -28,7 +28,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   const [vmStorages, setVmStorages]     = useState<{storage:string;type:string;avail_gb:number;total_gb:number}[]>([])
   const [vmNetworks, setVmNetworks]     = useState<{iface:string;type:string;address:string}[]>([])
   const [vmNodes, setVmNodes]           = useState<ProxmoxNode[]>([])
-  const [vmForm, setVmForm]             = useState({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', cloud_template_id: '' })
+  const [vmForm, setVmForm]             = useState({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '' })
   const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
   const [vmCreating, setVmCreating]     = useState(false)
 
@@ -85,7 +85,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   const handleVmNodeChange = (node: string) => {
     setVmNode(node)
     setVmStorages([]); setVmNetworks([]); setVmTemplates([])
-    setVmForm(f => ({ ...f, storage: '', bridge: '', cloud_template_id: '' }))
+    setVmForm(f => ({ ...f, storage: '', bridge: '', template_id: '' }))
     if (vmHvId) {
       loadVmResources(Number(vmHvId), node)
       fetch(`${API_URL}/hypervisors/${vmHvId}/nodes/${node}/templates`, { headers: authHeader(token) })
@@ -104,7 +104,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
         ...vmForm,
         node: vmNode,
         profile_id: vmForm.profile_id ? Number(vmForm.profile_id) : null,
-        cloud_template_id: vmForm.cloud_template_id ? Number(vmForm.cloud_template_id) : null,
+        template_id: vmForm.template_id ? Number(vmForm.template_id) : null,
         organization_id: vmForm.organization_id === '' ? null : Number(vmForm.organization_id),
       }),
     }).then(async r => {
@@ -119,7 +119,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
           : `VM "${data.hostname}" créée (VMID ${data.vm_id}) - en attente de boot PXE`
       )
       setShowVmForm(false)
-      setVmForm({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', cloud_template_id: '' })
+      setVmForm({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '' })
       onVmCreated()
     }).catch(err => toast.error(err.message))
       .finally(() => setVmCreating(false))
@@ -224,7 +224,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                 <select value={vmForm.os} onChange={e => setVmForm(f => ({
                     ...f, os: e.target.value, profile_id: '',
                     // Windows = PXE uniquement (WinPE) : le cloud-init est spécifique Linux.
-                    ...(e.target.value === 'windows' ? { boot_mode: 'pxe', cloud_template_id: '' } : {}),
+                    ...(e.target.value === 'windows' ? { boot_mode: 'pxe', template_id: '' } : {}),
                   }))} className="osiris-input text-xs">
                   <option value="ubuntu">Ubuntu</option>
                   <option value="debian">Debian</option>
@@ -267,22 +267,18 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                 </select>
               </div>
 
-              {/* Mode de boot */}
-              {vmForm.os === 'windows' ? (
-                <div className="rounded border border-blue-500/40 bg-blue-600/10 px-2.5 py-1.5 text-[11px] text-blue-300">
-                  Déploiement Windows via <span className="font-semibold">PXE / WinPE</span> · VM en UEFI (OVMF) · disque SATA · carte réseau e1000.
-                </div>
-              ) : (
-                <div className="flex gap-2">
-                  {(['pxe', 'cloudinit'] as const).map(mode => (
-                    <button key={mode} type="button"
-                      onClick={() => setVmForm(f => ({...f, boot_mode: mode, cloud_template_id: '', iso: ''}))}
-                      className={`flex-1 py-1.5 rounded text-xs border transition-colors ${vmForm.boot_mode === mode ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500'}`}>
-                      {mode === 'pxe' ? 'PXE (ISO / installation)' : 'Cloud-init (clone de template)'}
-                    </button>
-                  ))}
-                </div>
-              )}
+              {/* Mode de boot — Windows : PXE ou template sysprep ; Linux : + cloud-init */}
+              <div className="flex gap-2">
+                {(vmForm.os === 'windows' ? ['pxe', 'template'] as const : ['pxe', 'template', 'cloudinit'] as const).map(mode => (
+                  <button key={mode} type="button"
+                    onClick={() => setVmForm(f => ({...f, boot_mode: mode, template_id: '', iso: ''}))}
+                    className={`flex-1 py-1.5 rounded text-xs border transition-colors ${vmForm.boot_mode === mode ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500'}`}>
+                    {mode === 'pxe'
+                      ? (vmForm.os === 'windows' ? 'PXE / WinPE' : 'PXE (ISO / installation)')
+                      : mode === 'template' ? 'Template (clone)' : 'Cloud-init'}
+                  </button>
+                ))}
+              </div>
 
               {/* Ressources */}
               <div className="grid grid-cols-2 gap-2">
@@ -334,7 +330,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                 {vmForm.boot_mode === 'pxe' ? (
                   <input placeholder="ISO Proxmox (ex: local:iso/ubuntu-24.04.iso) — optionnel" value={vmForm.iso} onChange={e => setVmForm(f => ({...f, iso: e.target.value}))} className="osiris-input text-xs font-mono col-span-2" />
                 ) : (
-                  <select required value={vmForm.cloud_template_id} onChange={e => setVmForm(f => ({...f, cloud_template_id: e.target.value}))} className="osiris-input text-xs col-span-2" disabled={vmTemplates.length === 0}>
+                  <select required value={vmForm.template_id} onChange={e => setVmForm(f => ({...f, template_id: e.target.value}))} className="osiris-input text-xs col-span-2" disabled={vmTemplates.length === 0}>
                     <option value="">{vmTemplates.length === 0 ? (vmNode ? 'Aucun template trouvé sur ce noeud' : 'Choisir un noeud d\'abord') : 'Template Proxmox...'}</option>
                     {vmTemplates.map(t => <option key={t.vmid} value={t.vmid}>{t.name} (VMID {t.vmid}) — {t.cores} vCPU · {t.maxmem_gb} Go</option>)}
                   </select>
@@ -343,8 +339,12 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
 
               <div className="text-[10px] text-slate-600 bg-slate-900/60 rounded p-2 font-mono">
                 {vmForm.boot_mode === 'pxe'
-                  ? 'Boot order : PXE → disque → ISO. La VM s\'enregistrera dans OSIRIS au premier boot réseau.'
-                  : 'Clone complet du template + cloud-init injecté via snippets Proxmox. Démarrage ~30s, pas de PXE requis.'}
+                  ? (vmForm.os === 'windows'
+                      ? 'WinPE livré en CD-ROM (UEFI/OVMF · disque SATA · carte e1000). La VM s\'installe puis rappelle OSIRIS.'
+                      : 'Boot order : PXE → disque → ISO. La VM s\'enregistrera dans OSIRIS au premier boot réseau.')
+                  : vmForm.boot_mode === 'template'
+                    ? 'Clone du template + MAC neuve. Le clone lit sa MAC au démarrage et rappelle OSIRIS (agent cuit dans le template). Démarrage ~2 min, aucune injection.'
+                    : 'Clone complet du template + cloud-init injecté via snippets Proxmox. Démarrage ~30s, pas de PXE requis.'}
               </div>
               <button type="submit" disabled={vmCreating || !vmNode || !vmForm.storage || !vmForm.bridge} className="osiris-btn text-xs px-4 w-full disabled:opacity-50">
                 {vmCreating ? 'Création en cours...' : 'Créer et démarrer la VM'}
