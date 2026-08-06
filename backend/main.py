@@ -2471,6 +2471,19 @@ async def _orienter_boot_vm_windows(mac: str, vers_winpe: bool) -> None:
     lancerait jamais son Windows. Sans la première, un redéploiement resterait sans
     effet : le disque, désormais amorçable, garderait la main.
 
+    ⚠️ Écrire l'ordre ne suffit PAS. Proxmox met de côté toute modification faite sur
+    une VM allumée, et ne la relit qu'au prochain démarrage **du processus QEMU** :
+    le redémarrage que WinPE déclenche lui-même (`wpeutil reboot`) n'en est pas un.
+    Sans le cycle d'alimentation ci-dessous, la VM repart donc sur le CD, WinPE
+    rappelle OSIRIS, et seul le garde-fou anti-redéploiement empêche l'effacement du
+    Windows fraîchement posé — la machine reste alors figée sur son `pause`.
+    Constaté sur SRV-WIN-TPL le 2026-08-06.
+
+    Le cycle n'a lieu que s'il y a vraiment quelque chose en attente. C'est ce qui
+    rend l'appel idempotent, et surtout inoffensif au second `deployed` — celui que
+    le firstboot poste après l'OOBE, où redémarrer de force couperait un Windows en
+    pleine configuration.
+
     Best-effort : ce réglage ne doit jamais faire échouer le rapport de statut d'une
     machine, qui est la seule voix qu'elle ait.
     """
@@ -2486,9 +2499,30 @@ async def _orienter_boot_vm_windows(mac: str, vers_winpe: bool) -> None:
         # vSphere gère ses lecteurs autrement : rien à faire ici pour l'instant.
         if not h or h.type != "proxmox":
             return
+        base = f"/api2/json/nodes/{node}/qemu/{vm_id}"
         ordre = "order=ide2;sata0" if vers_winpe else "order=sata0"
-        await _proxmox_put(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/config", {"boot": ordre})
+        await _proxmox_put(h, f"{base}/config", {"boot": ordre})
         _hv_log.info("VM %s (%s) : ordre de démarrage → %s", vm_id, mac, ordre)
+
+        en_attente = any(
+            e.get("key") == "boot" and e.get("pending") is not None
+            for e in await _proxmox_get(h, f"{base}/pending")
+        )
+        if not en_attente:
+            return
+
+        # Arrêt franc et non `reboot` : seul un nouveau processus QEMU relit la
+        # configuration. La VM tourne WinPE, qui a déjà tout écrit (WIM appliqué,
+        # bcdboot fait, fiche à jour) et ne fait plus qu'attendre — il n'y a rien
+        # à perdre à la couper.
+        _hv_log.info("VM %s : ordre en attente, cycle d'alimentation pour l'appliquer", vm_id)
+        try:
+            await _proxmox_post(h, f"{base}/status/stop")
+        except HTTPException:
+            pass          # déjà éteinte : il reste à l'allumer
+        await asyncio.sleep(8)
+        await _proxmox_post(h, f"{base}/status/start")
+        _hv_log.info("VM %s : redémarrée à froid, ordre de démarrage appliqué", vm_id)
     except Exception as e:
         _hv_log.warning("Ordre de démarrage non appliqué sur la VM de %s : %s", mac, e)
 

@@ -133,3 +133,20 @@ def test_machine(clean_db, test_profile):
         session.commit()
         session.refresh(machine)
         return machine
+
+
+@pytest.fixture(autouse=True)
+def limiteur_remis_a_zero():
+    """
+    Remet le limiteur de débit à zéro entre chaque test.
+
+    Il est porté par l'application, donc partagé par toute la suite, et sa clé en
+    test est toujours la même (« testclient »). Les compteurs s'additionnaient
+    ainsi d'un test à l'autre : `/machines/{mac}/status` est plafonné à 10/minute,
+    et la suite ne passait que tant qu'elle restait sous ce seuil par hasard.
+    Ajouter deux tests suffisait à faire répondre 429 à un test parfaitement
+    innocent — et à un endroit sans rapport avec la cause.
+    """
+    import main   # importé ici : conftest règle l'environnement avant que main charge
+    main.limiter.reset()
+    yield

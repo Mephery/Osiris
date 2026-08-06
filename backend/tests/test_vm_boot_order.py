@@ -13,6 +13,8 @@ Les deux sens comptent. Sans le second, la VM rebooterait indéfiniment sur WinP
 lieu de lancer son Windows ; sans le premier, un redéploiement resterait lettre morte,
 le disque installé gardant la main.
 """
+import asyncio
+
 import main
 from models import Hypervisor, Machine, engine
 from sqlmodel import Session, select
@@ -34,14 +36,38 @@ def _fait_de_la_machine_une_vm(os_machine: str = "windows", type_hv: str = "prox
         session.commit()
 
 
-def _capture_put(monkeypatch) -> dict:
-    vu: dict = {}
+def _capture_put(monkeypatch, boot_en_attente: bool = False) -> dict:
+    """
+    Branche les trois appels Proxmox utilisés par la bascule.
+
+    `boot_en_attente` simule ce que répond une VM ALLUMÉE : Proxmox met la
+    modification de côté au lieu de l'appliquer.
+    """
+    vu: dict = {"actions": []}
 
     async def fake_put(h, path, data):
         vu["path"], vu["data"] = path, data
         return {}
 
+    async def fake_get(h, path):
+        if path.endswith("/pending"):
+            return [{"key": "boot", "value": "order=ide2;sata0",
+                     **({"pending": "order=sata0"} if boot_en_attente else {})}]
+        return {}
+
+    async def fake_post(h, path, data=None):
+        vu["actions"].append(path.rsplit("/", 1)[-1])
+        return {}
+
     monkeypatch.setattr(main, "_proxmox_put", fake_put)
+    monkeypatch.setattr(main, "_proxmox_get", fake_get)
+    monkeypatch.setattr(main, "_proxmox_post", fake_post)
+    # Le vrai `sleep` est capturé AVANT d'être remplacé : `main.asyncio` est le
+    # module asyncio lui-même, donc un lambda qui appellerait `asyncio.sleep`
+    # s'appellerait lui-même — récursion que le `except` large de la bascule
+    # avalerait en silence, en faisant juste disparaître le redémarrage.
+    vrai_sleep = asyncio.sleep
+    monkeypatch.setattr(main.asyncio, "sleep", lambda _: vrai_sleep(0))
     return vu
 
 
@@ -84,7 +110,8 @@ def test_une_vm_linux_nest_pas_touchee(client, test_machine, monkeypatch):
 
     client.post(f"/machines/{MAC}/status", params={"status": "deployed"})
 
-    assert vu == {}
+    assert "data" not in vu, "aucun ordre de démarrage ne devait être écrit"
+    assert vu["actions"] == []
 
 
 def test_une_machine_physique_nest_pas_touchee(client, test_machine, monkeypatch):
@@ -93,7 +120,8 @@ def test_une_machine_physique_nest_pas_touchee(client, test_machine, monkeypatch
 
     client.post(f"/machines/{MAC}/status", params={"status": "deployed"})
 
-    assert vu == {}
+    assert "data" not in vu, "aucun ordre de démarrage ne devait être écrit"
+    assert vu["actions"] == []
 
 
 def test_une_vm_vsphere_nest_pas_touchee(client, test_machine, monkeypatch):
@@ -103,7 +131,40 @@ def test_une_vm_vsphere_nest_pas_touchee(client, test_machine, monkeypatch):
 
     client.post(f"/machines/{MAC}/status", params={"status": "deployed"})
 
-    assert vu == {}
+    assert "data" not in vu, "aucun ordre de démarrage ne devait être écrit"
+    assert vu["actions"] == []
+
+
+def test_un_ordre_reste_en_attente_declenche_un_cycle_dalimentation(client, test_machine,
+                                                                    monkeypatch):
+    """
+    La régression du 2026-08-06. Proxmox met de côté toute modification faite sur une
+    VM allumée : le redémarrage que WinPE déclenche lui-même ne relit pas la
+    configuration, la VM repart sur le CD et seul le garde-fou anti-redéploiement
+    évite l'effacement du Windows tout juste installé.
+    """
+    _fait_de_la_machine_une_vm()
+    vu = _capture_put(monkeypatch, boot_en_attente=True)
+
+    client.post(f"/machines/{MAC}/status", params={"status": "deployed"})
+
+    assert vu["data"] == {"boot": "order=sata0"}
+    assert vu["actions"] == ["stop", "start"], "seul un nouveau processus QEMU relit la config"
+
+
+def test_sans_rien_en_attente_la_vm_nest_pas_redemarree(client, test_machine, monkeypatch):
+    """
+    « deployed » est posté DEUX fois : par WinPE avant son reboot, puis par le
+    firstboot après l'OOBE. Au second, tout est déjà appliqué — couper la machine
+    de force interromprait un Windows en pleine configuration.
+    """
+    _fait_de_la_machine_une_vm()
+    vu = _capture_put(monkeypatch, boot_en_attente=False)
+
+    client.post(f"/machines/{MAC}/status", params={"status": "deployed"})
+
+    assert vu["data"] == {"boot": "order=sata0"}
+    assert vu["actions"] == [], "aucun cycle d'alimentation ne devait avoir lieu"
 
 
 def test_un_hyperviseur_injoignable_ne_fait_pas_echouer_le_rapport(client, test_machine,
