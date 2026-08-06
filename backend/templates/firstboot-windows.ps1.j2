@@ -648,7 +648,10 @@ try {
 }
 {% endif %}
 
-# Service TeamViewer
+{% if profile.machine_type != 'server' %}
+# Service TeamViewer — outil d'accès distant de POSTE. On ne le teste pas sur un
+# serveur, qui n'en a pas : sinon un [FAIL] TeamViewer trompeur apparaît sur chaque
+# déploiement serveur, alors que tout va bien.
 try {
     $tv = Get-Service -Name "TeamViewer" -ErrorAction Stop
     $tvOk = $tv.Status -eq "Running"
@@ -656,6 +659,7 @@ try {
 } catch {
     Add-SmokeTest "TeamViewer" $false "Service introuvable"
 }
+{% endif %}
 
 {% if win_apps %}
 # Presence des applications installees
