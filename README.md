@@ -648,6 +648,7 @@ d'API dont le rôle porte :
 | `VM.Monitor`, `VM.Audit` | lire l'état et la configuration des VM |
 | `Datastore.AllocateSpace`, `Datastore.Audit` | disques des VM créées |
 | `Datastore.AllocateTemplate` | déposer l'ISO WinPE (déploiement Windows sur VM) |
+| `Datastore.Allocate` | **remplacer** une ISO WinPE périmée — `download-url` refuse d'écraser, il faut donc supprimer l'ancienne |
 | `Sys.Audit` | version et inventaire des nœuds |
 | `Sys.AccessNetwork` | fait télécharger l'ISO WinPE par le nœud (`download-url`) |
 
@@ -661,16 +662,31 @@ naturellement à y mettre *tout* le rôle. Mais `VM.Allocate` sur `/` donne droi
 vie et de mort sur **chaque VM du cluster**, celles qu'OSIRIS n'a pas créées
 comprises. Le rayon d'action d'une erreur devient alors l'infrastructure entière.
 
-La bonne configuration se fait en deux attributions :
+En pratique, avec les rôles intégrés, cela donne quatre attributions pour
+`osiris@pve` — et **c'est le chemin de la première qui compte** :
 
-1. un pool Proxmox (ex. `osiris`), renseigné dans le champ **Pool** de la fiche
-   hyperviseur — OSIRIS y range alors toutes les VM qu'il crée ;
-2. les privilèges **VM** et **Datastore** sur `/pool/osiris`, et **seulement**
-   `Sys.Audit` + `Sys.AccessNetwork` sur `/`.
+| Chemin | Rôle | Pourquoi |
+|---|---|---|
+| `/pool/osiris` | `PVEVMAdmin` | tout ce qui écrit sur une VM, **borné au pool** |
+| `/` | `PVEAuditor` | lecture de l'inventaire : nœuds, VM, configurations |
+| `/storage` | `PVEDatastoreUser` | `Datastore.AllocateSpace` pour les disques des VM créées |
+| `/storage/<iso>` | `PVEDatastoreAdmin` | déposer **et remplacer** l'ISO WinPE |
+| `/` | rôle sur mesure à `Sys.AccessNetwork` | fait télécharger l'ISO par le nœud |
 
-L'hyperviseur refuse dès lors lui-même toute action sur une VM hors du pool. C'est
-la même garantie que le contrôle d'identité côté code (ci-dessous), mais rendue par
-la plateforme — donc valable même en cas de bug d'OSIRIS.
+`PVEVMAdmin` sur **`/vms`** — la configuration spontanée — donne ces droits sur
+**chaque VM du cluster**. Sur `/pool/osiris`, l'hyperviseur refuse lui-même toute
+écriture hors du pool : c'est la même garantie que le contrôle d'identité côté code
+(ci-dessous), mais rendue par la plateforme, donc valable même en cas de bug
+d'OSIRIS. La lecture, elle, reste cluster-wide via `PVEAuditor` — le contrôle
+d'identité en a besoin pour comparer l'UUID d'une VM avant d'y toucher.
+
+Trois pièges à la bascule :
+
+- **les templates clonés doivent être dans le pool** : le clone exige `VM.Clone` sur
+  la VM **source**, et un template hors pool fait échouer tout déploiement ;
+- **les VM déjà créées par OSIRIS aussi**, sans quoi il perd la main sur son parc ;
+- **la VM d'OSIRIS elle-même, surtout pas** — elle n'a aucune raison de pouvoir
+  s'éteindre ou se détruire.
 
 #### Le contrôle d'identité des VM
 
