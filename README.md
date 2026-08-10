@@ -668,10 +668,19 @@ En pratique, avec les rôles intégrés, cela donne quatre attributions pour
 | Chemin | Rôle | Pourquoi |
 |---|---|---|
 | `/pool/osiris` | `PVEVMAdmin` | tout ce qui écrit sur une VM, **borné au pool** |
+| `/pool/osiris` | `PVEPoolAdmin` | `Pool.Audit` pour lire le pool, `Pool.Allocate` pour y ranger une VM à la création |
 | `/` | `PVEAuditor` | lecture de l'inventaire : nœuds, VM, configurations |
 | `/storage` | `PVEDatastoreUser` | `Datastore.AllocateSpace` pour les disques des VM créées |
 | `/storage/<iso>` | `PVEDatastoreAdmin` | déposer **et remplacer** l'ISO WinPE |
 | `/` | rôle sur mesure à `Sys.AccessNetwork` | fait télécharger l'ISO par le nœud |
+
+⚠️ **`PVEPoolAdmin` n'est pas optionnel, et la raison est contre-intuitive** : dans
+Proxmox, une ACL sur un chemin **plus spécifique REMPLACE** celle héritée du parent,
+elle ne s'y ajoute pas. Poser `PVEVMAdmin` sur `/pool/osiris` **retire** donc le
+`Pool.Audit` que `PVEAuditor` accordait sur `/`, et OSIRIS ne peut plus lire son
+propre pool — `Permission check failed (/pool/osiris, Pool.Audit)`, alors que le
+privilège *paraît* accordé plus haut. Constaté sur les deux clusters le 2026-08-10.
+Deux rôles sur le même chemin, eux, se cumulent bien.
 
 `PVEVMAdmin` sur **`/vms`** — la configuration spontanée — donne ces droits sur
 **chaque VM du cluster**. Sur `/pool/osiris`, l'hyperviseur refuse lui-même toute
@@ -680,7 +689,7 @@ En pratique, avec les rôles intégrés, cela donne quatre attributions pour
 d'OSIRIS. La lecture, elle, reste cluster-wide via `PVEAuditor` — le contrôle
 d'identité en a besoin pour comparer l'UUID d'une VM avant d'y toucher.
 
-Trois pièges à la bascule :
+Quatre pièges à la bascule :
 
 - **les templates clonés doivent être dans le pool** : le clone exige `VM.Clone` sur
   la VM **source**, et un template hors pool fait échouer tout déploiement. Cela vaut
@@ -690,7 +699,11 @@ Trois pièges à la bascule :
   nomme ni le pool ni le template ;
 - **les VM déjà créées par OSIRIS aussi**, sans quoi il perd la main sur son parc ;
 - **la VM d'OSIRIS elle-même, surtout pas** — elle n'a aucune raison de pouvoir
-  s'éteindre ou se détruire.
+  s'éteindre ou se détruire ;
+- **le bouton « Tester » de l'interface ne prouve rien** de cette bascule : il ne fait
+  qu'un `GET /version`, couvert par `PVEAuditor`. Il reste vert même si tout le reste
+  est cassé. Ce qui prouve, c'est `GET /access/permissions?path=/vms/<vmid>` sur une VM
+  hors pool (doit ne rendre aucun droit d'écriture) et un déploiement réel.
 
 #### Le contrôle d'identité des VM
 
