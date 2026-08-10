@@ -626,19 +626,77 @@ c'est le seul endroit où le choix se fait (`_PROVIDERS` dans `main.py`).
 
 | Type | État | Authentification |
 |---|---|---|
-| `proxmox` | Complet (inventaire + création de VM, PXE et cloud-init) | Jeton d'API (`osiris@pve!osiris-token`) |
-| `vsphere` | Inventaire seulement — création non implémentée | Compte de service + mot de passe, chiffré Fernet |
+| `proxmox` | Complet : inventaire, création de VM (PXE, cloud-init, clone de template), Linux **et** Windows | Jeton d'API (`osiris@pve!osiris-token`) |
+| `vsphere` | Inventaire + création de VM **Linux en cloud-init** — ni PXE, ni Windows (voir plus bas) | Compte de service + mot de passe, chiffré Fernet |
 
 Le vocabulaire de l'interface est celui de Proxmox. Côté vSphere : un **nœud**
 est un cluster de calcul, un **stockage** un datastore, un **réseau** un port group.
 
 ### Ajouter un second Proxmox
 
-Rien à développer : créer la fiche dans Administration › Infrastructure, avec un
-jeton d'API dont le rôle porte `VM.Allocate`, `VM.Clone`, `VM.Config.*`,
-`VM.PowerMgmt`, `VM.Monitor`, `Datastore.AllocateSpace`, `Datastore.Audit` et
-`Sys.Audit`. Il faut aussi que le pare-feu laisse passer OSIRIS vers le port
-**8006** du cluster.
+Rien à développer : créer la fiche dans Administration › Infrastructure. Il faut
+que le pare-feu laisse passer OSIRIS vers le port **8006** du cluster, et un jeton
+d'API dont le rôle porte :
+
+| Privilège | Ce qu'OSIRIS en fait |
+|---|---|
+| `VM.Allocate` | créer et détruire les VM |
+| `VM.Clone` | cloner un template (modes `template` et `cloudinit`) |
+| `VM.Config.*` | matériel, réseau, ordre de démarrage, redimensionnement de disque |
+| `VM.PowerMgmt` | démarrer, arrêter, cycler l'alimentation |
+| `VM.Snapshot` + `VM.Snapshot.Rollback` | snapshots depuis la fiche d'une machine |
+| `VM.Monitor`, `VM.Audit` | lire l'état et la configuration des VM |
+| `Datastore.AllocateSpace`, `Datastore.Audit` | disques des VM créées |
+| `Datastore.AllocateTemplate` | déposer l'ISO WinPE (déploiement Windows sur VM) |
+| `Sys.Audit` | version et inventaire des nœuds |
+| `Sys.AccessNetwork` | fait télécharger l'ISO WinPE par le nœud (`download-url`) |
+
+⚠️ **Aucun rôle intégré ne porte `Sys.AccessNetwork` hors `Administrator`** : il
+faut créer un rôle sur mesure.
+
+#### Borner le périmètre : le pool
+
+`Sys.AccessNetwork` et `Sys.Audit` doivent être attribués **sur `/`**, ce qui pousse
+naturellement à y mettre *tout* le rôle. Mais `VM.Allocate` sur `/` donne droit de
+vie et de mort sur **chaque VM du cluster**, celles qu'OSIRIS n'a pas créées
+comprises. Le rayon d'action d'une erreur devient alors l'infrastructure entière.
+
+La bonne configuration se fait en deux attributions :
+
+1. un pool Proxmox (ex. `osiris`), renseigné dans le champ **Pool** de la fiche
+   hyperviseur — OSIRIS y range alors toutes les VM qu'il crée ;
+2. les privilèges **VM** et **Datastore** sur `/pool/osiris`, et **seulement**
+   `Sys.Audit` + `Sys.AccessNetwork` sur `/`.
+
+L'hyperviseur refuse dès lors lui-même toute action sur une VM hors du pool. C'est
+la même garantie que le contrôle d'identité côté code (ci-dessous), mais rendue par
+la plateforme — donc valable même en cas de bug d'OSIRIS.
+
+#### Le contrôle d'identité des VM
+
+Un identifiant de VM Proxmox **n'est pas une identité** : `cluster/nextid` rend le
+plus petit numéro libre, donc les numéros sont recyclés. Une VM supprimée à la main
+sans retirer sa fiche OSIRIS laisse un numéro qui repart au tourniquet, et la fiche
+se met à désigner la VM de quelqu'un d'autre.
+
+OSIRIS ancre donc chaque fiche sur l'**UUID SMBIOS** de sa VM (`machine.vm_uuid`) et
+le compare avant toute écriture. Si le numéro désigne une autre VM, l'action est
+refusée avec une erreur **409**, inscrite à l'audit sous `vm_identite_refusee`, et
+**rien n'est touché**. Il faut alors vérifier la VM dans l'interface Proxmox, puis
+corriger ou supprimer la fiche.
+
+Les fiches antérieures à ce mécanisme n'ont pas d'UUID : elles sont identifiées par
+le **nom** de la VM, et l'UUID relu est gravé au premier contrôle réussi. Renommer
+une VM à la main dans Proxmox avant ce premier contrôle fait donc refuser l'action —
+c'est volontaire, et il suffit de rétablir le nom ou de recréer la fiche.
+
+#### Le certificat TLS
+
+La vérification est **activée par défaut**. Le jeton peut détruire des VM : sur une
+session non vérifiée, il suffit de se placer sur le chemin OSIRIS↔hyperviseur pour
+le récolter. La désactiver reste possible — Proxmox s'installe avec un certificat
+auto-signé — mais chaque appel laisse alors un avertissement dans le journal, et la
+fiche porte un badge « TLS non vérifié ».
 
 ### Déployer sur plusieurs réseaux : l'URL de rappel
 
@@ -661,23 +719,42 @@ DHCP et le TFTP ne se routent pas d'eux-mêmes. Le mode cloud-init n'a pas cette
 contrainte : il ne demande que du HTTP, ce qui en fait la voie naturelle pour
 déployer sur un site distant.
 
-### Prérequis vSphere
+### vSphere : ce qui marche, et ce qui n'existe pas
 
-À réunir avant de pouvoir terminer l'implémentation :
+Le clonage passe par **pyvmomi (SOAP)** : l'API REST n'expose le clone qu'à partir
+de vSphere 8, et le vCenter cible est en 6.7. La configuration est injectée en
+`guestinfo.userdata` — l'équivalent vSphere des snippets, sans le blocage d'upload
+rencontré sur Proxmox.
 
-- **Version exacte de vCenter.** Elle décide de la méthode de clonage : l'API REST
-  ne l'expose qu'à partir de vSphere 8 ; en 7.0 il faut passer par pyvmomi (SOAP).
+**Ce qui est implémenté** : inventaire (clusters, datastores, port groups,
+templates), création d'une VM Linux par clone de template en mode `cloud-init`,
+disque de données, adressage fixe, destruction.
+
+**Ce qui ne l'est pas :**
+
+- **Le mode PXE**, et il n'a pas de sens ici : le réseau de déploiement d'OSIRIS
+  n'est pas routable jusqu'au vCenter (DHCP et TFTP ne se routent pas).
+- **Windows**, qui se déploie par une ISO WinPE — le dépôt d'ISO n'existe pas dans
+  `vsphere.py`.
+- **La MAC imposée** : vCenter l'attribue lui-même. OSIRIS clone d'abord, relit la
+  MAC obtenue, puis écrit le `guestinfo` — dont le contenu dépend de cette MAC.
+
+Prérequis :
+
 - **Compte de service** avec, sur le datacenter cible : lecture de l'inventaire,
   `Virtual machine.Provisioning.Clone`, `Virtual machine.Configuration.*`,
+  `Virtual machine.Interaction.Power On`, `Virtual machine.Inventory.Delete`,
   `Resource.Assign VM to resource pool`, `Datastore.Allocate space`.
 - **Port 443** ouvert depuis OSIRIS vers le vCenter.
 - **Cible de déploiement** : noms du datacenter, du cluster, du datastore et du
   port group.
 - **Un template Linux cloud-init** (l'équivalent du 9000 côté Proxmox).
 
-L'injection de configuration se fera par `guestinfo.userdata`, l'équivalent
-vSphere des snippets — avec l'avantage de ne pas souffrir du blocage d'upload
-rencontré sur Proxmox.
+Comme sur Proxmox, restreindre le compte au **dossier et au pool de ressources**
+d'accueil plutôt qu'au datacenter entier borne le rayon d'action d'une erreur.
+vCenter ne recycle pas ses moID comme Proxmox recycle ses VMID, donc le risque de
+viser une VM étrangère y est plus faible — mais la destruction vérifie tout de même
+le nom de la VM avant d'agir (`destroy_vm`), un `Destroy_Task` ne se rattrapant pas.
 
 ---
 
