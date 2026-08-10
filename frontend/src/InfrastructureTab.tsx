@@ -21,6 +21,12 @@ interface InfrastructureTabProps {
 export function InfrastructureTab({ token, hypervisors, profiles, organizations, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
   const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, pool: '', snippets_storage: '', callback_url: '' })
   const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; error?: string } | null>>({})
+  // Fiche en cours d'édition. Il n'existait AUCUN moyen de modifier un hyperviseur
+  // enregistré : ni ici, ni ailleurs dans l'UI. Tout champ ajouté après coup — le
+  // pool, la vérification TLS — restait donc hors d'atteinte sur les fiches
+  // existantes, alors que ce sont précisément elles qu'il faut corriger.
+  const [editHvId, setEditHvId] = useState<number | null>(null)
+  const [editHv, setEditHv] = useState<Partial<Hypervisor> & { token_secret?: string }>({})
   const [hvTesting, setHvTesting]       = useState<Record<number, boolean>>({})
   const [showVmForm, setShowVmForm]     = useState(false)
   const [vmHvId, setVmHvId]             = useState<number | ''>('')
@@ -40,6 +46,30 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
       body: JSON.stringify(newHv),
     }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, pool: '', snippets_storage: '', callback_url: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
       .catch(() => toast.error('Erreur création hyperviseur'))
+  }
+
+  const startEditHv = (h: Hypervisor) => {
+    setEditHvId(h.id)
+    // `token_secret` volontairement vide : l'API renvoie « *** », le renvoyer tel
+    // quel écraserait le vrai secret par trois étoiles chiffrées. Vide = on n'y touche pas.
+    setEditHv({ name: h.name, url: h.url, token_id: h.token_id, token_secret: '',
+                tls_verify: h.tls_verify, pool: h.pool ?? '',
+                snippets_storage: h.snippets_storage ?? '', callback_url: h.callback_url ?? '' })
+  }
+
+  const handleSaveHv = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (editHvId === null) return
+    const body = { ...editHv }
+    if (!body.token_secret) delete body.token_secret
+    fetch(`${API_URL}/hypervisors/${editHvId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...authHeader(token) },
+      body: JSON.stringify(body),
+    }).then(async r => {
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail ?? 'Erreur') }
+      setEditHvId(null); onRefreshHypervisors(); toast.success('Hyperviseur modifié')
+    }).catch(err => toast.error(err.message))
   }
 
   const handleDeleteHv = (id: number) => {
@@ -151,9 +181,66 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                     className="osiris-btn text-xs px-3 disabled:opacity-50">
                     {hvTesting[h.id] ? '...' : 'Tester'}
                   </button>
+                  <button onClick={() => editHvId === h.id ? setEditHvId(null) : startEditHv(h)}
+                    className="osiris-btn text-xs px-3">
+                    {editHvId === h.id ? 'Annuler' : 'Modifier'}
+                  </button>
                   <button onClick={() => handleDeleteHv(h.id)} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
                 </div>
               </div>
+
+              {/* Formulaire d'édition */}
+              {editHvId === h.id && (
+                <form onSubmit={handleSaveHv} className="border-t border-slate-800/60 pt-3 space-y-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <input placeholder="Nom" value={editHv.name ?? ''}
+                      onChange={e => setEditHv({ ...editHv, name: e.target.value })}
+                      className="osiris-input text-xs" />
+                    <input placeholder="URL" value={editHv.url ?? ''}
+                      onChange={e => setEditHv({ ...editHv, url: e.target.value })}
+                      className="osiris-input text-xs font-mono" />
+                    <input placeholder={h.type === 'vsphere' ? 'Compte de service' : 'Token ID'}
+                      value={editHv.token_id ?? ''}
+                      onChange={e => setEditHv({ ...editHv, token_id: e.target.value })}
+                      className="osiris-input text-xs font-mono" />
+                    <input type="password" placeholder="Nouveau secret — vide = inchangé"
+                      value={editHv.token_secret ?? ''}
+                      onChange={e => setEditHv({ ...editHv, token_secret: e.target.value })}
+                      className="osiris-input text-xs font-mono" />
+                    {h.type === 'proxmox' && (
+                      <input placeholder="Pool d'accueil des VM (ex: osiris)" value={editHv.pool ?? ''}
+                        onChange={e => setEditHv({ ...editHv, pool: e.target.value })}
+                        className="osiris-input text-xs font-mono"
+                        title="Ranger les VM d'OSIRIS dans un pool permet de n'attribuer son jeton que sur /pool/<pool> au lieu de /vms. L'hyperviseur refuse alors lui-meme toute ecriture sur une VM tierce." />
+                    )}
+                    {h.type === 'proxmox' && (
+                      <input placeholder="Stockage snippets cloud-init" value={editHv.snippets_storage ?? ''}
+                        onChange={e => setEditHv({ ...editHv, snippets_storage: e.target.value })}
+                        className="osiris-input text-xs font-mono" />
+                    )}
+                    <input placeholder="URL de rappel — vide = URL globale" value={editHv.callback_url ?? ''}
+                      onChange={e => setEditHv({ ...editHv, callback_url: e.target.value })}
+                      className="osiris-input text-xs font-mono col-span-2" />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                      <input type="checkbox" checked={editHv.tls_verify ?? false}
+                        onChange={e => setEditHv({ ...editHv, tls_verify: e.target.checked })}
+                        className="accent-blue-500" />
+                      Verifier le certificat TLS
+                    </label>
+                    <button type="submit" className="osiris-btn text-xs px-4">Enregistrer</button>
+                  </div>
+                  {/* Un certificat auto-signe (le defaut de Proxmox) fait echouer TOUS les
+                      appels des qu'on coche : le dire ici evite de chercher la panne ailleurs. */}
+                  {!h.tls_verify && editHv.tls_verify && (
+                    <p className="text-[10px] font-mono text-amber-500">
+                      Ne cocher qu'avec un certificat de confiance installe sur l'hyperviseur —
+                      sinon chaque appel echouera en 502.
+                    </p>
+                  )}
+                </form>
+              )}
 
               {/* Résultat du test */}
               {result && (

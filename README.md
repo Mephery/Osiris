@@ -683,7 +683,11 @@ d'identité en a besoin pour comparer l'UUID d'une VM avant d'y toucher.
 Trois pièges à la bascule :
 
 - **les templates clonés doivent être dans le pool** : le clone exige `VM.Clone` sur
-  la VM **source**, et un template hors pool fait échouer tout déploiement ;
+  la VM **source**, et un template hors pool fait échouer tout déploiement. Cela vaut
+  pour **chaque template créé plus tard** : un cluster dont le pool est vide
+  aujourd'hui parce qu'il n'a pas encore de template reste piégé le jour où on lui en
+  fabrique un. Le symptôme est un « Permission check failed » sur le clone, qui ne
+  nomme ni le pool ni le template ;
 - **les VM déjà créées par OSIRIS aussi**, sans quoi il perd la main sur son parc ;
 - **la VM d'OSIRIS elle-même, surtout pas** — elle n'a aucune raison de pouvoir
   s'éteindre ou se détruire.

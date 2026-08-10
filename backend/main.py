@@ -3844,7 +3844,14 @@ def update_hypervisor(hv_id: int, patch: HypervisorPatch, current_user: User = D
         if not h:
             raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
         data = patch.model_dump(exclude_unset=True)
-        if "token_secret" in data and data["token_secret"]:
+        # `_hypervisor_dict` masque le secret en « *** » : un client qui relit la
+        # fiche puis la renvoie telle quelle chiffrerait ces trois étoiles, et OSIRIS
+        # perdrait l'accès à l'hyperviseur — panne muette, dont la cause serait
+        # invisible dans la fiche (le champ paraît rempli). Vide ou masqué = on n'y
+        # touche pas ; c'est le seul champ dont on ne peut pas relire la valeur.
+        if data.get("token_secret") in ("", "***", None):
+            data.pop("token_secret", None)
+        elif "token_secret" in data:
             data["token_secret"] = encrypt(data["token_secret"])
         for field, value in data.items():
             setattr(h, field, value)
