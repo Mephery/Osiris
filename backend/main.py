@@ -38,7 +38,7 @@ import vpn
 import vsphere
 from auth import (
     hash_password, verify_password, create_token,
-    get_current_user, require_admin
+    get_current_user, get_current_user_optional, require_admin
 )
 from crypto import encrypt, decrypt
 
@@ -2049,11 +2049,25 @@ async def delete_machine(mac: str, destroy_proxmox: bool = False, current_user: 
         h = session.get(Hypervisor, hv_id) if (destroy_proxmox and vm_id and hv_id) else None
 
     if destroy_proxmox and vm_id and hv_id and h:
+        # Identité vérifiée AVANT la purge. Un numéro de VM est recyclé par Proxmox :
+        # sans ce contrôle, une fiche périmée fait détruire la VM qui a hérité du
+        # numéro. `tolerer_absente` parce qu'une VM déjà disparue de l'hyperviseur
+        # n'est pas une erreur — il reste justement à retirer sa fiche. En revanche
+        # un numéro ÉTRANGER lève 409 et interrompt tout : on ne supprime alors même
+        # pas la fiche, seul l'opérateur peut trancher ce qu'est devenue la VM.
+        h, vm_id, node = await _vm_verifiee(clean_mac, "destruction de la VM",
+                                            tolerer_absente=True)
+        # Sur vSphere, `_vm_verifiee` ne vérifie rien : l'UUID s'y lit par pyvmomi,
+        # pas par l'API Proxmox. Le nom prend donc le relais — c'est le seul chemin
+        # destructeur de ce provider, et un `Destroy_Task` ne se rattrape pas.
+        # Côté Proxmox on ne le passe PAS : l'identité y est déjà prouvée par l'UUID,
+        # et un second contrôle par le nom refuserait une VM légitimement renommée.
+        nom_attendu = hostname if (h.type or "").lower() == "vsphere" else ""
         # Par le provider : la destruction n'a rien de commun entre un appel
         # Proxmox et un Destroy_Task vSphere. Si la VM n'existe plus côté
         # hyperviseur, on supprime quand même la fiche d'OSIRIS.
         try:
-            await _provider(h).destroy_vm(h, node, vm_id)
+            await _provider(h).destroy_vm(h, node, vm_id, nom_attendu=nom_attendu)
         except HTTPException:
             pass
 
@@ -2076,15 +2090,8 @@ async def vm_power(mac: str, body: VmPowerBody, current_user: User = Depends(req
     if body.action not in ("start", "shutdown", "stop", "reboot"):
         raise HTTPException(status_code=400, detail="Action invalide")
     clean_mac = validate_mac(mac)
-    with Session(engine) as session:
-        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
-        if not machine or not machine.proxmox_vm_id or not machine.hypervisor_id:
-            raise HTTPException(status_code=404, detail="Machine introuvable ou non liée à Proxmox")
-        h = session.get(Hypervisor, machine.hypervisor_id)
-        if not h:
-            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
-        vm_id = machine.proxmox_vm_id
-        node = machine.proxmox_node
+    # `stop` est un arrêt franc : sur la mauvaise VM, c'est une coupure de service.
+    h, vm_id, node = await _vm_verifiee(clean_mac, f"alimentation {body.action}")
     await _proxmox_post(h,
         f"/api2/json/nodes/{node}/qemu/{vm_id}/status/{body.action}")
     return {"ok": True, "action": body.action}
@@ -2094,15 +2101,11 @@ async def vm_power(mac: str, body: VmPowerBody, current_user: User = Depends(req
 async def vm_status(mac: str, _: User = Depends(get_current_user)):
     """Retourne le statut d'alimentation live d'une VM Proxmox."""
     clean_mac = validate_mac(mac)
-    with Session(engine) as session:
-        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
-        if not machine or not machine.proxmox_vm_id or not machine.hypervisor_id:
-            raise HTTPException(status_code=404, detail="Machine introuvable ou non liée à Proxmox")
-        h = session.get(Hypervisor, machine.hypervisor_id)
-        if not h:
-            raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
-        vm_id = machine.proxmox_vm_id
-        node = machine.proxmox_node
+    # Vérifié même en lecture : c'est l'appel le plus fréquent de l'interface, donc
+    # celui qui fera remonter une divergence fiche/hyperviseur le plus tôt. Afficher
+    # la charge d'une VM étrangère sous le nom d'une des nôtres serait pire que
+    # l'erreur 409 qui l'annonce.
+    h, vm_id, node = await _vm_verifiee(clean_mac, "lecture du statut")
     data = await _proxmox_get(h,
         f"/api2/json/nodes/{node}/qemu/{vm_id}/status/current")
     return {
@@ -2135,7 +2138,7 @@ def _get_vm_and_hypervisor(mac: str) -> tuple:
 @app.get("/machines/{mac}/snapshots")
 async def list_snapshots(mac: str, _: User = Depends(require_admin)):
     clean_mac = validate_mac(mac)
-    h, vm_id, node = _get_vm_and_hypervisor(clean_mac)
+    h, vm_id, node = await _vm_verifiee(clean_mac, "liste des snapshots")
     data = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/snapshot")
     return data if isinstance(data, list) else []
 
@@ -2146,7 +2149,7 @@ async def create_snapshot(mac: str, body: SnapshotCreateBody, current_user: User
     if not body.name or not _re.match(r'^[a-zA-Z0-9_\-]{1,40}$', body.name):
         raise HTTPException(status_code=400, detail="Nom de snapshot invalide (alphanumérique, tirets, underscores, max 40 chars)")
     clean_mac = validate_mac(mac)
-    h, vm_id, node = _get_vm_and_hypervisor(clean_mac)
+    h, vm_id, node = await _vm_verifiee(clean_mac, f"création du snapshot « {body.name} »")
     upid = await _proxmox_post(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/snapshot", {
         "snapname": body.name,
         "description": body.description,
@@ -2159,7 +2162,9 @@ async def create_snapshot(mac: str, body: SnapshotCreateBody, current_user: User
 @app.post("/machines/{mac}/snapshots/{name}/rollback")
 async def rollback_snapshot(mac: str, name: str, _: User = Depends(require_admin)):
     clean_mac = validate_mac(mac)
-    h, vm_id, node = _get_vm_and_hypervisor(clean_mac)
+    # Perte de données garantie sur la mauvaise VM : tout ce qui a été écrit depuis
+    # le snapshot disparaît, et rien ne le rattrape.
+    h, vm_id, node = await _vm_verifiee(clean_mac, f"retour arrière sur le snapshot « {name} »")
     upid = await _proxmox_post(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/snapshot/{name}/rollback", {"start": 0})
     if isinstance(upid, str):
         await _proxmox_wait_task(h, node, upid)
@@ -2169,7 +2174,7 @@ async def rollback_snapshot(mac: str, name: str, _: User = Depends(require_admin
 @app.delete("/machines/{mac}/snapshots/{name}", status_code=204)
 async def delete_snapshot(mac: str, name: str, _: User = Depends(require_admin)):
     clean_mac = validate_mac(mac)
-    h, vm_id, node = _get_vm_and_hypervisor(clean_mac)
+    h, vm_id, node = await _vm_verifiee(clean_mac, f"suppression du snapshot « {name} »")
     upid = await _proxmox_delete(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/snapshot/{name}")
     if isinstance(upid, str):
         await _proxmox_wait_task(h, node, upid)
@@ -2499,6 +2504,15 @@ async def _orienter_boot_vm_windows(mac: str, vers_winpe: bool) -> None:
         # vSphere gère ses lecteurs autrement : rien à faire ici pour l'instant.
         if not h or h.type != "proxmox":
             return
+
+        # C'est LE chemin le plus destructeur d'OSIRIS : renvoyer une VM sur le CD
+        # WinPE, c'est réinstaller son disque. Il ne s'exécute donc que sur une VM
+        # dont l'identité est prouvée. `_vm_verifiee` lève 409 sur un numéro
+        # étranger — l'exception est rattrapée plus bas (best-effort), mais le refus
+        # est déjà inscrit à l'audit, et surtout : rien n'a été touché.
+        h, vm_id, node = await _vm_verifiee(
+            mac, "retour sur le CD WinPE" if vers_winpe else "démarrage sur le disque")
+
         base = f"/api2/json/nodes/{node}/qemu/{vm_id}"
         ordre = "order=ide2;sata0" if vers_winpe else "order=sata0"
         await _proxmox_put(h, f"{base}/config", {"boot": ordre})
@@ -2529,12 +2543,39 @@ async def _orienter_boot_vm_windows(mac: str, vers_winpe: bool) -> None:
 
 @app.post("/machines/{mac}/status")
 @limiter.limit("10/minute")
-def report_machine_status(request: Request, mac: str, status: str, background_tasks: BackgroundTasks):
+def report_machine_status(request: Request, mac: str, status: str, background_tasks: BackgroundTasks,
+                          operateur: Optional[User] = Depends(get_current_user_optional)):
     """Appelé par la machine elle-même via curl pendant l'installation."""
     clean_mac = validate_mac(mac)
     valid = {"pending", "deploying", "deployed", "failed"}
     if status not in valid:
         raise HTTPException(status_code=400, detail=f"Statut invalide. Valeurs : {valid}")
+
+    # ── `pending` veut dire « réinstalle-toi » : réservé aux opérateurs ────────
+    # Cette route est SANS authentification, et elle doit le rester : c'est la
+    # seule voix des machines en cours de déploiement, qui n'ont aucun identifiant
+    # à présenter. Mais poster `pending` ne rapporte rien — ça DÉCLENCHE : nouveau
+    # journal de déploiement, et surtout retour de la VM sur son CD WinPE, qui
+    # réinstalle le disque. Il suffisait donc d'atteindre OSIRIS et de connaître
+    # une MAC enregistrée pour faire effacer une machine.
+    # Aucune machine ne poste jamais ce statut — les scripts générés ne rapportent
+    # que deploying / deployed / failed — et l'interface, elle, envoie son jeton
+    # (bouton « Redéployer »). Le fermer ne casse donc aucun appel légitime.
+    if status == "pending" and operateur is None:
+        _hv_log.warning(
+            "Remise en attente REFUSÉE sur %s : appel non authentifié depuis %s",
+            clean_mac, request.client.host if request.client else "?")
+        with Session(engine) as session:
+            _log_systeme(session, "redeploiement_refuse", target_mac=clean_mac, details={
+                "motif": "appel non authentifié",
+                "ip": request.client.host if request.client else "",
+            })
+            session.commit()
+        raise HTTPException(status_code=401, detail=(
+            "Repasser une machine « en attente » relance son déploiement et efface "
+            "son disque : l'action est réservée aux opérateurs authentifiés. Une "
+            "machine ne rapporte que « deploying », « deployed » ou « failed »."))
+
     deployed_at = None
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
@@ -3397,7 +3438,10 @@ class HypervisorCreate(SQLModel):
     url: str
     token_id: str = ""
     token_secret: str = ""
-    tls_verify: bool = False
+    # Verification TLS activee par defaut : le jeton peut detruire des VM, il n'a
+    # rien a faire sur une session interceptable (cf. `Hypervisor.tls_verify`).
+    tls_verify: bool = True
+    pool: str = ""
     snippets_storage: str = ""
     callback_url: str = ""
     organization_id: Optional[int] = None
@@ -3409,6 +3453,7 @@ class HypervisorPatch(SQLModel):
     token_secret: Optional[str] = None
     type: Optional[str] = None
     tls_verify: Optional[bool] = None
+    pool: Optional[str] = None
     snippets_storage: Optional[str] = None
     callback_url: Optional[str] = None
     organization_id: Optional[int] = None
@@ -3423,11 +3468,36 @@ def _hypervisor_dict(h: Hypervisor) -> dict:
         "token_id": h.token_id,
         "token_secret": "***" if h.token_secret else "",
         "tls_verify": h.tls_verify,
+        "pool": h.pool or "",
         "snippets_storage": h.snippets_storage or "",
         "callback_url": h.callback_url or "",
         "organization_id": h.organization_id,
         "created_at": h.created_at.isoformat(),
     }
+
+
+_tls_avertis: dict[int, datetime] = {}
+_TLS_RAPPEL = timedelta(hours=1)
+
+
+def _avertir_tls_non_verifie(h: Hypervisor) -> None:
+    """Signale un hyperviseur joint sans vérifier son certificat, une fois par heure.
+
+    Cadencé : `vm-status` est interrogé en boucle par l'interface, et un
+    avertissement par appel noierait le journal — donc l'inverse du but.
+    """
+    maintenant = datetime.now(timezone.utc)
+    dernier = _tls_avertis.get(h.id or 0)
+    if dernier and maintenant - dernier < _TLS_RAPPEL:
+        return
+    _tls_avertis[h.id or 0] = maintenant
+    _hv_log.warning(
+        "Hyperviseur « %s » (%s) joint SANS vérification du certificat TLS : le "
+        "jeton d'API, qui peut détruire des VM, circule sur une session "
+        "interceptable. Installer un certificat de confiance puis cocher "
+        "« Vérifier le certificat TLS » sur la fiche.",
+        h.name, h.url,
+    )
 
 
 async def _proxmox_request(h: Hypervisor, method: str, path: str, data: dict | None = None) -> dict:
@@ -3439,6 +3509,13 @@ async def _proxmox_request(h: Hypervisor, method: str, path: str, data: dict | N
     headers = {"Authorization": f"PVEAPIToken={h.token_id}={secret}"}
     url = h.url.rstrip("/") + path
     connector = aiohttp.TCPConnector(ssl=False) if not h.tls_verify else None
+    if not h.tls_verify:
+        # Ce jeton porte droit de vie et de mort sur les VM. Sur une session non
+        # vérifiée, quiconque se place sur le chemin OSIRIS↔hyperviseur le récolte
+        # et hérite des mêmes pouvoirs. La désactivation reste offerte (Proxmox
+        # s'installe avec un certificat auto-signé) mais elle ne doit pas être
+        # silencieuse : sans trace, personne ne se souvient qu'elle est active.
+        _avertir_tls_non_verifie(h)
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
             req = getattr(session, method.lower())
@@ -3469,6 +3546,150 @@ async def _proxmox_put(h: Hypervisor, path: str, data: dict) -> dict:
 
 async def _proxmox_delete(h: Hypervisor, path: str) -> dict:
     return await _proxmox_request(h, "DELETE", path)
+
+
+# ── Identité des VM : vérifier le numéro AVANT d'écrire ────────────────────────
+#
+# Tout ce bloc existe pour une seule raison : `proxmox_vm_id` est un ENTIER
+# RECYCLÉ, pas une identité. `cluster/nextid` rend le plus petit identifiant
+# libre — donc une VM supprimée à la main sans retirer sa fiche OSIRIS laisse un
+# numéro qui repart au tourniquet, et la fiche se met à désigner la VM de
+# quelqu'un d'autre. À partir de là, chaque action frappe la mauvaise machine :
+# purge, rollback de snapshot, arrêt franc, et surtout retour sur le CD WinPE,
+# qui RÉINSTALLE le disque.
+#
+# La parade est de comparer, avant chaque écriture, une ancre que Proxmox ne
+# recycle pas : l'UUID SMBIOS, généré à la création et neuf sur chaque clone.
+# En cas de doute on refuse l'action — jamais l'inverse.
+
+_IDENT_CONFORME  = "conforme"    # le numéro désigne bien la VM de la fiche
+_IDENT_ABSENTE   = "absente"     # l'hyperviseur ne connaît aucune VM sous ce numéro
+_IDENT_ETRANGERE = "etrangere"   # le numéro désigne une AUTRE VM : ne rien toucher
+
+
+def _uuid_smbios(cfg: dict | None) -> str:
+    """UUID SMBIOS d'une config Proxmox (« smbios1: uuid=… »), '' s'il est absent."""
+    m = re.search(r"uuid=([0-9a-fA-F-]{36})", str((cfg or {}).get("smbios1", "")))
+    return m.group(1).lower() if m else ""
+
+
+async def _config_vm(h: Hypervisor, node: str, vm_id: int) -> Optional[dict]:
+    """Config d'une VM, ou None si l'hyperviseur n'en connaît aucune sous ce numéro."""
+    try:
+        cfg = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/config")
+    except HTTPException:
+        return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+async def _etat_identite_vm(h: Optional[Hypervisor], node: str, vm_id: int,
+                            vm_uuid: str, hostname: str) -> tuple[str, str]:
+    """
+    Le numéro `vm_id` désigne-t-il bien la VM décrite par (`vm_uuid`, `hostname`) ?
+
+    Renvoie (état, détail). Sur un état conforme obtenu par le NOM, le détail
+    porte l'UUID relu : l'appelant le grave dans la fiche, et la vérification
+    suivante se fera sur l'ancre forte.
+    """
+    if not h or h.type != "proxmox":
+        # vSphere agit sur une poignée d'objet obtenue par `_find_vm`, pas sur un
+        # numéro réutilisable, et son chemin d'échec ne détruit rien (`vm_id = 0`).
+        return _IDENT_CONFORME, ""
+
+    cfg = await _config_vm(h, node, vm_id)
+    if cfg is None:
+        return _IDENT_ABSENTE, f"aucune VM {vm_id} sur le nœud « {node} »"
+
+    uuid_reel = _uuid_smbios(cfg)
+    if vm_uuid:
+        if uuid_reel and uuid_reel == vm_uuid.strip().lower():
+            return _IDENT_CONFORME, ""
+        return _IDENT_ETRANGERE, (
+            f"la VM {vm_id} porte l'UUID {uuid_reel or '(aucun)'} alors que la fiche "
+            f"attend {vm_uuid} — ce numéro a été réattribué à une autre VM")
+
+    # Fiche sans ancre : créée avant ce garde-fou. Le nom est le seul repère, et
+    # OSIRIS nomme toujours ses VM d'après le hostname de la fiche.
+    nom = str(cfg.get("name", "")).strip().lower()
+    if nom and nom == (hostname or "").strip().lower():
+        return _IDENT_CONFORME, uuid_reel
+    return _IDENT_ETRANGERE, (
+        f"la VM {vm_id} s'appelle « {nom or '(sans nom)'} » alors que la fiche attend "
+        f"« {hostname} » — ce numéro ne désigne pas cette machine")
+
+
+def _log_systeme(session: Session, action: str, target_mac: str | None = None,
+                 details: dict | None = None) -> None:
+    """Entrée d'audit d'une action déclenchée par OSIRIS lui-même, sans opérateur.
+
+    Les refus du garde-fou d'identité doivent laisser une trace même quand
+    personne n'a cliqué : ils se produisent dans les tâches de fond (rapport de
+    statut d'une machine, orientation du boot).
+    """
+    session.add(AuditLog(
+        user_id=None, user_email="système", action=action,
+        target_mac=target_mac,
+        details=json.dumps(details, ensure_ascii=False) if details else None,
+    ))
+
+
+def _graver_uuid_vm(mac: str, uuid_vm: str) -> None:
+    """Grave l'ancre d'identité d'une fiche qui n'en avait pas encore (best-effort)."""
+    if not uuid_vm:
+        return
+    try:
+        with Session(engine) as session:
+            m = session.exec(select(Machine).where(Machine.mac == mac)).first()
+            if m and not m.vm_uuid:
+                m.vm_uuid = uuid_vm
+                session.add(m)
+                session.commit()
+                _hv_log.info("Fiche %s : UUID de VM %s gravé (identifiée par son nom)",
+                             mac, uuid_vm)
+    except Exception:
+        _hv_log.exception("UUID de la VM de %s non gravé", mac)
+
+
+async def _vm_verifiee(mac: str, action: str, *,
+                       tolerer_absente: bool = False) -> tuple[Hypervisor, int, str]:
+    """
+    (hyperviseur, vm_id, nœud) d'une machine, APRÈS avoir vérifié que le numéro
+    désigne bien sa VM. À utiliser partout où l'on s'apprête à écrire.
+
+    - numéro étranger  → 409, rien n'est touché, et l'audit garde le refus.
+    - VM absente       → 404, sauf `tolerer_absente` (suppression de fiche, où une
+                         VM déjà disparue n'est pas une erreur).
+    """
+    h, vm_id, node = _get_vm_and_hypervisor(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+        vm_uuid  = machine.vm_uuid if machine else ""
+        hostname = machine.hostname if machine else ""
+
+    etat, detail = await _etat_identite_vm(h, node, vm_id, vm_uuid, hostname)
+
+    if etat == _IDENT_ETRANGERE:
+        _hv_log.error("REFUS « %s » sur la VM %s (%s) : %s", action, vm_id, mac, detail)
+        with Session(engine) as session:
+            _log_systeme(session, "vm_identite_refusee", target_mac=mac, details={
+                "action_refusee": action, "vm_id": vm_id, "node": node,
+                "hypervisor_id": h.id if h else None, "motif": detail,
+            })
+            session.commit()
+        raise HTTPException(status_code=409, detail=(
+            f"Action « {action} » refusée : {detail}. La fiche OSIRIS et "
+            f"l'hyperviseur ont divergé — vérifier la VM dans l'interface Proxmox, "
+            f"puis corriger ou supprimer la fiche. Aucune modification n'a été faite."))
+
+    if etat == _IDENT_ABSENTE and not tolerer_absente:
+        raise HTTPException(status_code=404, detail=(
+            f"Action « {action} » impossible : {detail}. La VM a probablement été "
+            f"supprimée côté hyperviseur ; la fiche OSIRIS est à retirer."))
+
+    if etat == _IDENT_CONFORME and detail:
+        _graver_uuid_vm(mac, detail)     # identifiée par son nom : on pose l'ancre
+
+    return h, vm_id, node
 
 
 async def _proxmox_upload_snippet(h: Hypervisor, node: str, storage: str, filename: str, content: str) -> None:
@@ -3745,12 +3966,15 @@ class ProxmoxProvider:
                            mac_plain: str, user_data: str = "",
                            render_user_data=None) -> Optional[dict]:
         await _provision_vm(h, body, vm_id, mac_colons, mac_plain, user_data)
-        # Proxmox : identifiant et MAC étaient connus d'avance, rien à corriger.
-        return None
+        # Identifiant et MAC étaient connus d'avance ; l'UUID, non — c'est Proxmox
+        # qui le génère. On le relit pour l'ancrer dans la fiche : sans lui, toute
+        # vérification ultérieure retombe sur le nom, bien plus fragile.
+        return {"vm_id": vm_id, "vm_uuid": _uuid_smbios(await _config_vm(h, body.node, vm_id))}
 
     @staticmethod
-    async def destroy_vm(h: Hypervisor, node: str, vm_id: int) -> None:
-        await _destroy_vm_quietly(h, node, vm_id)
+    async def destroy_vm(h: Hypervisor, node: str, vm_id: int,
+                         nom_attendu: str = "") -> None:
+        await _destroy_vm_quietly(h, node, vm_id, nom_attendu)
 
 
 _PROVIDERS = {
@@ -3877,12 +4101,45 @@ def _rollback_vm_machine(user: User, body, hv_id: int, vm_id: int,
         _hv_log.exception("Echec du nettoyage de la fiche de la VM %s", vm_id)
 
 
-async def _destroy_vm_quietly(h: Hypervisor, node: str, vm_id: int) -> None:
+async def _destroy_vm_quietly(h: Hypervisor, node: str, vm_id: int,
+                              nom_attendu: str = "") -> None:
     """Détruit une VM après un échec, sans jamais masquer l'erreur d'origine.
 
     Utilisé pour ne pas laisser de VM à moitié configurée sur l'hyperviseur : ses
     volumes bloqueraient la réutilisation de l'identifiant par `nextid`.
+
+    `nom_attendu` est le DERNIER filet avant un `DELETE … ?purge=1`. Ce chemin est
+    celui du rollback de création : il détruisait un NUMÉRO, sans vérifier que la
+    VM portant ce numéro était bien celle qu'OSIRIS venait de créer. Or l'échec le
+    plus banal du `POST /qemu` est précisément « VM déjà existante » — auquel cas
+    le numéro appartient à quelqu'un d'autre, et le nettoyage purgeait la VM d'un
+    tiers, arrêt franc compris (Proxmox refuse de détruire une VM allumée, mais on
+    l'éteint juste avant). Un nom qui ne correspond pas ⇒ on ne touche à rien.
     """
+    if nom_attendu:
+        cfg = await _config_vm(h, node, vm_id)
+        if cfg is None:
+            _hv_log.info("VM %s absente du nœud %s : rien à nettoyer", vm_id, node)
+            return
+        nom_reel = str(cfg.get("name", "")).strip().lower()
+        if nom_reel != nom_attendu.strip().lower():
+            _hv_log.error(
+                "NETTOYAGE REFUSÉ : la VM %s du nœud %s s'appelle « %s » et non "
+                "« %s » — elle n'a pas été créée par ce déploiement, OSIRIS n'y "
+                "touche pas. Cause la plus probable : ce numéro était déjà pris.",
+                vm_id, node, nom_reel or "(sans nom)", nom_attendu)
+            try:
+                with Session(engine) as session:
+                    _log_systeme(session, "vm_destruction_refusee", details={
+                        "vm_id": vm_id, "node": node,
+                        "hypervisor_id": h.id if h else None,
+                        "nom_reel": nom_reel, "nom_attendu": nom_attendu,
+                    })
+                    session.commit()
+            except Exception:
+                _hv_log.exception("Refus de destruction non journalisé (VM %s)", vm_id)
+            return
+
     try:
         await _proxmox_post(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/status/stop")
     except Exception:
@@ -3961,6 +4218,19 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
 
     provider = _provider(h)
 
+    # ── Le gros téléchargement AVANT de réserver un identifiant ────────────────
+    # `_ensure_winpe_iso` dépose 660 Mo sur le nœud, avec 600 s d'attente. Tant
+    # qu'il tournait APRÈS `next_vm_id`, il ouvrait une fenêtre de dix minutes
+    # pendant laquelle le numéro attribué à ce déploiement restait libre du point
+    # de vue de Proxmox : une VM créée à la main entre-temps le prenait, notre
+    # `POST /qemu` échouait sur « already exists », et le rollback purgeait cette
+    # VM-là. On sort donc l'ISO du chemin critique — l'appel est idempotent, celui
+    # de `_provision_vm` le retrouvera déjà en place et rendra la main aussitôt.
+    if body.os == "windows" and body.boot_mode == "pxe" and not body.iso \
+            and (h.type or "proxmox").lower() == "proxmox":
+        storages = await _proxmox_get(h, f"/api2/json/nodes/{body.node}/storage")
+        await _ensure_winpe_iso(h, body.node, storages)
+
     # Identifiant de VM libre côté hyperviseur (0 sur vSphere, qui l'attribue lui-même)
     vm_id = await provider.next_vm_id(h)
 
@@ -4012,6 +4282,16 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
             session.commit()
             session.refresh(machine)
     except Exception as exc:
+        # L'index unique partiel (hypervisor_id, proxmox_vm_id) fait echouer ICI un
+        # second deploiement qui aurait recu le meme numero de `nextid` — donc AVANT
+        # le moindre appel a l'hyperviseur. C'est la reservation qui manquait : deux
+        # creations simultanees se voyaient attribuer le meme identifiant, la
+        # premiere creait la VM, et le rollback de la seconde la purgeait.
+        if _est_conflit_de_reservation(exc):
+            raise HTTPException(status_code=409, detail=(
+                f"L'identifiant de VM {vm_id} est deja reserve par une autre fiche "
+                f"sur cet hyperviseur — un deploiement simultane l'a pris. Relancer "
+                f"la creation : aucune VM n'a ete creee ni modifiee."))
         raise HTTPException(
             status_code=500,
             detail=f"Impossible d'enregistrer la machine dans OSIRIS ({exc}) — "
@@ -4030,10 +4310,16 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
             # sans quoi la machine s'annoncerait sous une MAC inconnue d'OSIRIS.
             vm_id = created.get("vm_id") or vm_id
             real_mac = created.get("mac") or mac_plain
+            # L'UUID que l'hyperviseur vient de generer : c'est desormais L'ANCRE
+            # d'identite de cette VM. Toute action ulterieure la comparera, ce qui
+            # rend impossible d'agir sur une VM ayant herite du meme numero.
+            vm_uuid = created.get("vm_uuid") or ""
             with Session(engine) as session:
                 m = session.exec(select(Machine).where(Machine.mac == mac_plain)).first()
                 if m:
                     m.proxmox_vm_id = vm_id
+                    if vm_uuid:
+                        m.vm_uuid = vm_uuid
                     if real_mac != mac_plain:
                         m.mac = real_mac
                         _log(session, current_user, "update_machine", target_mac=real_mac,
@@ -4042,10 +4328,22 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                     session.add(m)
                     session.commit()
             mac_plain = real_mac
+            if not vm_uuid:
+                _hv_log.warning(
+                    "VM %s creee sans UUID lisible : les verifications d'identite "
+                    "retomberont sur son nom (« %s »)", vm_id, body.hostname)
     except Exception as exc:
         # Échec côté hyperviseur : on détruit ce qui a pu être créé et on retire
         # la fiche, mais la ligne d'audit `create_vm_failed` reste.
-        await provider.destroy_vm(h, body.node, vm_id)
+        #
+        # Sauf si le numéro était déjà pris : là, rien n'a été créé, et « nettoyer »
+        # voudrait dire détruire la VM du tiers. On retire seulement la fiche.
+        #
+        # `nom_attendu` est la seconde couche : ce nettoyage ne doit toucher QUE la
+        # VM de ce déploiement. L'échec le plus banal ici est « VM déjà existante »,
+        # et détruire sur ce seul numéro purgeait alors la VM d'un tiers.
+        if not isinstance(exc, IdentifiantVmOccupe):
+            await provider.destroy_vm(h, body.node, vm_id, nom_attendu=body.hostname)
         _rollback_vm_machine(current_user, body, hv_id, vm_id, mac_plain, exc)
         raise
 
@@ -4081,10 +4379,78 @@ async def _agrandir_disque_si_besoin(h: Hypervisor, node: str, vm_id: int,
                                {"disk": disque, "size": f"{taille_gb}G"})
 
 
+def _est_conflit_de_reservation(exc: Exception) -> bool:
+    """L'écriture a-t-elle buté sur l'index de réservation (hypervisor_id, proxmox_vm_id) ?
+
+    On lit `exc.orig`, le message du pilote, et NON `str(exc)` : ce dernier y
+    ajoute l'ordre SQL complet, où « proxmox_vm_id » figure comme simple nom de
+    colonne. Une banale collision de MAC passait alors pour un conflit de
+    réservation, avec un message qui désignait la mauvaise cause.
+
+    Postgres nomme l'index dans son message, SQLite nomme les colonnes : on
+    accepte les deux formes.
+    """
+    origine = str(getattr(exc, "orig", "") or "")
+    return ("ix_machine_vm_reservation" in origine
+            or ("proxmox_vm_id" in origine and "hypervisor_id" in origine))
+
+
+def _pool_clone(h: Hypervisor) -> dict:
+    """`{"pool": …}` si l'hyperviseur en déclare un, `{}` sinon.
+
+    Ranger les VM d'OSIRIS dans un pool Proxmox est ce qui permet de n'attribuer
+    au jeton que des droits sur `/pool/<pool>` au lieu de `/`. À partir de là, ce
+    n'est plus le code qui garantit qu'OSIRIS ne touche pas aux autres VM : c'est
+    l'hyperviseur qui le REFUSE. Sans pool, le comportement est inchangé.
+    """
+    pool = (getattr(h, "pool", "") or "").strip()
+    return {"pool": pool} if pool else {}
+
+
+def _ajouter_pool(h: Hypervisor, config: dict) -> None:
+    """Ajoute le pool à une configuration de création de VM, s'il y en a un."""
+    config.update(_pool_clone(h))
+
+
+class IdentifiantVmOccupe(HTTPException):
+    """Le numéro visé appartenait déjà à une VM : rien n'a été créé, rien à nettoyer.
+
+    Type distinct et non simple 409 : le chemin d'erreur de `create_vm` enchaîne sur
+    la destruction de « ce qui a pu être créé », ce qui n'a aucun sens ici — et
+    viserait la VM du tiers. Le contrôle de nom de `_destroy_vm_quietly` l'arrêterait
+    aussi, mais faire reposer la sécurité d'une purge sur une seule couche est un
+    pari qu'on ne prend pas.
+    """
+
+
+async def _verifier_identifiant_libre(h: Hypervisor, node: str, vm_id: int) -> None:
+    """
+    Refuse de provisionner sur un identifiant DÉJÀ OCCUPÉ, avant toute écriture.
+
+    `cluster/nextid` ne réserve rien : il constate. Entre sa réponse et la création,
+    n'importe qui peut prendre le numéro depuis l'interface Proxmox. Laisser
+    l'hyperviseur répondre « already exists » suffisait à interrompre le
+    déploiement, mais l'échec partait ensuite dans le chemin de nettoyage — donc
+    vers la destruction de la VM du tiers. On coupe en amont, avec un message qui
+    nomme la vraie cause.
+    """
+    cfg = await _config_vm(h, node, vm_id)
+    if cfg is None:
+        return
+    nom = str(cfg.get("name", "")).strip() or "(sans nom)"
+    raise IdentifiantVmOccupe(status_code=409, detail=(
+        f"L'identifiant {vm_id} est déjà occupé sur le nœud « {node} » par la VM "
+        f"« {nom} » — elle a été créée entre l'attribution du numéro et maintenant. "
+        f"Relancer la création : cette VM n'a été ni modifiée, ni détruite."))
+
+
 async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
                         mac_plain: str, user_data: str = "") -> None:
     """Crée et démarre la VM côté Proxmox (PXE : VM vierge ; cloud-init : clone de template)."""
     import urllib.parse
+
+    # Avant la moindre écriture : ce numéro est-il vraiment libre ?
+    await _verifier_identifiant_libre(h, body.node, vm_id)
 
     if body.boot_mode == "pxe":
         # ── Chemin PXE ──────────────────────────────────────────────────────────
@@ -4151,6 +4517,7 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
                 vm_config["scsi1"] = f"{body.storage}:{body.data_disk_gb}{fmt}"
         if body.iso and "ide2" not in vm_config:
             vm_config["ide2"] = f"{body.iso},media=cdrom"
+        _ajouter_pool(h, vm_config)
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu", vm_config)
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
 
@@ -4161,6 +4528,7 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
         # MAC au premier démarrage et rappelle OSIRIS, qui lui sert son script.
         clone_result = await _proxmox_post(
             h, f"/api2/json/nodes/{body.node}/qemu/{body.template_id}/clone", {
+                **_pool_clone(h),
                 "newid": vm_id, "name": body.hostname, "full": 1, "storage": body.storage,
             })
         upid = clone_result if isinstance(clone_result, str) else str(clone_result)
@@ -4203,6 +4571,7 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
     else:
         # ── Chemin cloud-init (clone de template) ────────────────────────────────
         clone_result = await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{body.template_id}/clone", {
+            **_pool_clone(h),
             "newid":   vm_id,
             "name":    body.hostname,
             "full":    1,            # clone complet (indépendant du template)

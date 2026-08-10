@@ -6,6 +6,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional
 from dotenv import load_dotenv
+from sqlalchemy import Index, text
 from sqlmodel import Field, SQLModel, create_engine, Session
 
 
@@ -140,7 +141,21 @@ class Hypervisor(SQLModel, table=True):
     url: str                               # "https://proxmox.local:8006"
     token_id: str = Field(default="")     # "osiris@pve!osiris-token"
     token_secret: str = Field(default="") # chiffré Fernet
-    tls_verify: bool = Field(default=False)       # False = ignorer cert self-signé (courant en lab)
+    # Verification du certificat TLS. Par defaut ACTIVEE : le jeton porte des droits
+    # de vie et de mort sur les VM, et sur une session non verifiee il suffit de se
+    # placer sur le chemin OSIRIS↔hyperviseur pour le recolter. La desactiver reste
+    # possible (Proxmox s'installe avec un certificat auto-signe) mais c'est un choix
+    # explicite, journalise a chaque appel.
+    tls_verify: bool = Field(default=True)
+    # Pool Proxmox d'accueil des VM creees par OSIRIS. Vide = pas de pool.
+    #
+    # C'est le BORNAGE du rayon d'action : en attribuant le role du jeton sur
+    # `/pool/<ce pool>` plutot que sur `/`, l'hyperviseur refuse lui-meme toute
+    # action sur une VM qu'OSIRIS n'a pas creee. Un bug d'OSIRIS ne peut alors plus
+    # toucher une VM de production, meme en visant le bon numero. Defense en
+    # profondeur : c'est la meme garantie que `vm_uuid`, mais rendue par la
+    # plateforme au lieu du code.
+    pool: str = Field(default="")
     snippets_storage: str = Field(default="")    # nom du stockage Proxmox avec content-type "snippets" (ex: "local")
     # Adresse d'OSIRIS telle que la voient les VM DE CET HYPERVISEUR. Vide = la
     # variable globale OSIRIS_BASE_URL. Indispensable des qu'on deploie sur un
@@ -175,6 +190,23 @@ class Application(SQLModel, table=True):
 
 
 class Machine(SQLModel, table=True):
+    # RESERVATION de l'identifiant de VM : deux fiches ne peuvent pas revendiquer le
+    # meme numero sur le meme hyperviseur. `cluster/nextid` rend le plus petit
+    # identifiant libre SANS le reserver ; deux creations simultanees recevaient donc
+    # le meme numero, la premiere creait la VM, et le rollback de la seconde purgeait
+    # la VM de la premiere. Cet index fait echouer la seconde fiche AVANT le moindre
+    # appel a l'hyperviseur — c'est la reservation qui manquait.
+    # Partiel (`> 0`) : les machines physiques portent toutes `proxmox_vm_id = 0` et
+    # doivent rester aussi nombreuses qu'on veut.
+    __table_args__ = (
+        Index(
+            "ix_machine_vm_reservation", "hypervisor_id", "proxmox_vm_id",
+            unique=True,
+            postgresql_where=text("proxmox_vm_id > 0"),
+            sqlite_where=text("proxmox_vm_id > 0"),
+        ),
+    )
+
     id: Optional[int] = Field(default=None, primary_key=True)
     # MAC PROPRE AU PC : identite permanente, obligatoire. C'est elle qui sert de cle
     # a toute l'API (/machines/{mac}/...) et qui est gravee dans les scripts generes.
@@ -243,6 +275,20 @@ class Machine(SQLModel, table=True):
     hypervisor_id: Optional[int] = Field(default=None, foreign_key="hypervisor.id")
     proxmox_vm_id: int = Field(default=0)   # ID de la VM dans Proxmox (ex: 101), 0 = physique
     proxmox_node: str = Field(default="")   # noeud Proxmox sur lequel tourne la VM
+    # ANCRE D'IDENTITE de la VM : l'UUID SMBIOS que l'hyperviseur lui a genere.
+    #
+    # `proxmox_vm_id` ne suffit PAS a designer une VM dans le temps : `nextid` rend
+    # le plus petit identifiant libre, donc Proxmox RECYCLE les numeros. Une VM
+    # supprimee a la main sans retirer la fiche laisse un numero qui repart au
+    # tourniquet, et la fiche se met alors a designer la VM de quelqu'un d'autre.
+    # Toute action destructrice (purge, rollback de snapshot, retour sur le CD
+    # WinPE = reinstallation) frapperait la mauvaise machine.
+    #
+    # L'UUID, lui, est genere a la creation, unique, et un clone en recoit un neuf.
+    # On le compare avant CHAQUE ecriture : c'est ce qui rend l'identifiant sur
+    # lequel on agit verifiable. Vide sur les fiches anterieures a ce garde-fou et
+    # sur les machines physiques : on retombe alors sur le nom (cf. `_ident_vm`).
+    vm_uuid: str = Field(default="")
     # Numero du deploiement en cours, incremente a chaque repassage en "pending".
     # Sert a regrouper les lignes de DeployLogLine : relancer un deploiement ouvre un
     # nouveau journal sans effacer celui de la tentative precedente.

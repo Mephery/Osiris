@@ -24,12 +24,24 @@ def _make_hypervisor() -> int:
 
 
 def _patch(monkeypatch, captured: dict, *, disque_template_gb: int = 80):
+    # Numeros deja pris sur le faux hyperviseur. Vide au depart : le 150 que rend
+    # `nextid` doit etre vu comme LIBRE, sinon OSIRIS refuse de provisionner —
+    # c'est precisement le controle qui empeche d'ecrire sur la VM d'un tiers.
+    clones: set = set()
+
     async def fake_get(h, path):
         if path.endswith("/cluster/nextid"):
             return "150"
         if path.endswith("/config"):
-            # Config du clone, lue par _agrandir_disque_si_besoin.
-            return {"sata0": f"Lab_CEPH:vm-150-disk-1,size={disque_template_gb}G",
+            vmid = int(path.split("/qemu/")[1].split("/")[0])
+            if vmid not in clones:
+                raise main.HTTPException(status_code=502,
+                                         detail="Proxmox 500: Configuration file does not exist")
+            # Config du clone, lue par _agrandir_disque_si_besoin et par le
+            # controle d'identite (nom + UUID SMBIOS).
+            return {"name": captured.get("nom_attendu", "SRV-CLONE"),
+                    "smbios1": "uuid=00000000-0000-4000-8000-000000000150",
+                    "sata0": f"Lab_CEPH:vm-150-disk-1,size={disque_template_gb}G",
                     "scsi0": f"Lab_CEPH:vm-150-disk-0,size={disque_template_gb}G"}
         return {}
 
@@ -37,6 +49,8 @@ def _patch(monkeypatch, captured: dict, *, disque_template_gb: int = 80):
         if path.endswith("/clone"):
             captured["clone_path"] = path
             captured["clone"] = data
+            clones.add(int(data["newid"]))          # le clone existe desormais
+            captured["nom_attendu"] = data.get("name", "SRV-CLONE")
         if path.endswith("/status/start"):
             captured["started"] = True
         return "UPID:pve:task"

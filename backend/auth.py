@@ -105,6 +105,29 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     return user
 
 
+oauth2_scheme_optionnel = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
+
+
+def get_current_user_optional(
+    token: Optional[str] = Depends(oauth2_scheme_optionnel),
+) -> Optional[User]:
+    """Utilisateur authentifie s'il l'est, None sinon — sans jamais lever 401.
+
+    Pour les routes que les MACHINES appellent, donc sans identifiants par
+    construction, mais dont certaines actions doivent rester reservees aux
+    operateurs. Elle permet de trancher action par action plutot que route par
+    route : cf. `/machines/{mac}/status`, ouvert aux rapports d'une machine
+    (deploying / deployed / failed) mais fermé au `pending` qui, lui, declenche
+    une REINSTALLATION.
+    """
+    if not token:
+        return None
+    try:
+        return get_current_user(token)
+    except HTTPException:
+        return None
+
+
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Reserve aux administrateurs")

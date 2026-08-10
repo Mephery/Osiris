@@ -150,3 +150,23 @@ def limiteur_remis_a_zero():
     import main   # importé ici : conftest règle l'environnement avant que main charge
     main.limiter.reset()
     yield
+
+
+# ── Identité des VM ────────────────────────────────────────────────────────────
+# `proxmox_vm_id` est un entier RECYCLÉ par Proxmox, pas une identité : OSIRIS
+# relit donc `/config` et compare une ancre non recyclable (l'UUID SMBIOS) avant
+# toute écriture sur une VM. Tout faux Proxmox doit savoir répondre à cet appel —
+# sinon l'action est refusée, ce qui est exactement le comportement attendu en
+# production quand la fiche et l'hyperviseur ont divergé.
+
+UUID_VM_TEST = "12345678-1234-1234-1234-1234567890ab"
+
+
+def config_vm_conforme(nom: str = "PC-TEST", uuid_vm: str = UUID_VM_TEST) -> dict:
+    """Config Proxmox d'une VM dont l'identité correspond à la fiche de test."""
+    return {"name": nom, "smbios1": f"uuid={uuid_vm}", "boot": "order=ide2;sata0"}
+
+
+def config_vm_etrangere() -> dict:
+    """Config d'une VM ayant hérité du même numéro : OSIRIS doit refuser d'y toucher."""
+    return {"name": "SRV-PROD-CLIENT", "smbios1": "uuid=99999999-9999-9999-9999-999999999999"}

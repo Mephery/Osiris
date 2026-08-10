@@ -19,7 +19,7 @@ interface InfrastructureTabProps {
 }
 
 export function InfrastructureTab({ token, hypervisors, profiles, organizations, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
-  const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: false, snippets_storage: '', callback_url: '' })
+  const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, pool: '', snippets_storage: '', callback_url: '' })
   const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; error?: string } | null>>({})
   const [hvTesting, setHvTesting]       = useState<Record<number, boolean>>({})
   const [showVmForm, setShowVmForm]     = useState(false)
@@ -38,7 +38,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
       body: JSON.stringify(newHv),
-    }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: false, snippets_storage: '', callback_url: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
+    }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, pool: '', snippets_storage: '', callback_url: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
       .catch(() => toast.error('Erreur création hyperviseur'))
   }
 
@@ -365,6 +365,10 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
           <input required placeholder={newHv.type === 'vsphere' ? 'URL  (https://vcenter.local)' : 'URL  (https://proxmox.local:8006)'} value={newHv.url} onChange={e => setNewHv({ ...newHv, url: e.target.value })} className="osiris-input text-xs font-mono" />
           <input placeholder={newHv.type === 'vsphere' ? 'Compte de service  (osiris@vsphere.local)' : 'Token ID  (osiris@pve!osiris-token)'} value={newHv.token_id} onChange={e => setNewHv({ ...newHv, token_id: e.target.value })} className="osiris-input text-xs font-mono" />
           <input type="password" placeholder={newHv.type === 'vsphere' ? 'Mot de passe du compte' : 'Token secret'} value={newHv.token_secret} onChange={e => setNewHv({ ...newHv, token_secret: e.target.value })} className="osiris-input text-xs font-mono" />
+          {newHv.type === 'proxmox' && <input placeholder="Pool Proxmox d'accueil des VM (ex: osiris) — recommandé"
+            value={newHv.pool} onChange={e => setNewHv({ ...newHv, pool: e.target.value })}
+            className="osiris-input text-xs font-mono col-span-2"
+            title="Ranger les VM d'OSIRIS dans un pool permet de n'attribuer son jeton que sur /pool/<pool> au lieu de /. L'hyperviseur refuse alors lui-meme toute action sur une VM qu'OSIRIS n'a pas creee." />}
           {newHv.type === 'proxmox' && <input placeholder="Stockage snippets cloud-init (ex: local) — optionnel" value={newHv.snippets_storage} onChange={e => setNewHv({ ...newHv, snippets_storage: e.target.value })} className="osiris-input text-xs font-mono col-span-2" title="Nom du stockage Proxmox avec content-type snippets, requis pour cloud-init complet" />}
           <input placeholder="URL d'OSIRIS vue par les VM de cet hyperviseur — vide = URL globale"
             value={newHv.callback_url} onChange={e => setNewHv({ ...newHv, callback_url: e.target.value })}
@@ -374,7 +378,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
         <div className="flex items-center justify-between">
           <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
             <input type="checkbox" checked={newHv.tls_verify} onChange={e => setNewHv({ ...newHv, tls_verify: e.target.checked })} className="accent-blue-500" />
-            Verifier le certificat TLS (decocher si cert self-signe)
+            Verifier le certificat TLS — le decocher expose un jeton qui peut detruire des VM
           </label>
           <button type="submit" className="osiris-btn text-xs px-4">+ Ajouter</button>
         </div>

@@ -62,7 +62,9 @@ def test_les_logs_exigent_une_authentification(client, test_machine):
 
 def test_un_redeploiement_ouvre_un_nouveau_journal(client, test_machine, admin_headers):
     _post(client, MAC, "tentative 1")
-    client.post(f"/machines/{MAC}/status", params={"status": "pending"})
+    # `pending` relance le deploiement (donc efface le disque) : authentifie.
+    client.post(f"/machines/{MAC}/status", params={"status": "pending"},
+                headers=admin_headers)
     _post(client, MAC, "tentative 2")
 
     # Le terminal live ne montre que le déploiement courant.
@@ -103,7 +105,9 @@ def test_le_txt_contient_toutes_les_tentatives(client, test_machine, admin_heade
     """C'est justement après un échec qu'on relance : comparer les deux tentatives
     est le plus utile, donc le téléchargement sert l'historique entier."""
     _post(client, MAC, "tentative 1")
-    client.post(f"/machines/{MAC}/status", params={"status": "pending"})
+    # `pending` relance le deploiement (donc efface le disque) : authentifie.
+    client.post(f"/machines/{MAC}/status", params={"status": "pending"},
+                headers=admin_headers)
     _post(client, MAC, "tentative 2")
 
     corps = client.get(f"/machines/{MAC}/logs.txt", headers=admin_headers).text

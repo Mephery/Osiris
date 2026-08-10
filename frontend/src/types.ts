@@ -173,6 +173,10 @@ export interface Hypervisor {
   token_id: string;
   token_secret: string;
   tls_verify: boolean;
+  /** Pool Proxmox d'accueil des VM créées par OSIRIS. Vide = pas de pool.
+   *  Permet de n'attribuer au jeton que des droits sur `/pool/<pool>` au lieu de `/`,
+   *  et donc de faire refuser par l'hyperviseur toute action sur une VM tierce. */
+  pool: string;
   snippets_storage: string;
   /** URL d'OSIRIS telle que la voient les VM de cet hyperviseur. Vide = URL globale. */
   callback_url: string;

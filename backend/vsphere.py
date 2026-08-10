@@ -384,8 +384,16 @@ class VSphereProvider:
 
 
     @staticmethod
-    async def destroy_vm(h: Hypervisor, node: str, vm_id: Any) -> None:
-        """Suppression best-effort : ne masque jamais l'erreur d'origine."""
+    async def destroy_vm(h: Hypervisor, node: str, vm_id: Any,
+                         nom_attendu: str = "") -> None:
+        """Suppression best-effort : ne masque jamais l'erreur d'origine.
+
+        `nom_attendu` : même garde-fou que côté Proxmox. vCenter ne recycle pas ses
+        moID comme Proxmox recycle ses VMID, donc le risque de viser une VM
+        étrangère y est bien plus faible — mais « plus faible » n'est pas « nul »
+        (restauration, ré-enregistrement d'inventaire), et un `Destroy_Task` ne se
+        rattrape pas. On vérifie donc aussi ici.
+        """
         if not vm_id:
             return
 
@@ -393,6 +401,12 @@ class VSphereProvider:
             si = _connect(h)
             vm = _find_vm(si, int(vm_id))
             if vm is None:
+                return
+            if nom_attendu and (vm.name or "").strip().lower() != nom_attendu.strip().lower():
+                _log.error(
+                    "DESTRUCTION REFUSÉE : la VM %s s'appelle « %s » et non « %s » — "
+                    "elle n'appartient pas à ce déploiement, on n'y touche pas.",
+                    vm_id, vm.name, nom_attendu)
                 return
             try:
                 if vm.runtime.powerState == vim.VirtualMachinePowerState.poweredOn:
@@ -512,7 +526,13 @@ def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
     _grow_system_disk(vm, body.disk_gb)
 
     _wait(vm.PowerOnVM_Task())
-    return {"vm_id": _moid_number(vm), "mac": real_plain}
+    # `vm_uuid` : l'UUID SMBIOS attribué par vCenter, ancre d'identité de la fiche
+    # OSIRIS (cf. `Machine.vm_uuid`). Même rôle que le `smbios1: uuid=…` de Proxmox.
+    return {
+        "vm_id":   _moid_number(vm),
+        "mac":     real_plain,
+        "vm_uuid": (getattr(vm.config, "uuid", "") or "").lower(),
+    }
 
 
 def _grow_system_disk(vm, disk_gb: int) -> None:

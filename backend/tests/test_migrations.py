@@ -136,3 +136,77 @@ def test_upgrade_head_est_rejouable():
     assert _alembic("upgrade", "head").returncode == 0
     res = _alembic("upgrade", "head")
     assert res.returncode == 0, f"second upgrade head en echec :\n{res.stderr}"
+
+
+def test_0027_ajoute_vraiment_ses_objets_sur_une_base_deja_migree():
+    """La 0027 doit fonctionner en ALTER, pas seulement en no-op.
+
+    Piège symétrique de celui de la 0006 : sur une base VIERGE, la 0001 fait un
+    `create_all()` depuis models.py, donc `vm_uuid`, `pool` et l'index de
+    réservation existent déjà quand la 0027 s'exécute — ses `IF NOT EXISTS` la
+    rendent alors muette, et son vrai travail n'est jamais testé. Or en production
+    la base est à la 0026 SANS ces objets : c'est le seul chemin qui compte, et il
+    n'était couvert par rien.
+
+    On le reconstitue : on monte à head, on retire les objets de la 0027, on
+    redescend le marqueur de version, puis on rejoue.
+    """
+    _wipe()
+    assert _alembic("upgrade", "head").returncode == 0
+
+    with _engine().connect() as conn:
+        conn.execute(sa.text("DROP INDEX IF EXISTS ix_machine_vm_reservation"))
+        conn.execute(sa.text("ALTER TABLE machine DROP COLUMN IF EXISTS vm_uuid"))
+        conn.execute(sa.text("ALTER TABLE hypervisor DROP COLUMN IF EXISTS pool"))
+        conn.execute(sa.text("UPDATE alembic_version SET version_num = '0026'"))
+        conn.commit()
+
+    res = _alembic("upgrade", "head")
+    assert res.returncode == 0, f"la 0027 echoue en ALTER :\n{res.stderr}"
+
+    insp = sa.inspect(_engine())
+    assert "vm_uuid" in {c["name"] for c in insp.get_columns("machine")}
+    assert "pool" in {c["name"] for c in insp.get_columns("hypervisor")}
+    index = {i["name"] for i in insp.get_indexes("machine")}
+    assert "ix_machine_vm_reservation" in index
+
+
+def test_la_reservation_didentifiant_de_vm_est_bien_unique_et_partielle():
+    """L'index doit refuser deux VM au même numéro, mais tolérer N machines physiques.
+
+    Sans le `WHERE proxmox_vm_id > 0`, la deuxième machine physique — toutes
+    portent 0 — serait rejetée, et OSIRIS ne saurait plus déployer un poste.
+
+    On insère via les modèles et non en SQL brut : le schéma porte une trentaine de
+    colonnes NOT NULL, qu'un INSERT écrit à la main ne suivrait pas longtemps.
+    """
+    from sqlmodel import Session as SqlmodelSession
+
+    from models import Hypervisor, Machine
+
+    _wipe()
+    assert _alembic("upgrade", "head").returncode == 0
+
+    moteur = _engine()
+    with SqlmodelSession(moteur) as session:
+        hv = Hypervisor(name="pve", type="proxmox", url="https://pve")
+        session.add(hv)
+        session.commit()
+        session.refresh(hv)
+        hv_id = hv.id      # capture DANS la session : `commit` expire l'instance
+
+        # Trois machines physiques : toutes a 0, aucune ne doit gener les autres.
+        for i in range(3):
+            session.add(Machine(mac=f"aabbccdd00{i:02d}", hostname=f"PC-{i}",
+                                client="Acme", os="ubuntu"))
+        session.commit()
+
+        session.add(Machine(mac="aabbccddee01", hostname="SRV-1", client="Acme",
+                            os="ubuntu", hypervisor_id=hv_id, proxmox_vm_id=150))
+        session.commit()
+
+    with SqlmodelSession(moteur) as session:
+        session.add(Machine(mac="aabbccddee02", hostname="SRV-2", client="Acme",
+                            os="ubuntu", hypervisor_id=hv_id, proxmox_vm_id=150))
+        with pytest.raises(sa.exc.IntegrityError):
+            session.commit()

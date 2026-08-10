@@ -38,9 +38,23 @@ def _patch_proxmox(monkeypatch, captured: dict, *, iso_distante: int | None = 40
     `iso_distante` = taille de l'ISO déjà présente sur le nœud (None = absente),
     ce qui permet de rejouer les trois cas : à jour, périmée, manquante.
     """
+    # VM presentes sur le faux hyperviseur, par vmid. Le faux Proxmox doit etre
+    # fidele sur CE point : demander la config d'une VM inexistante est une ERREUR
+    # (« Configuration file does not exist »), pas une config vide. C'est ce qui
+    # permet a OSIRIS de distinguer « ce numero est libre » de « ce numero est pris
+    # par la VM de quelqu'un d'autre » — la distinction dont depend le fait de ne
+    # jamais purger une VM tierce.
+    vms: dict = captured.setdefault("vms", {})
+
     async def fake_get(h, path):
         if path.endswith("/cluster/nextid"):
             return "150"
+        if path.endswith("/config"):
+            vmid = int(path.split("/qemu/")[1].split("/")[0])
+            if vmid not in vms:
+                raise main.HTTPException(status_code=502,
+                                         detail="Proxmox 500: Configuration file does not exist")
+            return vms[vmid]
         if path.endswith("/storage"):
             return [
                 {"storage": "local", "type": "dir", "active": 1,
@@ -57,6 +71,12 @@ def _patch_proxmox(monkeypatch, captured: dict, *, iso_distante: int | None = 40
     async def fake_post(h, path, data=None):
         if path.endswith("/qemu"):
             captured["qemu"] = data
+            # Proxmox genere un UUID SMBIOS a la creation : c'est lui qu'OSIRIS relit
+            # pour ancrer l'identite de la VM dans la fiche.
+            vms[int(data["vmid"])] = {
+                "name": data.get("name", ""),
+                "smbios1": f"uuid=00000000-0000-4000-8000-{int(data['vmid']):012d}",
+            }
         if path.endswith("/download-url"):
             captured["download"] = data
         return "UPID:pve:task"
@@ -278,7 +298,12 @@ def test_la_fiche_est_ecrite_avant_le_moindre_appel_proxmox(client, admin_header
     ordre: list = []
 
     async def fake_get(h, path):
-        return "150" if path.endswith("/cluster/nextid") else {}
+        if path.endswith("/cluster/nextid"):
+            return "150"
+        if path.endswith("/config"):
+            # Numero libre : Proxmox ne connait aucune VM sous cet identifiant.
+            raise main.HTTPException(status_code=502, detail="Proxmox 500: no such VM")
+        return {}
 
     async def fake_post(h, path, data=None):
         with Session(engine) as session:
@@ -306,7 +331,12 @@ def test_echec_hyperviseur_detruit_la_vm_retire_la_fiche_et_laisse_une_trace(
     hv_id = _make_hypervisor()
 
     async def fake_get(h, path):
-        return "150" if path.endswith("/cluster/nextid") else {}
+        if path.endswith("/cluster/nextid"):
+            return "150"
+        if path.endswith("/config"):
+            # Numero libre : Proxmox ne connait aucune VM sous cet identifiant.
+            raise main.HTTPException(status_code=502, detail="Proxmox 500: no such VM")
+        return {}
 
     async def fake_post(h, path, data=None):
         if path.endswith("/status/start"):
@@ -318,8 +348,8 @@ def test_echec_hyperviseur_detruit_la_vm_retire_la_fiche_et_laisse_une_trace(
 
     destroyed: list = []
 
-    async def fake_destroy(h, node, vm_id):
-        destroyed.append(vm_id)
+    async def fake_destroy(h, node, vm_id, nom_attendu=""):
+        destroyed.append((vm_id, nom_attendu))
 
     monkeypatch.setattr(main, "_destroy_vm_quietly", fake_destroy)
 
@@ -332,7 +362,8 @@ def test_echec_hyperviseur_detruit_la_vm_retire_la_fiche_et_laisse_une_trace(
             "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
         })
 
-    assert destroyed == [150], "la VM doit être détruite, pas laissée orpheline"
+    assert destroyed == [(150, "srv-rate")], \
+        "la VM doit être détruite, mais seulement après vérification de son nom"
     with Session(engine) as session:
         assert session.exec(select(Machine).where(Machine.hostname == "srv-rate")).first() is None, \
             "la fiche d'une VM qui n'existe pas doit être retirée"

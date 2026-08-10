@@ -19,6 +19,8 @@ import main
 from models import Hypervisor, Machine, engine
 from sqlmodel import Session, select
 
+from .conftest import UUID_VM_TEST, config_vm_conforme, config_vm_etrangere
+
 MAC = "aabbccddeeff"
 
 
@@ -31,6 +33,7 @@ def _fait_de_la_machine_une_vm(os_machine: str = "windows", type_hv: str = "prox
         session.refresh(h)
         m = session.exec(select(Machine).where(Machine.mac == MAC)).first()
         m.hypervisor_id, m.proxmox_vm_id, m.proxmox_node = h.id, 123, "pve"
+        m.vm_uuid = UUID_VM_TEST   # ancre d'identité, vérifiée avant chaque écriture
         m.os = os_machine
         session.add(m)
         session.commit()
@@ -53,6 +56,8 @@ def _capture_put(monkeypatch, boot_en_attente: bool = False) -> dict:
         if path.endswith("/pending"):
             return [{"key": "boot", "value": "order=ide2;sata0",
                      **({"pending": "order=sata0"} if boot_en_attente else {})}]
+        if path.endswith("/config"):
+            return config_vm_conforme()   # l'identité de la VM est prouvée
         return {}
 
     async def fake_post(h, path, data=None):
@@ -82,12 +87,14 @@ def test_fin_de_deploiement_renvoie_la_vm_sur_son_disque(client, test_machine, m
     assert vu["path"].endswith("/qemu/123/config")
 
 
-def test_redeploiement_ramene_la_vm_sur_le_cd_winpe(client, test_machine, monkeypatch):
+def test_redeploiement_ramene_la_vm_sur_le_cd_winpe(client, test_machine, admin_headers,
+                                                    monkeypatch):
     """Une VM n'a pas de WoL : la renvoyer sur son CD est le seul moyen de la redéployer."""
     _fait_de_la_machine_une_vm()
     vu = _capture_put(monkeypatch)
 
-    assert client.post(f"/machines/{MAC}/status", params={"status": "pending"}).status_code == 200
+    assert client.post(f"/machines/{MAC}/status", params={"status": "pending"},
+                       headers=admin_headers).status_code == 200
 
     assert vu["data"] == {"boot": "order=ide2;sata0"}
 
