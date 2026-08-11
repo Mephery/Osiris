@@ -702,8 +702,20 @@ Quatre pièges à la bascule :
   s'éteindre ou se détruire ;
 - **le bouton « Tester » de l'interface ne prouve rien** de cette bascule : il ne fait
   qu'un `GET /version`, couvert par `PVEAuditor`. Il reste vert même si tout le reste
-  est cassé. Ce qui prouve, c'est `GET /access/permissions?path=/vms/<vmid>` sur une VM
-  hors pool (doit ne rendre aucun droit d'écriture) et un déploiement réel.
+  est cassé.
+
+Pour valider la bascule sans rien casser, le test symétrique : réécrire la
+**description** d'une VM avec **sa valeur actuelle**. L'opération est idempotente — état
+final identique à l'état initial — mais Proxmox contrôle `VM.Config.Options` *avant*
+d'écrire. Refusée, rien n'a été tenté ; acceptée, rien n'a changé. À jouer dans les deux
+sens : une VM **du pool** doit l'accepter, une VM **hors pool** doit la refuser. Ne
+tester qu'un seul côté ne prouve que la moitié.
+
+⚠️ `GET /access/permissions?path=/vms/<vmid>` ne convient que pour le côté « hors
+pool » : cette route ne calcule que les droits liés au chemin et **ignore
+l'appartenance à un pool**, que Proxmox résout au moment du contrôle. Elle annonce donc
+« aucun droit » sur une VM du pool parfaitement accessible. Pour l'appartenance, lire
+`GET /pools/<pool>`.
 
 #### Le contrôle d'identité des VM
 
