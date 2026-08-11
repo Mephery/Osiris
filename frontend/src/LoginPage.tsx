@@ -39,7 +39,7 @@ export function LoginPage({ onLogin, onTotpRequired }: { onLogin: (auth: AuthSta
     <div className="min-h-screen flex items-center justify-center p-4">
       <div className="w-full max-w-sm">
         <div className="flex items-center justify-center gap-3 mb-8">
-          <IcoOsiris cls="w-7 h-7 text-blue-500" />
+          <IcoOsiris cls="w-11 h-8 text-blue-500" />
           <span className="text-2xl font-black tracking-[0.22em] text-white uppercase">Osiris</span>
         </div>
 

@@ -888,7 +888,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-6">
             <div className="osiris-logo-shine flex items-center gap-2.5">
-              <IcoOsiris cls="w-5 h-5 text-blue-500" />
+              <IcoOsiris cls="w-8 h-6 text-blue-500" />
               <span className="text-lg font-black tracking-[0.22em] text-white uppercase select-none">Osiris</span>
             </div>
             <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono text-slate-600 border-l border-slate-800 pl-5">
