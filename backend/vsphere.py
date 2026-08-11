@@ -145,6 +145,37 @@ def _vm_folder(si, template):
     return node.vmFolder if node is not None else template.parent
 
 
+def _datastores(si) -> list[dict]:
+    """
+    Datastores de l'inventaire, dédoublonnés et au même format que les stockages
+    Proxmox — l'interface affiche les deux dans le même tableau.
+
+    `_all` rend chaque datastore UNE fois, quel que soit le nombre d'hôtes qui le
+    montent : contrairement à `cluster/resources` côté Proxmox, il n'y a rien à
+    replier ici. `shared` reflète tout de même le montage multi-hôtes, qui est
+    l'information utile — un datastore local à un hôte ne sert pas à grand-chose
+    pour une VM qu'on voudra pouvoir migrer.
+    """
+    out = []
+    for ds in _all(si, vim.Datastore):
+        s = ds.summary
+        if not getattr(s, "accessible", False):
+            continue
+        total, libre = s.capacity or 0, s.freeSpace or 0
+        out.append({
+            "storage":  ds.name,
+            "node":     "",
+            "type":     s.type,
+            "shared":   len(ds.host) > 1,
+            "online":   True,
+            "total_gb": round(total / 1073741824, 1),
+            "avail_gb": round(libre / 1073741824, 1),
+            "used_pct": round((total - libre) / total * 100, 1) if total else 0.0,
+            "roles":    ["images"],
+        })
+    return sorted(out, key=lambda d: d["storage"])
+
+
 def _cluster_usage(cluster) -> dict:
     """
     Ressources d'un cluster, dans le vocabulaire de l'UI (héritée de Proxmox).
@@ -228,8 +259,14 @@ class VSphereProvider:
                 "type": h.type,
                 "version": about.fullName,
                 "nodes": [_cluster_usage(c) for c in _all(si, vim.ClusterComputeResource)],
+                "storages": _datastores(si),
             }
         return await _run(work)
+
+    @staticmethod
+    async def list_cluster_storages(h: Hypervisor) -> list[dict]:
+        """Datastores du datacenter, avec leur remplissage."""
+        return await _run(lambda: _datastores(_connect(h)))
 
     @staticmethod
     async def list_nodes(h: Hypervisor) -> list[dict]:

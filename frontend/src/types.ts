@@ -201,6 +201,20 @@ export interface ProxmoxNode {
   maxmem_gb: number;
 }
 
+/** Stockage d'un hyperviseur où OSIRIS peut écrire — pool Proxmox ou datastore
+ *  vSphere, ramenés au même format. `node` vide = partagé par tout le cluster. */
+export interface ClusterStorage {
+  storage: string;
+  node: string;
+  type: string;
+  shared: boolean;
+  online: boolean;
+  total_gb: number;
+  avail_gb: number;
+  used_pct: number;
+  roles: string[];
+}
+
 export interface OsImage {
   id: number;
   name: string;

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { useState } from 'react'
 import { toast } from 'sonner'
-import type { Hypervisor, Organization, Profile, ProxmoxNode, ProxmoxTemplate } from './types'
+import type { ClusterStorage, Hypervisor, Organization, Profile, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { IcoX } from './icons'
 
@@ -20,7 +20,7 @@ interface InfrastructureTabProps {
 
 export function InfrastructureTab({ token, hypervisors, profiles, organizations, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
   const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, pool: '', snippets_storage: '', callback_url: '' })
-  const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; error?: string } | null>>({})
+  const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; storages?: ClusterStorage[]; error?: string } | null>>({})
   // Fiche en cours d'édition. Il n'existait AUCUN moyen de modifier un hyperviseur
   // enregistré : ni ici, ni ailleurs dans l'UI. Tout champ ajouté après coup — le
   // pool, la vérification TLS — restait donc hors d'atteinte sur les fiches
@@ -272,6 +272,60 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                             ))}
                           </tbody>
                         </table>
+                      )}
+
+                      {/* ── Stockages ────────────────────────────────────────────
+                          Séparé du tableau des nœuds à dessein : le « maxdisk »
+                          que Proxmox donne par nœud est la RACINE de
+                          l'hyperviseur, pas l'endroit où atterrissent les VM. Un
+                          stockage partagé n'apparaît qu'une fois — quatre lignes
+                          pour un Ceph laisseraient croire à quatre réserves. */}
+                      {result.storages && result.storages.length > 0 && (
+                        <div className="pt-1">
+                          <p className="text-slate-500 mb-1">Stockages utilisables ({result.storages.length})</p>
+                          <table className="w-full text-[10px]">
+                            <thead>
+                              <tr className="text-slate-500">
+                                <th className="text-left pr-4">Stockage</th>
+                                <th className="text-left pr-4">Type</th>
+                                <th className="text-left pr-4">Portée</th>
+                                <th className="text-left pr-4">Usage</th>
+                                <th className="text-right pr-4">Rempli</th>
+                                <th className="text-right">Libre</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {result.storages.map(s => {
+                                // Un stockage plein interdit toute création : on le
+                                // signale AVANT que le déploiement échoue.
+                                const alerte = s.used_pct >= 90 ? 'text-red-400'
+                                             : s.used_pct >= 75 ? 'text-amber-400'
+                                             : 'text-slate-300'
+                                return (
+                                  <tr key={`${s.storage}/${s.node}`} className="text-slate-300">
+                                    <td className="pr-4 font-semibold">
+                                      {s.storage}
+                                      {!s.online && <span className="text-red-400"> (hors ligne)</span>}
+                                    </td>
+                                    <td className="pr-4 text-slate-500">{s.type}</td>
+                                    <td className="pr-4 text-slate-500">{s.shared ? 'cluster' : s.node}</td>
+                                    <td className="pr-4 text-slate-500">
+                                      {s.roles.map(r => r === 'images' ? 'disques' : r === 'iso' ? 'ISO' : r).join(' + ')}
+                                    </td>
+                                    <td className={`text-right pr-4 ${alerte}`}>{s.used_pct}%</td>
+                                    <td className="text-right">
+                                      {s.avail_gb >= 1024
+                                        ? `${(s.avail_gb / 1024).toFixed(1)} To`
+                                        : `${s.avail_gb} Go`} / {s.total_gb >= 1024
+                                        ? `${(s.total_gb / 1024).toFixed(1)} To`
+                                        : `${s.total_gb} Go`}
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
                       )}
                     </>
                   ) : (

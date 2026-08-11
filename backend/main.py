@@ -3896,7 +3896,53 @@ class ProxmoxProvider:
             "version": version.get("version", "?"),
             "proxmox_version": version.get("version", "?"),   # compat UI
             "nodes": await ProxmoxProvider.list_nodes(h),
+            "storages": await ProxmoxProvider.list_cluster_storages(h),
         }
+
+    @staticmethod
+    async def list_cluster_storages(h: Hypervisor) -> list[dict]:
+        """
+        Stockages du cluster où OSIRIS peut écrire, avec leur remplissage.
+
+        Volontairement séparé de `list_nodes` : Proxmox donne bien un `maxdisk`
+        par nœud, mais c'est la RACINE de l'hyperviseur, pas l'endroit où
+        atterrissent les VM. Sur Nova, cette racine annonce 446 Go quand le Ceph
+        qui porte réellement les disques en offre 17 To — l'afficher là tromperait.
+
+        `cluster/resources` répond UNE LIGNE PAR NŒUD, y compris pour un stockage
+        partagé : un Ceph apparaît quatre fois sur un cluster de quatre nœuds. On
+        replie donc les partagés en une seule entrée — quatre lignes laisseraient
+        croire à quatre réserves distinctes là où il n'y en a qu'une.
+
+        Seuls les stockages qui accueillent des disques de VM (`images`) ou l'ISO
+        WinPE (`iso`) sont retenus : un dépôt de sauvegarde n'est pas un endroit
+        où OSIRIS crée quoi que ce soit, et l'y faire figurer noierait le reste.
+        """
+        res = await _proxmox_get(h, "/api2/json/cluster/resources?type=storage")
+        utiles: list[dict] = []
+        vus: set = set()
+        for s in res or []:
+            roles = {r.strip() for r in (s.get("content") or "").split(",")} & {"images", "iso"}
+            if not roles:
+                continue
+            partage = s.get("shared") == 1
+            cle = (s.get("storage"), "" if partage else s.get("node", ""))
+            if cle in vus:
+                continue
+            vus.add(cle)
+            total, utilise = s.get("maxdisk") or 0, s.get("disk") or 0
+            utiles.append({
+                "storage":  s.get("storage", "?"),
+                "node":     "" if partage else s.get("node", ""),
+                "type":     s.get("plugintype", "?"),
+                "shared":   partage,
+                "online":   s.get("status") == "available",
+                "total_gb": round(total / 1073741824, 1),
+                "avail_gb": round((total - utilise) / 1073741824, 1),
+                "used_pct": round(utilise / total * 100, 1) if total else 0.0,
+                "roles":    sorted(roles),
+            })
+        return sorted(utiles, key=lambda d: (d["storage"], d["node"]))
 
     @staticmethod
     async def list_nodes(h: Hypervisor) -> list[dict]:
