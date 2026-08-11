@@ -7,6 +7,8 @@ Il remplace les outils comme MDT/WDS avec une interface web moderne, une API RES
 
 **Philosophie :** brancher un câble RJ45 suffit. La machine PXE-boot, OSIRIS la déploie, configure TeamViewer, installe les apps, joint le domaine, active BitLocker, tout depuis l'interface.
 
+**Le logo** est le scarabée de Khepri, qui pousse un processeur à la place du disque solaire : le renouvellement d'un cycle, soit exactement ce que fait un serveur qui réinstalle une machine. Tracé en `currentColor` (`frontend/public/favicon.svg`), il suit le thème clair ou sombre sans variante à maintenir.
+
 ---
 
 ## Fonctionnalités
