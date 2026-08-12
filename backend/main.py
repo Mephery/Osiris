@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import secrets
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -3441,6 +3442,7 @@ class HypervisorCreate(SQLModel):
     # Verification TLS activee par defaut : le jeton peut detruire des VM, il n'a
     # rien a faire sur une session interceptable (cf. `Hypervisor.tls_verify`).
     tls_verify: bool = True
+    ca_cert: str = ""
     pool: str = ""
     snippets_storage: str = ""
     callback_url: str = ""
@@ -3453,6 +3455,7 @@ class HypervisorPatch(SQLModel):
     token_secret: Optional[str] = None
     type: Optional[str] = None
     tls_verify: Optional[bool] = None
+    ca_cert: Optional[str] = None
     pool: Optional[str] = None
     snippets_storage: Optional[str] = None
     callback_url: Optional[str] = None
@@ -3468,6 +3471,11 @@ def _hypervisor_dict(h: Hypervisor) -> dict:
         "token_id": h.token_id,
         "token_secret": "***" if h.token_secret else "",
         "tls_verify": h.tls_verify,
+        # Le PEM lui-meme n'est pas renvoye : il ne sert a rien a l'affichage, et
+        # trente lignes de base64 ne disent pas si l'on a colle le bon fichier.
+        # `ca_resume` donne l'autorite et sa date d'expiration, qui le disent.
+        "ca_present": bool((h.ca_cert or "").strip()),
+        "ca_resume": _resume_autorite(h.ca_cert),
         "pool": h.pool or "",
         "snippets_storage": h.snippets_storage or "",
         "callback_url": h.callback_url or "",
@@ -3500,6 +3508,110 @@ def _avertir_tls_non_verifie(h: Hypervisor) -> None:
     )
 
 
+def _contexte_ssl(h: Hypervisor):
+    """
+    Comment vérifier l'identité de l'hyperviseur. Trois états, un seul interrupteur.
+
+    `tls_verify` reste le maître d'œuvre — c'est ce qui garde un retour arrière à
+    un clic — et `ca_cert` dit seulement CONTRE QUOI vérifier :
+
+    - `tls_verify` faux                → aucune vérification (et un avertissement)
+    - `tls_verify` vrai, `ca_cert` vide → le magasin système, comme un navigateur
+    - `tls_verify` vrai, `ca_cert` posé → CETTE autorité, et elle seule
+
+    Le troisième cas est celui qui compte : un cluster Proxmox signe ses nœuds avec
+    sa propre autorité, qu'aucun magasin public ne connaît. La lui donner suffit,
+    et la restreindre à cet hyperviseur-là vaut mieux que de l'installer sur tout
+    le système — OSIRIS n'a aucune raison de faire confiance à cette autorité pour
+    joindre autre chose.
+
+    Renvoie ce qu'attend `aiohttp` : `False` pour ne rien vérifier, un contexte
+    sinon.
+    """
+    if not h.tls_verify:
+        _avertir_tls_non_verifie(h)
+        return False
+    pem = (getattr(h, "ca_cert", "") or "").strip()
+    if not pem:
+        return ssl.create_default_context()
+    try:
+        return ssl.create_default_context(cadata=pem)
+    except ssl.SSLError as e:
+        # Un PEM invalide déclencherait sinon la même erreur à chaque appel, avec
+        # un message de bibliothèque que personne ne relie au champ mal collé.
+        raise HTTPException(status_code=502, detail=(
+            f"Le certificat d'autorité de « {h.name} » est illisible ({e}). Recoller "
+            f"le contenu de /etc/pve/pve-root-ca.pem, en-têtes BEGIN/END compris."))
+
+
+def _diagnostic_tls(h: Hypervisor, exc: Exception) -> str:
+    """
+    Message d'échec de connexion, en nommant la cause quand c'est le TLS.
+
+    Les deux causes possibles ont des correctifs OPPOSÉS, et la bibliothèque les
+    présente sous la même exception : autant les séparer ici plutôt que de laisser
+    l'opérateur chercher.
+    """
+    brut = str(exc)
+    if "CERTIFICATE_VERIFY_FAILED" in brut or "certificate verify failed" in brut:
+        if "Hostname mismatch" in brut or "IP address mismatch" in brut:
+            return (f"Certificat refusé par « {h.name} » : il est valide, mais ne couvre "
+                    f"PAS l'adresse utilisée dans l'URL de la fiche. Un certificat vaut "
+                    f"pour les noms et IP qu'il déclare — soit mettre dans l'URL un nom "
+                    f"qu'il couvre (et qu'OSIRIS sache résoudre), soit régénérer le "
+                    f"certificat du nœud pour y inclure cette adresse. Détail : {brut[:180]}")
+        return (f"Certificat de « {h.name} » non validé : l'autorité fournie ne l'a pas "
+                f"signé, ou aucune autorité n'est renseignée. Un cluster Proxmox utilise "
+                f"sa propre autorité — coller /etc/pve/pve-root-ca.pem dans le champ "
+                f"prévu. Détail : {brut[:180]}")
+    return f"Impossible de joindre Proxmox : {exc}"
+
+
+def _resume_autorite(pem: str) -> dict:
+    """
+    De quoi relire un certificat d'autorité collé, sans l'afficher en entier.
+
+    Une zone de texte de trente lignes ne dit pas à l'opérateur s'il a collé le
+    bon fichier ; « PVE Cluster Manager CA, expire en 2034 », si.
+    """
+    pem = (pem or "").strip()
+    if not pem:
+        return {}
+    try:
+        from cryptography import x509
+        c = x509.load_pem_x509_certificate(pem.encode())
+        nom = next((a.value for a in c.subject if a.oid._name in ("organizationName", "commonName")),
+                   "?")
+        return {"autorite": str(nom), "expire_le": c.not_valid_after_utc.date().isoformat()}
+    except Exception as e:
+        return {"erreur": f"certificat illisible ({str(e)[:90]})"}
+
+
+def _valider_autorite(pem: Optional[str]) -> str:
+    """
+    Refuse un certificat d'autorité illisible AU MOMENT DE L'ENREGISTRER.
+
+    Sans ce contrôle, un copier-coller tronqué s'enregistre sans broncher et ne se
+    manifeste qu'au prochain appel à l'hyperviseur — sous la forme d'une erreur de
+    bibliothèque, dans un contexte qui ne rappelle plus qu'on vient de coller un
+    certificat. Autant refuser tout de suite, en désignant le champ fautif.
+
+    Vide est valide : c'est le retour au magasin système.
+    """
+    pem = (pem or "").strip()
+    if not pem:
+        return ""
+    try:
+        from cryptography import x509
+        x509.load_pem_x509_certificate(pem.encode())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=(
+            f"Certificat d'autorité illisible ({str(e)[:120]}). Attendu : le contenu "
+            f"de /etc/pve/pve-root-ca.pem, avec ses lignes « -----BEGIN CERTIFICATE----- » "
+            f"et « -----END CERTIFICATE----- »."))
+    return pem
+
+
 async def _proxmox_request(h: Hypervisor, method: str, path: str, data: dict | None = None) -> dict:
     """Appel HTTP sur l'API Proxmox. Lève HTTPException si échec."""
     import aiohttp
@@ -3508,14 +3620,7 @@ async def _proxmox_request(h: Hypervisor, method: str, path: str, data: dict | N
         raise HTTPException(status_code=502, detail="Token Proxmox non déchiffrable - vérifier FERNET_KEY ou reconfigurer le secret")
     headers = {"Authorization": f"PVEAPIToken={h.token_id}={secret}"}
     url = h.url.rstrip("/") + path
-    connector = aiohttp.TCPConnector(ssl=False) if not h.tls_verify else None
-    if not h.tls_verify:
-        # Ce jeton porte droit de vie et de mort sur les VM. Sur une session non
-        # vérifiée, quiconque se place sur le chemin OSIRIS↔hyperviseur le récolte
-        # et hérite des mêmes pouvoirs. La désactivation reste offerte (Proxmox
-        # s'installe avec un certificat auto-signé) mais elle ne doit pas être
-        # silencieuse : sans trace, personne ne se souvient qu'elle est active.
-        _avertir_tls_non_verifie(h)
+    connector = aiohttp.TCPConnector(ssl=_contexte_ssl(h))
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
             req = getattr(session, method.lower())
@@ -3529,7 +3634,7 @@ async def _proxmox_request(h: Hypervisor, method: str, path: str, data: dict | N
                 body = await resp.json()
                 return body.get("data", body)
     except aiohttp.ClientError as e:
-        raise HTTPException(status_code=502, detail=f"Impossible de joindre Proxmox : {e}")
+        raise HTTPException(status_code=502, detail=_diagnostic_tls(h, e))
 
 
 async def _proxmox_get(h: Hypervisor, path: str) -> dict:
@@ -3698,7 +3803,7 @@ async def _proxmox_upload_snippet(h: Hypervisor, node: str, storage: str, filena
     secret = decrypt(h.token_secret or "")
     headers = {"Authorization": f"PVEAPIToken={h.token_id}={secret}"}
     url = h.url.rstrip("/") + f"/api2/json/nodes/{node}/storage/{storage}/upload"
-    connector = aiohttp.TCPConnector(ssl=False) if not h.tls_verify else None
+    connector = aiohttp.TCPConnector(ssl=_contexte_ssl(h))
     form = aiohttp.FormData()
     form.add_field("content", "snippets")
     form.add_field("filename", filename)
@@ -3828,6 +3933,7 @@ def create_hypervisor(body: HypervisorCreate, current_user: User = Depends(requi
     data = body.model_dump()
     if data.get("token_secret"):
         data["token_secret"] = encrypt(data["token_secret"])
+    data["ca_cert"] = _valider_autorite(data.get("ca_cert"))
     with Session(engine) as session:
         h = Hypervisor(**data)
         session.add(h)
@@ -3844,6 +3950,8 @@ def update_hypervisor(hv_id: int, patch: HypervisorPatch, current_user: User = D
         if not h:
             raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
         data = patch.model_dump(exclude_unset=True)
+        if "ca_cert" in data:
+            data["ca_cert"] = _valider_autorite(data["ca_cert"])
         # `_hypervisor_dict` masque le secret en « *** » : un client qui relit la
         # fiche puis la renvoie telle quelle chiffrerait ces trois étoiles, et OSIRIS
         # perdrait l'accès à l'hyperviseur — panne muette, dont la cause serait

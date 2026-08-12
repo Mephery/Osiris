@@ -173,6 +173,10 @@ export interface Hypervisor {
   token_id: string;
   token_secret: string;
   tls_verify: boolean;
+  /** Une autorité de certification est-elle renseignée pour cet hyperviseur ? */
+  ca_present: boolean;
+  /** De quoi relire l'autorité collée sans afficher tout le PEM. */
+  ca_resume: { autorite?: string; expire_le?: string; erreur?: string };
   /** Pool Proxmox d'accueil des VM créées par OSIRIS. Vide = pas de pool.
    *  Permet de n'attribuer au jeton que des droits sur `/pool/<pool>` au lieu de `/`,
    *  et donc de faire refuser par l'hyperviseur toute action sur une VM tierce. */

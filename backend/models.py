@@ -147,6 +147,20 @@ class Hypervisor(SQLModel, table=True):
     # possible (Proxmox s'installe avec un certificat auto-signe) mais c'est un choix
     # explicite, journalise a chaque appel.
     tls_verify: bool = Field(default=True)
+    # Certificat de l'AUTORITE qui signe celui de l'hyperviseur, au format PEM.
+    #
+    # Un cluster Proxmox cree sa propre autorite a l'installation (« PVE Cluster
+    # Manager CA ») et signe deja un certificat par noeud. Aucun magasin public ne
+    # la connait, d'ou l'echec de la verification et le reflexe de la desactiver.
+    # Coller cette autorite ici suffit a rendre le certificat verifiable : pas de
+    # Let's Encrypt, pas de nom de domaine, pas d'autorite a fabriquer.
+    #
+    # Ce n'est PAS un secret — un certificat d'autorite est public par nature, il
+    # ne sert qu'a verifier des signatures. Il est donc stocke en clair, contrairement
+    # a `token_secret`. Le chiffrer donnerait l'illusion de proteger quelque chose.
+    #
+    # Vide = on s'en remet au magasin systeme (cf. `tls_verify`).
+    ca_cert: str = Field(default="")
     # Pool Proxmox d'accueil des VM creees par OSIRIS. Vide = pas de pool.
     #
     # C'est le BORNAGE du rayon d'action : en attribuant le role du jeton sur

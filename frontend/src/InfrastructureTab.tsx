@@ -19,14 +19,14 @@ interface InfrastructureTabProps {
 }
 
 export function InfrastructureTab({ token, hypervisors, profiles, organizations, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
-  const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, pool: '', snippets_storage: '', callback_url: '' })
+  const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '' })
   const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; storages?: ClusterStorage[]; error?: string } | null>>({})
   // Fiche en cours d'édition. Il n'existait AUCUN moyen de modifier un hyperviseur
   // enregistré : ni ici, ni ailleurs dans l'UI. Tout champ ajouté après coup — le
   // pool, la vérification TLS — restait donc hors d'atteinte sur les fiches
   // existantes, alors que ce sont précisément elles qu'il faut corriger.
   const [editHvId, setEditHvId] = useState<number | null>(null)
-  const [editHv, setEditHv] = useState<Partial<Hypervisor> & { token_secret?: string }>({})
+  const [editHv, setEditHv] = useState<Partial<Hypervisor> & { token_secret?: string; ca_cert?: string }>({})
   const [hvTesting, setHvTesting]       = useState<Record<number, boolean>>({})
   const [showVmForm, setShowVmForm]     = useState(false)
   const [vmHvId, setVmHvId]             = useState<number | ''>('')
@@ -44,7 +44,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
       body: JSON.stringify(newHv),
-    }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, pool: '', snippets_storage: '', callback_url: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
+    }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
       .catch(() => toast.error('Erreur création hyperviseur'))
   }
 
@@ -52,7 +52,9 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
     setEditHvId(h.id)
     // `token_secret` volontairement vide : l'API renvoie « *** », le renvoyer tel
     // quel écraserait le vrai secret par trois étoiles chiffrées. Vide = on n'y touche pas.
-    setEditHv({ name: h.name, url: h.url, token_id: h.token_id, token_secret: '',
+    // `ca_cert` volontairement vide : l'API n'en renvoie qu'un résumé. Vide dans le
+    // formulaire = « ne pas y toucher », comme pour le secret du jeton.
+    setEditHv({ name: h.name, url: h.url, token_id: h.token_id, token_secret: '', ca_cert: '',
                 tls_verify: h.tls_verify, pool: h.pool ?? '',
                 snippets_storage: h.snippets_storage ?? '', callback_url: h.callback_url ?? '' })
   }
@@ -62,6 +64,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
     if (editHvId === null) return
     const body = { ...editHv }
     if (!body.token_secret) delete body.token_secret
+    if (!body.ca_cert) delete body.ca_cert     // vide = on garde l'autorité en place
     fetch(`${API_URL}/hypervisors/${editHvId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
@@ -172,6 +175,15 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                     <span className="text-white font-medium">{h.name}</span>
                     <span className="inline-block border border-blue-800/60 text-blue-400 rounded px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider">{h.type}</span>
                     {!h.tls_verify && <span className="inline-block border border-amber-800/60 text-amber-500 rounded px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider">TLS non verifie</span>}
+                    {h.tls_verify && <span className="inline-block border border-emerald-800/60 text-emerald-400 rounded px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider">TLS verifie</span>}
+                    {h.ca_present && (
+                      <span className="inline-block border border-slate-700 text-slate-400 rounded px-1.5 py-0.5 text-[9px] font-mono tracking-wider"
+                        title="Autorité de certification renseignée pour cet hyperviseur">
+                        CA : {h.ca_resume?.erreur
+                          ? <span className="text-red-400">illisible</span>
+                          : `${h.ca_resume?.autorite ?? '?'} — exp. ${h.ca_resume?.expire_le ?? '?'}`}
+                      </span>
+                    )}
                   </div>
                   <p className="text-[11px] font-mono text-slate-500 mt-0.5 truncate">{h.url}</p>
                   <p className="text-[10px] font-mono text-slate-600">{h.token_id || '—'}</p>
@@ -221,6 +233,17 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                     <input placeholder="URL de rappel — vide = URL globale" value={editHv.callback_url ?? ''}
                       onChange={e => setEditHv({ ...editHv, callback_url: e.target.value })}
                       className="osiris-input text-xs font-mono col-span-2" />
+                    {/* Un cluster Proxmox signe ses noeuds avec SA propre autorite, qu'aucun
+                        magasin public ne connait. La coller ici rend le certificat verifiable,
+                        sans Let's Encrypt ni nom de domaine. Ce n'est pas un secret. */}
+                    <textarea rows={3}
+                      placeholder={h.type === 'vsphere'
+                        ? "Certificat de l'autorité du vCenter (PEM) — vide = magasin système"
+                        : "Certificat de l'autorité : contenu de /etc/pve/pve-root-ca.pem — vide = inchangé"}
+                      value={editHv.ca_cert ?? ''}
+                      onChange={e => setEditHv({ ...editHv, ca_cert: e.target.value })}
+                      className="osiris-input text-[10px] font-mono col-span-2"
+                      title="Coller le PEM complet, lignes BEGIN/END comprises. Un certificat d'autorité est public : ce n'est pas un secret." />
                   </div>
                   <div className="flex items-center justify-between">
                     <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
@@ -233,10 +256,11 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                   </div>
                   {/* Un certificat auto-signe (le defaut de Proxmox) fait echouer TOUS les
                       appels des qu'on coche : le dire ici evite de chercher la panne ailleurs. */}
-                  {!h.tls_verify && editHv.tls_verify && (
+                  {!h.tls_verify && editHv.tls_verify && !h.ca_present && !editHv.ca_cert && (
                     <p className="text-[10px] font-mono text-amber-500">
-                      Ne cocher qu'avec un certificat de confiance installe sur l'hyperviseur —
-                      sinon chaque appel echouera en 502.
+                      Aucune autorité renseignée : la vérification se fera contre le magasin
+                      système, qui ne connaît pas l'autorité d'un cluster Proxmox — chaque appel
+                      échouera en 502. Coller /etc/pve/pve-root-ca.pem ci-dessus.
                     </p>
                   )}
                 </form>

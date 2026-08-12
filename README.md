@@ -741,9 +741,38 @@ c'est volontaire, et il suffit de rétablir le nom ou de recréer la fiche.
 
 La vérification est **activée par défaut**. Le jeton peut détruire des VM : sur une
 session non vérifiée, il suffit de se placer sur le chemin OSIRIS↔hyperviseur pour
-le récolter. La désactiver reste possible — Proxmox s'installe avec un certificat
-auto-signé — mais chaque appel laisse alors un avertissement dans le journal, et la
-fiche porte un badge « TLS non vérifié ».
+le récolter, et le trafic reste chiffré — mais avec l'intercepteur.
+
+Elle échoue pourtant sur une installation neuve, et c'est ce qui pousse à la
+désactiver : **un cluster Proxmox crée sa propre autorité de certification** à son
+installation (« PVE Cluster Manager CA ») et signe déjà un certificat par nœud, mais
+aucun magasin public ne connaît cette autorité.
+
+Il suffit de la déclarer. Le champ **Certificat de l'autorité** de la fiche attend le
+contenu de `/etc/pve/pve-root-ca.pem`, à copier depuis n'importe quel nœud du cluster.
+Ni Let's Encrypt, ni nom de domaine, ni autorité à fabriquer — celle dont on a besoin
+existe déjà.
+
+| `tls_verify` | `ca_cert` | Ce qui se passe |
+|---|---|---|
+| décoché | — | aucune vérification, avertissement au journal, badge « TLS non vérifié » |
+| coché | vide | vérification contre le **magasin système**, qui ignore l'autorité d'un cluster Proxmox — donc échec |
+| coché | renseigné | vérification contre **cette autorité seule**, ce qui est le but |
+
+`tls_verify` reste le maître d'œuvre : décocher ramène à l'état d'avant en un clic,
+sans avoir à effacer l'autorité. Celle-ci n'est **pas un secret** — un certificat
+d'autorité est public par nature — et n'est donc pas chiffrée en base, contrairement
+au jeton.
+
+⚠️ **À copier depuis le nœud**, jamais à faire télécharger par OSIRIS : récupérer
+l'autorité par le canal même qu'on cherche à authentifier ne prouverait rien.
+
+⚠️ Un certificat ne vaut que pour **les noms et les adresses qu'il déclare**. Si
+l'URL de la fiche utilise une adresse absente du certificat du nœud, la vérification
+échoue même avec la bonne autorité — OSIRIS distingue les deux causes dans son
+message, car les correctifs sont opposés : changer l'URL pour un nom couvert (et
+résoluble depuis OSIRIS), ou régénérer le certificat du nœud pour y inclure
+l'adresse.
 
 ### Déployer sur plusieurs réseaux : l'URL de rappel
 

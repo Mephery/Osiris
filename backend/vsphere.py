@@ -46,6 +46,29 @@ _log = logging.getLogger("osiris.vsphere")
 _sessions: dict[int, Any] = {}
 
 
+def _contexte_ssl(h: Hypervisor):
+    """Même politique que côté Proxmox : `tls_verify` décide, `ca_cert` dit contre quoi.
+
+    pyvmomi attend un contexte SSL, ou `None` pour son défaut — on lui en donne
+    toujours un explicite, pour que le comportement se lise ici et pas dans la
+    bibliothèque.
+    """
+    if not h.tls_verify:
+        _log.warning(
+            "vCenter « %s » joint SANS vérification du certificat : les identifiants "
+            "du compte de service circulent sur une session interceptable.", h.name)
+        return ssl._create_unverified_context()
+    pem = (getattr(h, "ca_cert", "") or "").strip()
+    if not pem:
+        return ssl.create_default_context()
+    try:
+        return ssl.create_default_context(cadata=pem)
+    except ssl.SSLError as e:
+        raise HTTPException(status_code=502, detail=(
+            f"Le certificat d'autorité de « {h.name} » est illisible ({e}) — recoller "
+            f"le PEM complet, en-têtes BEGIN/END compris."))
+
+
 def _host(h: Hypervisor) -> str:
     return h.url.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
 
@@ -68,7 +91,7 @@ def _connect(h: Hypervisor):
             detail="Identifiants vCenter absents ou non déchiffrables — renseigner "
                    "le compte de service (ex. osiris@vsphere.local) et son mot de passe",
         )
-    ctx = None if h.tls_verify else ssl._create_unverified_context()
+    ctx = _contexte_ssl(h)
     try:
         si = SmartConnect(host=_host(h), user=user, pwd=password, sslContext=ctx)
     except vim.fault.InvalidLogin:
