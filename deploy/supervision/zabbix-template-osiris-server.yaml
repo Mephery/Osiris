@@ -37,6 +37,9 @@ zabbix_export:
           history: 7d
           trends: '0'
           value_type: TEXT
+          tags:
+            - tag: Application
+              value: OSIRIS
           description: |
             L'API n'ecoute que sur 127.0.0.1 : c'est l'agent qui l'interroge en
             local, le collecteur ne peut pas la sonder lui-meme.
@@ -57,6 +60,9 @@ zabbix_export:
           history: 7d
           trends: '0'
           value_type: CHAR
+          tags:
+            - tag: Application
+              value: OSIRIS
           preprocessing:
             - type: JSONPATH
               parameters:
@@ -76,6 +82,9 @@ zabbix_export:
           history: 7d
           trends: '0'
           value_type: CHAR
+          tags:
+            - tag: Application
+              value: OSIRIS
           preprocessing:
             - type: JSONPATH
               parameters:
@@ -95,6 +104,9 @@ zabbix_export:
           history: 30d
           trends: '0'
           value_type: CHAR
+          tags:
+            - tag: Application
+              value: OSIRIS
           preprocessing:
             - type: JSONPATH
               parameters:
@@ -112,6 +124,9 @@ zabbix_export:
           history: 7d
           trends: '0'
           value_type: CHAR
+          tags:
+            - tag: Application
+              value: OSIRIS
           triggers:
             - uuid: bb9b7b53ac434e3d982131eb16b30136
               expression: 'last(/OSIRIS server/systemd.unit.info["osiris-api.service","ActiveState"])<>"active"'
@@ -125,6 +140,9 @@ zabbix_export:
           history: 7d
           trends: '0'
           value_type: CHAR
+          tags:
+            - tag: Application
+              value: OSIRIS
           description: |
             Worker ARQ : sans lui les telechargements d'ISO restent en file sans
             qu'aucune page d'erreur ne l'indique.
@@ -141,6 +159,9 @@ zabbix_export:
           history: 7d
           trends: '0'
           value_type: CHAR
+          tags:
+            - tag: Application
+              value: OSIRIS
           triggers:
             - uuid: 82ae5b92e99e4e7da3fddd4caefa80ac
               expression: 'last(/OSIRIS server/systemd.unit.info["caddy.service","ActiveState"])<>"active"'
@@ -154,6 +175,9 @@ zabbix_export:
           history: 7d
           trends: '0'
           value_type: CHAR
+          tags:
+            - tag: Application
+              value: OSIRIS
           triggers:
             - uuid: 377f5496ba7e49f1be8f861900225516
               expression: 'last(/OSIRIS server/systemd.unit.info["postgresql@15-main.service","ActiveState"])<>"active"'
@@ -167,6 +191,9 @@ zabbix_export:
           history: 7d
           trends: '0'
           value_type: CHAR
+          tags:
+            - tag: Application
+              value: OSIRIS
           description: |
             DHCP/TFTP du demarrage PXE. Son arret ne se voit pas sur l'interface
             web : il se voit au poste qui ne demarre plus.
