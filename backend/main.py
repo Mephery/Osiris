@@ -3579,10 +3579,21 @@ def _resume_autorite(pem: str) -> dict:
         return {}
     try:
         from cryptography import x509
+        from cryptography.x509.oid import NameOID
         c = x509.load_pem_x509_certificate(pem.encode())
-        nom = next((a.value for a in c.subject if a.oid._name in ("organizationName", "commonName")),
-                   "?")
-        return {"autorite": str(nom), "expire_le": c.not_valid_after_utc.date().isoformat()}
+
+        # L'ORGANISATION d'abord, le nom commun en repli. Un cluster Proxmox se
+        # présente avec « CN = Proxmox Virtual Environment » et
+        # « O = PVE Cluster Manager CA » : le premier est générique et identique
+        # sur tous les clusters du monde, le second dit ce que le badge doit
+        # répondre — « à qui est cette autorité ». Prendre le premier champ venu
+        # affichait donc le moins informatif des deux.
+        def champ(oid):
+            v = c.subject.get_attributes_for_oid(oid)
+            return str(v[0].value) if v else ""
+
+        nom = champ(NameOID.ORGANIZATION_NAME) or champ(NameOID.COMMON_NAME) or "?"
+        return {"autorite": nom, "expire_le": c.not_valid_after_utc.date().isoformat()}
     except Exception as e:
         return {"erreur": f"certificat illisible ({str(e)[:90]})"}
 

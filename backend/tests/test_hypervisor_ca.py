@@ -35,6 +35,24 @@ nBCf
 -----END CERTIFICATE-----"""
 
 
+# Autorité au SUJET exactement conforme à celui d'un cluster Proxmox :
+# « CN = Proxmox Virtual Environment », « OU = <uuid> », « O = PVE Cluster Manager CA ».
+# C'est cette forme-là qui décide de ce que le badge affiche.
+CA_PVE = """-----BEGIN CERTIFICATE-----
+MIICAjCCAaegAwIBAgIUAU9ufoLKQbG1fjx1pCCXmjOvaA8wCgYIKoZIzj0EAwIw
+djEkMCIGA1UEAwwbUHJveG1veCBWaXJ0dWFsIEVudmlyb25tZW50MS0wKwYDVQQL
+DCQwMDAwMDAwMC0xMTExLTIyMjItMzMzMy00NDQ0NDQ0NDQ0NDQxHzAdBgNVBAoM
+FlBWRSBDbHVzdGVyIE1hbmFnZXIgQ0EwHhcNMjYwODEyMDAwMDAwWhcNMzYwODEy
+MDAwMDAwWjB2MSQwIgYDVQQDDBtQcm94bW94IFZpcnR1YWwgRW52aXJvbm1lbnQx
+LTArBgNVBAsMJDAwMDAwMDAwLTExMTEtMjIyMi0zMzMzLTQ0NDQ0NDQ0NDQ0NDEf
+MB0GA1UECgwWUFZFIENsdXN0ZXIgTWFuYWdlciBDQTBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABCcpZ35prRWqBBQzyRaNUcan4HvNA1S0mvbKkPl3esUSvbnCu/h+
+sHbrN6dsi6pxxJ97mbS46N98Gd8yBafN3OijEzARMA8GA1UdEwEB/wQFMAMBAf8w
+CgYIKoZIzj0EAwIDSQAwRgIhAKURDNfP+qLLvsvLcmAqM2Rcturct2GMCd9BHXfS
+Fh9WAiEA5nzmp3qYYPFyLA3i3ezDVnr/ziKIhkxrg52fsY8eRmI=
+-----END CERTIFICATE-----"""
+
+
 def _hv(**o) -> Hypervisor:
     base = dict(name="pve", type="proxmox", url="https://pve.test:8006",
                 token_id="osiris@pve!osiris", token_secret="")
@@ -168,3 +186,21 @@ def test_le_resume_signale_un_certificat_illisible():
     r = main._resume_autorite("pas un certificat")
 
     assert "erreur" in r and "illisible" in r["erreur"]
+
+
+def test_le_resume_nomme_l_autorite_et_non_le_nom_generique():
+    """Un cluster Proxmox se présente avec « CN = Proxmox Virtual Environment »,
+    identique sur tous les clusters du monde, et « O = PVE Cluster Manager CA »,
+    qui est le seul des deux à répondre « à qui est cette autorité ». Prendre le
+    premier champ venu affichait le moins informatif."""
+    r = main._resume_autorite(CA_PVE)
+
+    assert r["autorite"] == "PVE Cluster Manager CA"
+    assert r["expire_le"].startswith("2036")
+
+
+def test_le_resume_retombe_sur_le_nom_commun_sans_organisation():
+    """Toutes les autorités ne déclarent pas d'organisation."""
+    r = main._resume_autorite(CA_PEM)
+
+    assert r["autorite"] == "PVE Cluster Test CA"
