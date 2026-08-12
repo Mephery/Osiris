@@ -1,0 +1,171 @@
+# Modele Zabbix pour le serveur OSIRIS lui-meme (pas les machines qu'il deploie).
+# Format d'export Zabbix 6.0. A importer via Data collection > Templates > Import.
+#
+# Tous les items sont en ZABBIX_ACTIVE : depuis le VLAN du serveur, seul le TCP
+# 10051 sortant est ouvert. Un item passif resterait indefiniment en "unsupported"
+# — le collecteur ne peut pas joindre le port 10050.
+#
+# A completer par "Linux by Zabbix agent active" pour le socle (CPU, RAM, disques,
+# reseau) : ce modele-ci n'ajoute que ce qui est propre a OSIRIS.
+zabbix_export:
+  version: '6.0'
+  groups:
+    - uuid: b3f56df7c13a4468a220beb652fa54f3
+      name: Templates/Applications
+  templates:
+    - uuid: 4794b4bec4404a46b598e43c6facb546
+      template: 'OSIRIS server'
+      name: 'OSIRIS server'
+      description: |
+        Sante applicative du serveur OSIRIS : endpoint /health et unites systemd.
+        Requiert zabbix-agent2 (plugin systemd) et le UserParameter osiris.health
+        livre dans deploy/supervision/zabbix-agent2-osiris.conf.
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: abf2a81915b14055a9857a795cc92938
+          name: 'OSIRIS: /health (brut)'
+          type: ZABBIX_ACTIVE
+          key: osiris.health
+          delay: 1m
+          history: 7d
+          trends: '0'
+          value_type: TEXT
+          description: |
+            L'API n'ecoute que sur 127.0.0.1 : c'est l'agent qui l'interroge en
+            local, le collecteur ne peut pas la sonder lui-meme.
+          triggers:
+            - uuid: ce132b54a4c54d9fb246767c71713b8f
+              expression: 'nodata(/OSIRIS server/osiris.health,10m)=1'
+              name: 'OSIRIS: aucune donnee depuis 10 min (agent muet ou flux 10051 coupe)'
+              priority: WARNING
+              description: |
+                En mode actif, l'absence de donnee ne distingue pas un agent
+                arrete d'un pare-feu ferme : les deux se voient d'ici, aucun des
+                deux ne se voit depuis la machine.
+        - uuid: e9d39f333fd14e46b0d7707ca683eb74
+          name: 'OSIRIS: statut API'
+          type: DEPENDENT
+          key: osiris.health.status
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.status
+          master_item:
+            key: osiris.health
+          triggers:
+            - uuid: 64fd73d35a4a4db68de3763eacdbc497
+              expression: 'last(/OSIRIS server/osiris.health.status)<>"ok"'
+              name: 'OSIRIS: API en echec (status={ITEM.VALUE})'
+              priority: HIGH
+        - uuid: 8a2d4b42b100482bb52ea3eb2224afa3
+          name: 'OSIRIS: statut base de donnees'
+          type: DEPENDENT
+          key: osiris.health.db
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.db
+          master_item:
+            key: osiris.health
+          triggers:
+            - uuid: f570bcba75e945b5873fa51024d321d3
+              expression: 'last(/OSIRIS server/osiris.health.db)<>"ok"'
+              name: 'OSIRIS: base de donnees injoignable (db={ITEM.VALUE})'
+              priority: HIGH
+        - uuid: 3eeb27fd9f964ebbabba81caf251bd1b
+          name: 'OSIRIS: version deployee'
+          type: DEPENDENT
+          key: osiris.health.version
+          delay: '0'
+          history: 30d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.version
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: osiris.health
+        - uuid: 1b6780d1ba0f41ca8157b2b1f5febb85
+          name: 'OSIRIS: unite osiris-api'
+          type: ZABBIX_ACTIVE
+          key: 'systemd.unit.info["osiris-api.service","ActiveState"]'
+          delay: 1m
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          triggers:
+            - uuid: bb9b7b53ac434e3d982131eb16b30136
+              expression: 'last(/OSIRIS server/systemd.unit.info["osiris-api.service","ActiveState"])<>"active"'
+              name: 'OSIRIS: osiris-api n''est pas active ({ITEM.VALUE})'
+              priority: HIGH
+        - uuid: d6d9e0ffcf094b2eb30658fd42643896
+          name: 'OSIRIS: unite osiris-worker'
+          type: ZABBIX_ACTIVE
+          key: 'systemd.unit.info["osiris-worker.service","ActiveState"]'
+          delay: 1m
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          description: |
+            Worker ARQ : sans lui les telechargements d'ISO restent en file sans
+            qu'aucune page d'erreur ne l'indique.
+          triggers:
+            - uuid: bc58218a88724f1baa19188f48b5ddf6
+              expression: 'last(/OSIRIS server/systemd.unit.info["osiris-worker.service","ActiveState"])<>"active"'
+              name: 'OSIRIS: osiris-worker n''est pas active ({ITEM.VALUE})'
+              priority: AVERAGE
+        - uuid: 71afec7f982549599c01b1fbbf3fedf4
+          name: 'OSIRIS: unite caddy'
+          type: ZABBIX_ACTIVE
+          key: 'systemd.unit.info["caddy.service","ActiveState"]'
+          delay: 1m
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          triggers:
+            - uuid: 82ae5b92e99e4e7da3fddd4caefa80ac
+              expression: 'last(/OSIRIS server/systemd.unit.info["caddy.service","ActiveState"])<>"active"'
+              name: 'OSIRIS: caddy n''est pas active ({ITEM.VALUE})'
+              priority: HIGH
+        - uuid: 1322cdbff5da4834b316c8dc5e87e88f
+          name: 'OSIRIS: unite postgresql@15-main'
+          type: ZABBIX_ACTIVE
+          key: 'systemd.unit.info["postgresql@15-main.service","ActiveState"]'
+          delay: 1m
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          triggers:
+            - uuid: 377f5496ba7e49f1be8f861900225516
+              expression: 'last(/OSIRIS server/systemd.unit.info["postgresql@15-main.service","ActiveState"])<>"active"'
+              name: 'OSIRIS: postgresql@15-main n''est pas active ({ITEM.VALUE})'
+              priority: HIGH
+        - uuid: d358c1fa838744e4a5ba9c39bd8295ee
+          name: 'OSIRIS: unite dnsmasq'
+          type: ZABBIX_ACTIVE
+          key: 'systemd.unit.info["dnsmasq.service","ActiveState"]'
+          delay: 1m
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          description: |
+            DHCP/TFTP du demarrage PXE. Son arret ne se voit pas sur l'interface
+            web : il se voit au poste qui ne demarre plus.
+          triggers:
+            - uuid: 5f1d0b6c7a8e4c2d9b3a1e6f4d8c7b20
+              expression: 'last(/OSIRIS server/systemd.unit.info["dnsmasq.service","ActiveState"])<>"active"'
+              name: 'OSIRIS: dnsmasq n''est pas active — plus de demarrage PXE ({ITEM.VALUE})'
+              priority: HIGH

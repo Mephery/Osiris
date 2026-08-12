@@ -1,0 +1,22 @@
+# Supervision du serveur OSIRIS lui-meme (pas une machine deployee par OSIRIS).
+# A copier en /etc/zabbix/zabbix_agent2.d/osiris.conf apres avoir renseigne les
+# valeurs entre chevrons.
+#
+# Fichier a part : une mise a jour du paquet zabbix-agent2 reecrit
+# zabbix_agent2.conf, jamais zabbix_agent2.d/. Il est lu apres lui (directive
+# Include), donc ses valeurs gagnent.
+
+Server=<adresse du collecteur>
+ServerActive=<adresse du collecteur>
+Hostname=<nom d'hote du serveur>
+
+# Auto-enregistrement : cote Zabbix, une action filtrant sur "osiris-server"
+# cree l'hote seule. Volontairement different du "osiris linux" des machines
+# deployees : ce serveur n'est pas du betail, il ne doit heriter ni du groupe
+# ni du modele des postes clients.
+HostMetadata=osiris-server debian <slug de l'organisation>
+
+# Sante applicative : renvoie le JSON de /health ({"status","db","version"}).
+# L'API n'ecoute que sur la loopback — c'est donc l'agent qui l'interroge en
+# local, le collecteur ne peut pas la sonder lui-meme.
+UserParameter=osiris.health,curl -s -m 5 http://127.0.0.1:8000/health || echo '{"status":"unreachable","db":"unknown","version":""}'

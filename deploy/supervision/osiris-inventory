@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Inventaire logiciel de la machine OSIRIS, en JSON, pour un scanner de CVE.
+
+Un scan qui ne lit que dpkg rate plusieurs centaines de paquets : les
+dependances Python du backend vivent dans un venv, celles du frontend dans
+node_modules. Ni l'un ni l'autre n'est connu de dpkg — donc ni l'un ni l'autre
+n'est confronte aux CVE si personne ne les expose.
+
+Chaque paquet porte son ecosysteme **au sens OSV** (`PyPI`, `npm`), sauf ceux de
+la distribution qui n'en portent pas : leur ecosysteme se deduit de l'hote, et
+les omettre garde le format compatible avec les collectes existantes. Ce champ
+n'est pas decoratif — sans lui, un consommateur qui determine l'ecosysteme par
+hote interroge « fastapi » ou « vite » dans le catalogue Debian, ne matche rien,
+et conclut a l'absence de vulnerabilite. Une sous-declaration muette est pire
+qu'une absence de donnee : elle a l'air d'un succes.
+
+Strictement en lecture, aucun privilege requis : lance via SSH par le compte de
+service du scanner, sans sudo.
+
+    osiris-inventory            # JSON complet
+    osiris-inventory --source pip
+"""
+
+import argparse
+import json
+import os
+import platform
+import subprocess
+from datetime import datetime, timezone
+
+VENV = "/opt/osiris/backend/venv"
+PACKAGE_LOCK = "/opt/osiris/frontend/package-lock.json"
+
+# Noms d'ecosysteme OSV (https://ossf.github.io/osv-schema/#affectedpackage-field).
+ECOSYSTEM_PYPI = "PyPI"
+ECOSYSTEM_NPM = "npm"
+
+
+def _run(cmd):
+    """Sortie d'une commande, ou None si elle echoue — l'inventaire ne doit
+    jamais planter parce qu'une seule de ses sources manque."""
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def dpkg_packages():
+    """Paquets de la distribution. Volontairement **sans** champ `ecosystem` :
+    c'est celui de l'hote (Debian:12 ici), et l'omettre garde la sortie
+    identique a ce qu'elle etait avant l'ajout du champ."""
+    out = _run(["dpkg-query", "-W", "-f", "${binary:Package} ${Version} ${Status}\n"])
+    if not out:
+        return []
+    packages = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        # Un paquet desinstalle mais non purge reste liste : sa config traine,
+        # pas son code. Il n'a rien a faire dans une surface d'attaque.
+        if len(parts) == 3 and parts[2].startswith("install ok installed"):
+            packages.append({"name": parts[0], "version": parts[1]})
+    return packages
+
+
+def pip_packages():
+    pip = os.path.join(VENV, "bin", "pip")
+    if not os.path.exists(pip):
+        return []
+    out = _run([pip, "list", "--format=json", "--disable-pip-version-check"])
+    if not out:
+        return []
+    try:
+        listed = json.loads(out)
+    except ValueError:
+        return []
+    return [{"name": p["name"], "version": p["version"],
+             "ecosystem": ECOSYSTEM_PYPI, "venv": VENV} for p in listed]
+
+
+def npm_packages():
+    """Lu dans package-lock.json : c'est l'etat resolu, versions exactes
+    comprises, sans avoir a lancer npm ni a joindre le reseau."""
+    try:
+        with open(PACKAGE_LOCK, encoding="utf-8") as handle:
+            lock = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    packages = []
+    for path, meta in lock.get("packages", {}).items():
+        if not path or meta.get("link"):
+            continue  # "" = le projet lui-meme ; un lien pointe ailleurs
+        name = meta.get("name") or path.split("node_modules/")[-1]
+        version = meta.get("version")
+        if version:
+            packages.append({"name": name, "version": version,
+                             "ecosystem": ECOSYSTEM_NPM,
+                             "dev": bool(meta.get("dev"))})
+    return packages
+
+
+def system_facts():
+    facts = {
+        "hostname": platform.node(),
+        "kernel": platform.release(),
+        "architecture": platform.machine(),
+    }
+    try:
+        with open("/etc/os-release", encoding="utf-8") as handle:
+            for line in handle:
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    if key in ("ID", "VERSION_ID", "PRETTY_NAME"):
+                        facts[key.lower()] = value.strip().strip('"')
+    except OSError:
+        pass
+    return facts
+
+
+SOURCES = {"dpkg": dpkg_packages, "pip": pip_packages, "npm": npm_packages}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", choices=sorted(SOURCES), action="append",
+                        help="limiter a une source (repetable ; defaut : toutes)")
+    parser.add_argument("--pretty", action="store_true", help="JSON indente")
+    args = parser.parse_args()
+
+    wanted = args.source or sorted(SOURCES)
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "system": system_facts(),
+        "packages": {source: SOURCES[source]() for source in wanted},
+    }
+    report["counts"] = {s: len(p) for s, p in report["packages"].items()}
+    # Recapitulatif des ecosystemes presents : permet au consommateur de
+    # detecter qu'il recoit un ecosysteme qu'il ne sait pas encore traiter,
+    # plutot que de l'ecraser silencieusement avec celui de la distribution.
+    ecosystems = sorted({p["ecosystem"] for packages in report["packages"].values()
+                         for p in packages if "ecosystem" in p})
+    report["ecosystems"] = ecosystems
+    print(json.dumps(report, indent=2 if args.pretty else None, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
