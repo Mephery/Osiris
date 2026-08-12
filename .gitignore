@@ -7,6 +7,10 @@
 *.env
 .env.*
 frontend/.env.*
+# ...sauf les modèles sans valeurs, que `.env.*` excluait jusqu'ici — et que le
+# README demande pourtant de copier à la première étape de l'installation.
+!.env.example
+!frontend/.env.example
 *_backup.sql
 *.dump
 backend/backups/

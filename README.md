@@ -116,7 +116,8 @@ git clone https://github.com/Mephery/Osiris.git
 cd osiris
 
 cp .env.example .env
-# Éditer .env : DB_PASSWORD, JWT_SECRET, ADMIN_PASSWORD, OSIRIS_BASE_URL, OSIRIS_IP...
+chmod 640 .env   # sinon 644 : la clé Fernet et les mots de passe sont lisibles par tous
+# Éditer .env : DB_PASSWORD, JWT_SECRET, FERNET_KEY, ADMIN_PASSWORD, OSIRIS_BASE_URL...
 
 # Compiler le frontend (nécessite Node.js 22+)
 chmod +x build.sh && ./build.sh
@@ -153,7 +154,8 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env
+cp ../.env.example .env
+chmod 640 .env   # sinon 644 : la clé Fernet et les mots de passe sont lisibles par tous
 # Éditer .env avec vos valeurs
 
 # Appliquer les migrations de schéma
