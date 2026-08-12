@@ -1,12 +1,18 @@
 # Modele Zabbix pour le serveur OSIRIS lui-meme (pas les machines qu'il deploie).
-# Format d'export Zabbix 6.0. A importer via Data collection > Templates > Import.
+# Format d'export Zabbix 6.0. A importer via Configuration > Templates > Import
+# (menu renomme "Data collection" a partir de la 6.4).
+#
+# Le nom et le groupe suivent la convention de nommage de l'installation cible :
+# a realigner si la votre differe, en n'oubliant pas les
+# references /OSIRIS server/ dans les expressions des declencheurs.
 #
 # Tous les items sont en ZABBIX_ACTIVE : depuis le VLAN du serveur, seul le TCP
 # 10051 sortant est ouvert. Un item passif resterait indefiniment en "unsupported"
 # — le collecteur ne peut pas joindre le port 10050.
 #
-# A completer par "Linux by Zabbix agent active" pour le socle (CPU, RAM, disques,
-# reseau) : ce modele-ci n'ajoute que ce qui est propre a OSIRIS.
+# A completer par le modele Linux **actif** de votre installation (chez Zabbix 6.0 :
+# "Template OS Linux by Zabbix agent active") pour le socle CPU, RAM, disques,
+# reseau : ce modele-ci n'ajoute que ce qui est propre a OSIRIS.
 zabbix_export:
   version: '6.0'
   groups:
@@ -19,7 +25,7 @@ zabbix_export:
       description: |
         Sante applicative du serveur OSIRIS : endpoint /health et unites systemd.
         Requiert zabbix-agent2 (plugin systemd) et le UserParameter osiris.health
-        livre dans deploy/supervision/zabbix-agent2-osiris.conf.
+        livre dans deploy/supervision/zabbix-agent2-osiris.conf.example.
       groups:
         - name: Templates/Applications
       items:

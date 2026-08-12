@@ -46,8 +46,11 @@ sortant passe et que le collecteur répond.
 `zabbix-template-osiris-server.yaml` — export **6.0**, à importer via
 *Configuration > Templates > Import* (le menu s'appelle *Data collection* à
 partir de la 6.4). Il n'ajoute que ce qui est propre à
-OSIRIS ; le socle (CPU, RAM, disques, réseau) reste à
-`Linux by Zabbix agent active`, à attacher en plus.
+OSIRIS ; le socle (CPU, RAM, disques, réseau) reste au modèle Linux de la
+distribution Zabbix, à attacher en plus — dans sa variante **active**, la
+passive ne recevrait jamais rien. Son nom dépend de l'âge de l'installation :
+`Template OS Linux by Zabbix agent active` en nomenclature 6.0,
+`Linux by Zabbix agent active` en nomenclature moderne.
 
 Neuf items : `/health` et ses trois champs dérivés, plus l'état des unités
 `osiris-api`, `osiris-worker`, `caddy`, `postgresql@15-main` et `dnsmasq`.
