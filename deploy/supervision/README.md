@@ -44,7 +44,8 @@ sortant passe et que le collecteur répond.
 ## 2. Modèle Zabbix
 
 `zabbix-template-osiris-server.yaml` — export **6.0**, à importer via
-*Data collection > Templates > Import*. Il n'ajoute que ce qui est propre à
+*Configuration > Templates > Import* (le menu s'appelle *Data collection* à
+partir de la 6.4). Il n'ajoute que ce qui est propre à
 OSIRIS ; le socle (CPU, RAM, disques, réseau) reste à
 `Linux by Zabbix agent active`, à attacher en plus.
 
