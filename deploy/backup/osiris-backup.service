@@ -1,0 +1,14 @@
+[Unit]
+Description=Sauvegarde OSIRIS (base, secrets, configuration, état du dépôt)
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/osiris-backup.sh
+# Tourne en root : lecture de backend/.env (640) et des fichiers de /etc.
+User=root
+# Une sauvegarde qui sature le disque qu'elle protège est pire qu'une absence
+# de sauvegarde : on la laisse s'effacer devant le service qu'elle assure.
+IOSchedulingClass=idle
+Nice=10

@@ -1,0 +1,14 @@
+[Unit]
+Description=Sauvegarde OSIRIS quotidienne
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+# Décale le déclenchement pour ne pas tomber pile en même temps que les autres
+# tâches nocturnes de l'infrastructure.
+RandomizedDelaySec=900
+# Rattrape la sauvegarde si la machine était éteinte à l'heure dite : sans cela,
+# une VM arrêtée une nuit perd sa sauvegarde sans que rien ne le signale.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
