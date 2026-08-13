@@ -96,6 +96,31 @@ zabbix_export:
               expression: 'last(/OSIRIS server/osiris.health.db)<>"ok"'
               name: 'OSIRIS: base de donnees injoignable (db={ITEM.VALUE})'
               priority: HIGH
+        - uuid: 7d2b4f8a1c6e49d38b5a0f7c2e91d4b6
+          name: 'OSIRIS: fraicheur de l''ISO WinPE'
+          type: DEPENDENT
+          key: osiris.health.winpe
+          delay: '0'
+          history: 30d
+          trends: '0'
+          value_type: CHAR
+          tags:
+            - tag: Application
+              value: OSIRIS
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.winpe
+          master_item:
+            key: osiris.health
+          description: |
+            Rien ne regenere l'ISO quand boot.wim change. Une ISO plus ancienne
+            deploierait l'ancien WinPE sans aucune erreur visible.
+          triggers:
+            - uuid: 2e8c5b17a9f3468d81b6c04e7a2f9d53
+              expression: 'last(/OSIRIS server/osiris.health.winpe)<>"ok"'
+              name: 'OSIRIS: ISO WinPE a reconstruire ({ITEM.VALUE})'
+              priority: AVERAGE
         - uuid: 3eeb27fd9f964ebbabba81caf251bd1b
           name: 'OSIRIS: version deployee'
           type: DEPENDENT

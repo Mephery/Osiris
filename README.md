@@ -521,8 +521,14 @@ https://osiris.local/docs
 
 ```bash
 curl https://osiris.local/health
-# {"status": "ok", "db": "ok", "version": "1.0.0"}
+# {"status": "ok", "db": "ok", "version": "1.0.0", "winpe": "ok"}
 ```
+
+`winpe` vaut `ok`, `absente` ou **`perimee`** — ce dernier cas signalant une ISO
+WinPE plus ancienne que le `boot.wim` qu'elle est censée contenir. Il est à part
+de `status` volontairement : le service fonctionne, mais il déploierait un ancien
+WinPE. Un déploiement de VM Windows est refusé tant que l'ISO n'est pas
+reconstruite, plutôt que de réussir en silence avec la mauvaise image.
 
 Utile pour les sondes de monitoring (Zabbix, Uptime Kuma, Grafana, healthcheck Docker).
 

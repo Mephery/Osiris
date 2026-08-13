@@ -17,7 +17,22 @@ from sqlmodel import Session, select
 from models import ApiKey, User, engine
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-SECRET_KEY      = os.environ.get("JWT_SECRET", "changeme-generate-a-real-secret")
+# Cette clé signe les jetons de session : qui la connaît peut en forger un, donc
+# se faire passer pour un administrateur. Elle n'a pas de valeur de repli, et
+# c'est délibéré — un défaut silencieux serait une valeur *publique*, puisque le
+# code est ouvert. Mieux vaut un démarrage qui échoue qu'une authentification qui
+# n'authentifie rien. Même exigence que FERNET_KEY (voir crypto.py).
+_REPLI_HISTORIQUE = "changeme-generate-a-real-secret"
+
+SECRET_KEY = os.environ.get("JWT_SECRET", "").strip()
+if not SECRET_KEY or SECRET_KEY == _REPLI_HISTORIQUE:
+    raise RuntimeError(
+        "JWT_SECRET manquante ou laissée à sa valeur d'exemple dans .env. "
+        "Elle signe les jetons d'authentification : sans secret propre à cette "
+        "installation, n'importe qui peut forger un jeton d'administrateur. "
+        "En générer une : openssl rand -hex 32"
+    )
+
 ALGORITHM       = "HS256"
 TOKEN_EXPIRE_H  = 12
 TEMP_TOKEN_EXPIRE_MIN = 5   # token temporaire 2FA : valable 5 minutes

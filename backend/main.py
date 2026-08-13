@@ -405,6 +405,17 @@ def _seed_admin():
     with Session(engine) as session:
         if session.exec(select(User)).first():
             return
+        # Le contrôle est ici, et pas au chargement du module : sur une
+        # installation déjà peuplée, ADMIN_PASSWORD ne sert à rien et refuser de
+        # démarrer pour cette raison serait absurde. C'est au moment précis où
+        # l'on s'apprête à créer un compte administrateur qu'un mot de passe
+        # publiquement connu devient une porte ouverte.
+        if ADMIN_PASSWORD == "changeme":
+            raise RuntimeError(
+                "ADMIN_PASSWORD absente de .env : refus de créer le compte "
+                "administrateur avec le mot de passe d'exemple, qui est "
+                "publiquement connu. La renseigner puis redémarrer."
+            )
         admin = User(
             email=ADMIN_EMAIL,
             hashed_password=hash_password(ADMIN_PASSWORD),
@@ -1415,7 +1426,12 @@ def health():
         db = "ok"
     except Exception:
         db = "error"
-    return {"status": "ok" if db == "ok" else "degraded", "db": db, "version": "1.0.0"}
+    # `winpe` est volontairement à part de `status` : une ISO périmée n'empêche
+    # pas le service de fonctionner, elle fait silencieusement déployer un vieux
+    # WinPE. C'est une alerte, pas une indisponibilité — et une sonde doit
+    # pouvoir distinguer les deux.
+    return {"status": "ok" if db == "ok" else "degraded", "db": db,
+            "version": "1.0.0", "winpe": etat_iso_winpe()}
 
 
 # ── Boot iPXE ──────────────────────────────────────────────────────────────────
@@ -3837,6 +3853,30 @@ WINPE_ISO_NAME = "osiris-winpe.iso"
 # Chemin local, en constante : l'ISO est gitignorée (`**/*.iso`) et absente en CI,
 # les tests détournent donc cette variable plutôt que de fabriquer 660 Mo.
 WINPE_ISO_PATH = os.path.join(os.path.dirname(__file__), "static", WINPE_ISO_NAME)
+# Le boot.wim que l'ISO est censée contenir. Servi tel quel au démarrage iPXE.
+WINPE_BOOT_WIM_PATH = os.path.join(os.path.dirname(__file__), "static", "winpe",
+                                   "sources", "boot.wim")
+
+
+def etat_iso_winpe() -> str:
+    """« ok », « absente » ou « perimee », selon l'âge de l'ISO face à boot.wim.
+
+    Rien ne régénère l'ISO quand `boot.wim` change : elle se construit à la main
+    depuis `backend/static/winpe/`. Une ISO plus ancienne que le `boot.wim`
+    qu'elle est censée contenir déploie l'ancien WinPE sur toutes les VM — et le
+    déploiement *réussit*, ce qui est le pire des cas : aucune erreur, aucune
+    trace, seulement un comportement qui ne correspond plus au code.
+
+    Comparer les dates ne prouve pas que l'ISO contient ce `boot.wim`-là ; ça
+    prouve seulement qu'elle ne peut pas le contenir si elle lui est antérieure.
+    C'est suffisant pour transformer une panne muette en avertissement.
+    """
+    if not os.path.exists(WINPE_ISO_PATH):
+        return "absente"
+    if (os.path.exists(WINPE_BOOT_WIM_PATH)
+            and os.path.getmtime(WINPE_BOOT_WIM_PATH) > os.path.getmtime(WINPE_ISO_PATH)):
+        return "perimee"
+    return "ok"
 
 # Types de stockage Proxmox capables de porter un qcow2. Les autres (RBD, LVM-thin,
 # ZFS…) n'acceptent que du raw, et leur passer `format=qcow2` fait échouer la
@@ -3865,10 +3905,18 @@ async def _ensure_winpe_iso(h: Hypervisor, node: str, storages: list[dict]) -> s
     """
     import urllib.parse
 
-    if not os.path.exists(WINPE_ISO_PATH):
+    etat = etat_iso_winpe()
+    if etat == "absente":
         raise HTTPException(status_code=500, detail=(
             f"ISO WinPE introuvable sur OSIRIS ({WINPE_ISO_PATH}). La construire depuis "
             "backend/static/winpe/ avant de déployer une VM Windows."))
+    if etat == "perimee":
+        # Refus délibéré : téléverser cette ISO déploierait l'ancien WinPE sans
+        # que rien ne le signale, et le déploiement paraîtrait réussi.
+        raise HTTPException(status_code=500, detail=(
+            "L'ISO WinPE est plus ancienne que boot.wim : elle ne peut pas le contenir. "
+            "La déployer installerait l'ancien WinPE sans erreur visible. "
+            "Reconstruire l'ISO depuis backend/static/winpe/ (cf. README)."))
     taille_locale = os.path.getsize(WINPE_ISO_PATH)
 
     candidats = [s["storage"] for s in storages
