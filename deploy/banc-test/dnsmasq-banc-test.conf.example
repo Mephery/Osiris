@@ -1,0 +1,24 @@
+# Banc de test VM locale — à copier en /etc/dnsmasq.d/banc-test.conf après avoir
+# remplacé les adresses par les vôtres.
+#
+# Purement additif : ce fichier n'ajoute qu'une seconde adresse d'écoute et une
+# plage DHCP distincte. Le VLAN de déploiement n'est pas touché, et tout se
+# retire en supprimant ce fichier puis `systemctl restart dnsmasq`.
+#
+# <banc>   = adresse de l'hôte sur le pont du banc (ex. 10.0.1.1), qui doit
+#            correspondre à ADRESSE dans banc-test.sh
+# <osiris> = adresse d'OSIRIS sur le VLAN de déploiement
+
+listen-address=<banc>
+
+dhcp-range=set:testvm,<début de plage>,<fin de plage>,255.255.255.0,2h
+
+# La passerelle de ce réseau est l'hôte lui-même ; le DNS reste OSIRIS.
+dhcp-option=tag:testvm,3,<banc>
+dhcp-option=tag:testvm,6,<osiris>
+
+# RFC 3442 : dès qu'une option 121 (routes statiques) est servie, le client
+# IGNORE l'option 3 ci-dessus. Si la configuration principale en sert une — pour
+# les tunnels VPN clients par exemple — le banc doit porter SA propre route par
+# défaut, sinon la VM obtient une adresse mais ne joint rien.
+dhcp-option=tag:testvm,121,0.0.0.0/0,<banc>
