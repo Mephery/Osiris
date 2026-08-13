@@ -16,6 +16,7 @@ DESTINATION=${DESTINATION:-/srv/backup}
 RETENTION=${RETENTION:-14}          # nombre d'archives conservees
 DEPOT=${DEPOT:-/opt/osiris}
 BASE=${BASE:-osiris}
+GOLDEN=${GOLDEN:-/srv/data/windows/Golden_Image.wim}
 
 HORODATAGE=$(date +%Y%m%d-%H%M%S)
 ARCHIVE="$DESTINATION/osiris-$HORODATAGE.tar.zst"
@@ -39,6 +40,17 @@ verifier() {
 }
 
 [ "${1:-}" = "--verifier" ] && { verifier; exit 0; }
+
+# Si la destination est un volume dedie, il doit etre monte. Sans ce controle,
+# un disque absent ferait ecrire les sauvegardes sur le disque systeme — donc
+# sur celui qu'elles protegent — et personne ne s'en apercevrait avant le jour
+# de la restauration. Le controle passe AVANT la creation du dossier, sinon on
+# fabriquerait justement le point de montage manquant. EXIGER_MONTAGE=0 pour
+# une destination volontairement posee sur le systeme de fichiers racine.
+if [ "${EXIGER_MONTAGE:-1}" = "1" ] && ! mountpoint -q "$DESTINATION"; then
+    echo "$DESTINATION n'est pas un point de montage : volume de sauvegarde absent" >&2
+    exit 1
+fi
 
 install -d -m 700 "$DESTINATION"
 TRAVAIL=$(mktemp -d)
@@ -94,6 +106,34 @@ fi
 depot_git rev-parse HEAD             > "$COFFRE/depot/HEAD"
 depot_git status --porcelain         > "$COFFRE/depot/status.txt"
 depot_git diff HEAD                  > "$COFFRE/depot/non-committe.patch"
+
+journal "golden image"
+# Seul fichier de /srv/data qui ne se retelecharge pas : il vient d'une machine
+# de reference. Il ne change qu'a chaque nouvelle capture — quelques fois par an
+# — donc on ne le recopie que si taille ou date ont bouge. Comparer les 14 Go a
+# chaque nuit couterait des minutes de lecture pour rien.
+if [ -f "$GOLDEN" ]; then
+    install -d -m 700 "$DESTINATION/golden"
+    signature=$(stat -c '%s:%Y' "$GOLDEN")
+    marqueur="$DESTINATION/golden/.signature"
+    copie="$DESTINATION/golden/$(basename "$GOLDEN")"
+    if [ "$signature" = "$(cat "$marqueur" 2>/dev/null)" ] && [ -f "$copie" ]; then
+        journal "  inchangee, rien a copier"
+    else
+        # Une capture ratee ecrase la golden image en place : si on ne gardait
+        # que la derniere copie, on repliquerait l'image cassee par-dessus la
+        # bonne. On decale donc l'ancienne avant d'ecrire la nouvelle.
+        [ -f "$copie" ] && mv -f "$copie" "$DESTINATION/golden/precedente-$(basename "$GOLDEN")"
+        journal "  copie de $(du -h "$GOLDEN" | cut -f1) en cours"
+        # Fichier temporaire puis renommage : une copie interrompue ne doit
+        # jamais ressembler a une copie valide.
+        cp "$GOLDEN" "$copie.partiel" && mv "$copie.partiel" "$copie"
+        echo "$signature" > "$marqueur"
+        journal "  copiee"
+    fi
+else
+    journal "  absente ($GOLDEN)"
+fi
 
 journal "inventaire des donnees lourdes"
 # Pas leur contenu : de quoi savoir ce qu'il manque et ou le retrouver.

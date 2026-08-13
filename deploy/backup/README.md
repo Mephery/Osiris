@@ -29,8 +29,26 @@ l'archive doit sortir de la machine, la chiffrer.
 
 **Ce qui n'y est pas** : `/srv/data` (images Windows, ISO, pilotes — des dizaines
 de Go). Le script en garde l'inventaire, pas le contenu : ces fichiers se
-retéléchargent, sauf la **golden image**, qui vient d'une machine de référence et
-ne se retrouve que dans une sauvegarde au niveau de la VM.
+retéléchargent tous chez Microsoft ou les constructeurs.
+
+**Sauf la golden image**, qui vient d'une machine de référence et ne se
+retéléchargera jamais. Elle est donc copiée à part, dans `golden/`, mais
+seulement quand sa taille ou sa date ont changé — c'est-à-dire après une vraie
+capture, quelques fois par an. Les autres nuits, le script constate et passe.
+La copie précédente est conservée : une capture ratée écrase la golden image
+*en place*, et sans cela on répliquerait l'image cassée par-dessus la bonne.
+
+## Un volume dédié, pas le disque système
+
+Une archive posée sur le disque qu'elle sauvegarde disparaît avec lui. Le script
+**refuse de s'exécuter** si `DESTINATION` n'est pas un point de montage — sans
+ce contrôle, un volume absent ferait écrire les sauvegardes sur le disque
+système sans que rien ne le signale, et on ne s'en apercevrait qu'au moment de
+restaurer. `EXIGER_MONTAGE=0` pour une destination volontairement posée sur la
+racine.
+
+Monter le volume avec `nofail` : un disque de sauvegarde manquant ne doit jamais
+empêcher la machine de démarrer.
 
 Le script se relit lui-même : après chaque exécution il ouvre l'archive et passe
 le dump à `pg_restore --list`. Une sauvegarde jamais relue est une hypothèse.
@@ -49,6 +67,21 @@ Chaque archive contient son propre `RESTAURATION.md`. L'ordre y compte :
 | `DESTINATION` | `/srv/backup` | où déposer les archives |
 | `RETENTION` | `14` | nombre d'archives conservées |
 | `BUNDLE_COMPLET` | `0` | `1` embarque toute l'histoire git (~130 Mo/nuit) et rend l'archive autonome ; `0` n'embarque que les commits absents du dépôt distant |
+| `GOLDEN` | `/srv/data/windows/Golden_Image.wim` | image à recopier hors du disque principal |
+| `EXIGER_MONTAGE` | `1` | refuse de s'exécuter si la destination n'est pas montée |
+
+## Savoir qu'elle a échoué
+
+Une sauvegarde qui échoue en silence est le mode de défaillance habituel des
+sauvegardes. Le service sort en erreur, donc systemd retient le motif, et le
+modèle Zabbix de `deploy/supervision/` le relève :
+
+```
+systemd.unit.info["osiris-backup.service","Result","Service"]
+```
+
+⚠️ Le troisième paramètre est indispensable : `Result` appartient à l'interface
+`Service`, pas à `Unit` — sans lui l'item reste en `ZBX_NOTSUPPORTED`.
 
 ## Niveau 2 — la VM entière
 

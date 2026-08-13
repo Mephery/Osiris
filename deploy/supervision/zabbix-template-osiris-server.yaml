@@ -183,6 +183,26 @@ zabbix_export:
               expression: 'last(/OSIRIS server/systemd.unit.info["postgresql@15-main.service","ActiveState"])<>"active"'
               name: 'OSIRIS: postgresql@15-main n''est pas active ({ITEM.VALUE})'
               priority: HIGH
+        - uuid: 9c4e1a77b8d5423fa61e0d3c5b8f2ae4
+          name: 'OSIRIS: resultat de la derniere sauvegarde'
+          type: ZABBIX_ACTIVE
+          key: 'systemd.unit.info["osiris-backup.service","Result","Service"]'
+          delay: 10m
+          history: 30d
+          trends: '0'
+          value_type: CHAR
+          description: |
+            Service oneshot : entre deux passages il est inactif, seul son
+            resultat a un sens. Une sauvegarde qui echoue sans que personne
+            ne le sache est le mode de defaillance habituel des sauvegardes.
+          tags:
+            - tag: Application
+              value: OSIRIS
+          triggers:
+            - uuid: 3a7f2c9e5d1b48609e7c4a2f8b3d6e15
+              expression: 'last(/OSIRIS server/systemd.unit.info["osiris-backup.service","Result","Service"])<>"success"'
+              name: 'OSIRIS: la derniere sauvegarde a echoue ({ITEM.VALUE})'
+              priority: HIGH
         - uuid: d358c1fa838744e4a5ba9c39bd8295ee
           name: 'OSIRIS: unite dnsmasq'
           type: ZABBIX_ACTIVE
