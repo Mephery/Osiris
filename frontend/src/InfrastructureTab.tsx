@@ -488,7 +488,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                       className="osiris-input text-xs font-mono" />
                   </div>
                   <p className="text-[9px] text-slate-600">
-                    À renseigner sur un VLAN sans DHCP : sans adresse, la VM démarre et ne rappelle jamais OSIRIS.
+                    À renseigner sur un VLAN sans DHCP : sans adresse, la VM démarre et ne rappelle jamais OSIRIS. Adresse en notation CIDR (préfixe /24 obligatoire), passerelle sans préfixe.
                   </p>
                 </div>
 

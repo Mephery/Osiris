@@ -4414,6 +4414,71 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str) -> str:
     )
 
 
+def _valider_adressage(body) -> None:
+    """
+    Refuse un adressage mal formé AVANT de toucher à l'hyperviseur.
+
+    Proxmox attend `ip=<adresse>/<préfixe>,gw=<passerelle>` et rejette une adresse
+    nue. Sans ce contrôle, une adresse saisie sans son `/24` partait telle quelle :
+    le clone réussissait, la configuration échouait juste après, et le rollback
+    détruisait la VM qui venait de naître. Un aller-retour clone/destruction sur
+    une infrastructure de production, pour une faute de frappe dans un formulaire.
+
+    On vérifie aussi que la passerelle est DANS le réseau déclaré. Une passerelle
+    hors sujet ne fait échouer aucun appel : la VM démarre, ne route nulle part, ne
+    rappelle jamais OSIRIS, et reste « en attente » sans un mot d'explication —
+    le symptôme le plus coûteux de toute la chaîne.
+    """
+    import ipaddress
+
+    ip  = (body.ip_cidr or "").strip()
+    gw  = (body.gateway or "").strip()
+    dns = (body.dns_servers or "").strip()
+
+    if not ip:
+        if gw:
+            raise HTTPException(status_code=400, detail=(
+                f"Une passerelle ({gw}) sans adresse IP ne sert à rien : sans adresse, "
+                f"la VM reste en DHCP et reçoit sa passerelle du serveur DHCP. "
+                f"Renseigner une adresse, ou vider la passerelle."))
+        return                                    # adressage DHCP : rien à valider
+
+    if "/" not in ip:
+        raise HTTPException(status_code=400, detail=(
+            f"L'adresse « {ip} » doit porter son préfixe réseau, par exemple "
+            f"« {ip}/24 ». Sans lui, l'hyperviseur ne sait pas quel est le réseau "
+            f"et refuse la configuration."))
+    try:
+        interface = ipaddress.ip_interface(ip)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=(
+            f"L'adresse « {ip} » n'est pas une adresse réseau valide. Format attendu : "
+            f"« 172.29.12.200/24 »."))
+
+    if gw:
+        try:
+            passerelle = ipaddress.ip_address(gw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=(
+                f"La passerelle « {gw} » n'est pas une adresse IP valide. Elle s'écrit "
+                f"sans préfixe : « 172.29.12.1 »."))
+        # Réseaux /31 et /32 exclus du contrôle : en point à point, la passerelle
+        # est légitimement hors du réseau de l'interface.
+        if interface.network.prefixlen < 31 and passerelle not in interface.network:
+            raise HTTPException(status_code=400, detail=(
+                f"La passerelle {gw} est hors du réseau {interface.network} déduit de "
+                f"l'adresse. La VM démarrerait sans route utilisable et ne rappellerait "
+                f"jamais OSIRIS — elle resterait « en attente » sans explication."))
+
+    for serveur in [x.strip() for x in dns.split(",") if x.strip()]:
+        try:
+            ipaddress.ip_address(serveur)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=(
+                f"« {serveur} » n'est pas une adresse de serveur DNS valide. Plusieurs "
+                f"serveurs se séparent par des virgules : « 8.8.8.8, 1.1.1.1 »."))
+
+
 @app.post("/hypervisors/{hv_id}/create-vm", status_code=201)
 async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends(require_admin)):
     """
@@ -4430,6 +4495,10 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     # passe jamais par cloud-init.
     if body.os == "windows" and body.boot_mode == "cloudinit":
         raise HTTPException(status_code=400, detail="cloud-init est Linux uniquement — pour Windows, utiliser « template » (clone sysprep) ou « pxe » (WinPE)")
+
+    # Avant le moindre appel à l'hyperviseur : un adressage mal formé ne doit pas
+    # coûter un clone puis une destruction.
+    _valider_adressage(body)
 
     with Session(engine) as session:
         h = session.get(Hypervisor, hv_id)
