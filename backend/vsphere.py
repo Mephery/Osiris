@@ -318,6 +318,29 @@ class VSphereProvider:
         return await _run(work)
 
     @staticmethod
+    async def list_all_templates(h: Hypervisor) -> list[dict]:
+        """Templates de tout le datacenter, avec le cluster qui les héberge."""
+        def work():
+            si = _connect(h)
+            out = []
+            for vm in _all(si, vim.VirtualMachine):
+                if not vm.config or not vm.config.template:
+                    continue
+                hote = getattr(vm.runtime, "host", None)
+                grappe = getattr(getattr(hote, "parent", None), "name", "") if hote else ""
+                out.append({
+                    "vmid":      _moid_number(vm),
+                    "name":      vm.name,
+                    "node":      grappe,
+                    "status":    "stopped",
+                    "cores":     vm.config.hardware.numCPU if vm.config.hardware else 0,
+                    "maxmem_gb": round((vm.config.hardware.memoryMB or 0) / 1024, 1)
+                                 if vm.config.hardware else 0,
+                })
+            return sorted(out, key=lambda d: d["vmid"])
+        return await _run(work)
+
+    @staticmethod
     async def list_networks(h: Hypervisor, node: str) -> list[dict]:
         def work():
             si = _connect(h)

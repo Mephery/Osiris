@@ -104,7 +104,13 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
 
   const handleVmHvChange = (hvId: number) => {
     setVmHvId(hvId); setVmNode(''); setVmStorages([]); setVmNetworks([]); setVmNodes([])
-    setVmForm(f => ({ ...f, storage: '', bridge: '' }))
+    setVmForm(f => ({ ...f, storage: '', bridge: '', template_id: '' }))
+    // Les templates sont ceux de TOUT l'hyperviseur, indépendamment du nœud : sur un
+    // stockage partagé, le disque d'un template est lisible par tous les nœuds, et
+    // OSIRIS sait cloner vers celui qu'on choisit. Les lier au nœud enfermait le
+    // formulaire — un template posé sur un nœud condamnait ses VM à ce nœud.
+    fetch(`${API_URL}/hypervisors/${hvId}/templates`, { headers: authHeader(token) })
+      .then(r => r.json()).then(setVmTemplates).catch(() => {})
     fetch(`${API_URL}/hypervisors/${hvId}/nodes`, { headers: authHeader(token) })
       .then(r => r.json()).then((nodes: ProxmoxNode[]) => {
         setVmNodes(nodes)
@@ -117,13 +123,9 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
 
   const handleVmNodeChange = (node: string) => {
     setVmNode(node)
-    setVmStorages([]); setVmNetworks([]); setVmTemplates([])
-    setVmForm(f => ({ ...f, storage: '', bridge: '', template_id: '' }))
-    if (vmHvId) {
-      loadVmResources(Number(vmHvId), node)
-      fetch(`${API_URL}/hypervisors/${vmHvId}/nodes/${node}/templates`, { headers: authHeader(token) })
-        .then(r => r.json()).then(setVmTemplates).catch(() => {})
-    }
+    setVmStorages([]); setVmNetworks([])
+    setVmForm(f => ({ ...f, storage: '', bridge: '' }))
+    if (vmHvId) loadVmResources(Number(vmHvId), node)
   }
 
   const handleCreateVm = (e: React.FormEvent) => {
@@ -497,7 +499,10 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                 ) : (
                   <select required value={vmForm.template_id} onChange={e => setVmForm(f => ({...f, template_id: e.target.value}))} className="osiris-input text-xs col-span-2" disabled={vmTemplates.length === 0}>
                     <option value="">{vmTemplates.length === 0 ? (vmNode ? 'Aucun template trouvé sur ce noeud' : 'Choisir un noeud d\'abord') : 'Template Proxmox...'}</option>
-                    {vmTemplates.map(t => <option key={t.vmid} value={t.vmid}>{t.name} (VMID {t.vmid}) — {t.cores} vCPU · {t.maxmem_gb} Go</option>)}
+                    {/* Le nœud du template est affiché : il n'a plus besoin d'être celui du
+                        déploiement, mais savoir où vit un modèle reste utile — c'est le
+                        seul indice si un clone échoue faute de stockage partagé. */}
+                    {vmTemplates.map(t => <option key={t.vmid} value={t.vmid}>{t.name} (VMID {t.vmid}){t.node ? ` · sur ${t.node}` : ''} — {t.cores} vCPU · {t.maxmem_gb} Go</option>)}
                   </select>
                 )}
               </div>

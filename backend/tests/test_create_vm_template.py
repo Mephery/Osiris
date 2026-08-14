@@ -32,6 +32,14 @@ def _patch(monkeypatch, captured: dict, *, disque_template_gb: int = 80):
     async def fake_get(h, path):
         if path.endswith("/cluster/nextid"):
             return "150"
+        if "type=vm" in path:
+            # OSIRIS demande desormais OU vit le template : la configuration d'une VM
+            # appartient a un noeud, son disque au stockage. Le clone doit etre
+            # adresse au noeud qui detient la configuration.
+            return [{"vmid": 100, "name": "SRV-WIN-TPL", "node": "pve", "template": 1,
+                     "status": "stopped", "maxcpu": 4, "maxmem": 4294967296},
+                    {"vmid": 9001, "name": "ubuntu-osiris", "node": "pve", "template": 1,
+                     "status": "stopped", "maxcpu": 2, "maxmem": 2147483648}]
         if path.endswith("/config"):
             vmid = int(path.split("/qemu/")[1].split("/")[0])
             if vmid not in clones:

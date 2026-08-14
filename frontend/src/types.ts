@@ -190,6 +190,9 @@ export interface Hypervisor {
 
 export interface ProxmoxTemplate {
   vmid: number;
+  /** Nœud qui détient la configuration du template. Le déploiement peut viser un
+   *  autre nœud : sur un stockage partagé, OSIRIS clone vers celui qu'on choisit. */
+  node?: string;
   name: string;
   status: string;
   cores: number;

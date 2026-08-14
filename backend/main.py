@@ -4067,6 +4067,33 @@ class ProxmoxProvider:
         }
 
     @staticmethod
+    async def list_all_templates(h: Hypervisor) -> list[dict]:
+        """
+        Templates de TOUT le cluster, avec le nœud qui détient chacun.
+
+        La liste par nœud enfermait le formulaire : un template posé sur un nœud
+        n'était proposé que si l'on avait choisi ce nœud-là, alors que son disque
+        est lisible par tous quand le stockage est partagé. On liste donc à
+        l'échelle du cluster, et `_cloner_template` se charge d'adresser le bon
+        nœud puis de poser la VM là où l'opérateur l'a demandé.
+        """
+        res = await _proxmox_get(h, "/api2/json/cluster/resources?type=vm")
+        return sorted(
+            [
+                {
+                    "vmid":      int(v["vmid"]),
+                    "name":      v.get("name", f"VM {v['vmid']}"),
+                    "node":      v.get("node", ""),
+                    "status":    v.get("status", "unknown"),
+                    "cores":     v.get("maxcpu", 0),
+                    "maxmem_gb": round(v.get("maxmem", 0) / 1073741824, 1),
+                }
+                for v in (res or []) if v.get("template") == 1
+            ],
+            key=lambda d: d["vmid"],
+        )
+
+    @staticmethod
     async def list_cluster_storages(h: Hypervisor) -> list[dict]:
         """
         Stockages du cluster où OSIRIS peut écrire, avec leur remplissage.
@@ -4248,6 +4275,18 @@ async def get_node_networks(hv_id: int, node: str, _: User = Depends(require_adm
     """Réseaux disponibles (bridges Proxmox / port groups vSphere)."""
     h = _get_hypervisor(hv_id)
     return await _provider(h).list_networks(h, node)
+
+
+@app.get("/hypervisors/{hv_id}/templates")
+async def get_hypervisor_templates(hv_id: int, _: User = Depends(require_admin)):
+    """Templates de tout l'hyperviseur, avec le nœud de chacun.
+
+    Remplace la liste par nœud dans le formulaire : le choix du template et celui
+    du nœud d'accueil sont deux décisions distinctes dès lors que le stockage est
+    partagé.
+    """
+    h = _get_hypervisor(hv_id)
+    return await _provider(h).list_all_templates(h)
 
 
 @app.get("/hypervisors/{hv_id}/nodes/{node}/templates")
@@ -4748,6 +4787,60 @@ class IdentifiantVmOccupe(HTTPException):
     """
 
 
+async def _cloner_template(h: Hypervisor, body, vm_id: int) -> None:
+    """
+    Clone un template vers le nœud demandé, où que vive le template.
+
+    Dans un cluster Proxmox, une VM a deux moitiés qui ne vivent pas au même
+    endroit : sa CONFIGURATION appartient à un nœud précis, son DISQUE est sur le
+    stockage. Sur un stockage partagé, le disque est lisible par tous les nœuds —
+    seul le fichier de configuration est ancré quelque part.
+
+    L'appel de clonage doit donc être adressé au nœud qui détient la
+    configuration du template, faute de quoi Proxmox répond que la VM n'existe
+    pas chez lui. On y ajoute `target` pour dire où la VM doit naître.
+
+    Sans ça, une VM naissait toujours sur le nœud de son modèle : un template
+    posé sur un nœud condamnait tous ses déploiements à ce nœud, alors que le
+    cluster en compte quatre et que le disque est accessible partout.
+    """
+    source = await _noeud_du_template(h, body.template_id)
+    params = {
+        **_pool_clone(h),
+        "newid":   vm_id,
+        "name":    body.hostname,
+        "full":    1,            # clone complet (indépendant du template)
+        "storage": body.storage,
+    }
+    # `target` seulement s'il change quelque chose : le passer inutilement ferait
+    # échouer un cluster à un seul nœud, ou un template sur stockage local.
+    if source != body.node:
+        params["target"] = body.node
+
+    try:
+        upid = await _proxmox_post(
+            h, f"/api2/json/nodes/{source}/qemu/{body.template_id}/clone", params)
+    except HTTPException as e:
+        if source != body.node and "shared" in str(e.detail).lower():
+            raise HTTPException(status_code=400, detail=(
+                f"Le template {body.template_id} vit sur le nœud « {source} » et son "
+                f"disque n'est pas sur un stockage partagé : il ne peut pas être cloné "
+                f"vers « {body.node} ». Déployer sur « {source} », ou déplacer le disque "
+                f"du template sur un stockage partagé. Détail : {e.detail}"))
+        raise
+    await _proxmox_wait_task(h, body.node, str(upid), max_wait=600)
+
+
+async def _noeud_du_template(h: Hypervisor, template_id: int) -> str:
+    """Nœud qui détient la configuration d'un template, cherché dans tout le cluster."""
+    for v in await _proxmox_get(h, "/api2/json/cluster/resources?type=vm") or []:
+        if int(v.get("vmid", 0)) == int(template_id):
+            return str(v.get("node", ""))
+    raise HTTPException(status_code=404, detail=(
+        f"Template {template_id} introuvable sur cet hyperviseur — il a peut-être été "
+        f"supprimé depuis que le formulaire a été ouvert."))
+
+
 async def _verifier_identifiant_libre(h: Hypervisor, node: str, vm_id: int) -> None:
     """
     Refuse de provisionner sur un identifiant DÉJÀ OCCUPÉ, avant toute écriture.
@@ -4851,13 +4944,7 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
         # Ni user-data, ni snippet, ni lecteur cloud-init : le clone porte déjà tout
         # ce qu'il faut (agent d'amorçage cuit dans le template). Il lit sa propre
         # MAC au premier démarrage et rappelle OSIRIS, qui lui sert son script.
-        clone_result = await _proxmox_post(
-            h, f"/api2/json/nodes/{body.node}/qemu/{body.template_id}/clone", {
-                **_pool_clone(h),
-                "newid": vm_id, "name": body.hostname, "full": 1, "storage": body.storage,
-            })
-        upid = clone_result if isinstance(clone_result, str) else str(clone_result)
-        await _proxmox_wait_task(h, body.node, upid)
+        await _cloner_template(h, body, vm_id)
 
         # Matériel selon l'OS, comme à la création PXE : Windows en SATA + e1000
         # (pilotes inbox), Linux en virtio. La MAC est OBLIGATOIREMENT neuve — sinon
@@ -4895,16 +4982,7 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
 
     else:
         # ── Chemin cloud-init (clone de template) ────────────────────────────────
-        clone_result = await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{body.template_id}/clone", {
-            **_pool_clone(h),
-            "newid":   vm_id,
-            "name":    body.hostname,
-            "full":    1,            # clone complet (indépendant du template)
-            "storage": body.storage,
-        })
-        # Attendre la fin du clone (tâche asynchrone Proxmox)
-        upid = clone_result if isinstance(clone_result, str) else str(clone_result)
-        await _proxmox_wait_task(h, body.node, upid)
+        await _cloner_template(h, body, vm_id)
 
         # Le clone EXISTE desormais sur l'hyperviseur. Toute erreur au-dela doit le
         # detruire : sinon on laisse une VM fantome et ses volumes derriere soi, et
