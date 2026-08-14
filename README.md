@@ -918,6 +918,34 @@ Ce script d'amorçage ne contient **aucune logique métier** : tout vient d'OSIR
 démarrage. Un changement de profil, d'application ou de script de premier démarrage
 **ne nécessite pas de refabriquer le template**.
 
+### Quand une VM ne rappelle jamais
+
+L'agent interroge OSIRIS pendant une trentaine de tentatives. Si le chemin réseau
+n'est pas ouvert — pare-feu, VLAN sans route, fiche pas encore créée — il renonce,
+**sort en erreur**, et systemd le relance toutes les deux minutes jusqu'à ce qu'il
+passe. Une VM créée avant que son réseau soit prêt se rattrape donc toute seule, sans
+redémarrage ni intervention.
+
+⚠️ **Ce comportement vit dans le template, pas dans ce qu'OSIRIS sert.** Un template
+fabriqué avant cette version renonce définitivement et affiche « active (exited) »,
+c'est-à-dire un succès, alors que le déploiement n'a jamais commencé. Pour le mettre à
+jour, il suffit de repasser l'installateur dans la VM du template — il est idempotent :
+
+```bash
+curl -sf http://osiris.local:8000/bootstrap/linux | bash
+curl -sf http://osiris.local:8000/bootstrap/linux | bash -s -- --seal
+```
+
+Pour dépanner une VM déjà déployée dans cet état, sans toucher au template :
+
+```bash
+sudo systemctl restart osiris-firstboot     # `start` ne ferait rien : l'unité est « active »
+```
+
+💡 Les horodatages des scripts portent leur **fuseau** (`%Z`). Une image cloud tourne
+en UTC quand le serveur est en heure locale : sans cette précision, le journal de
+déploiement mélange deux horloges sans que rien ne le signale.
+
 ---
 
 ## Supervision Zabbix

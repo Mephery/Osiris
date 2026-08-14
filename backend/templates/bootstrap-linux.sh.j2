@@ -40,7 +40,11 @@ cat > /usr/local/sbin/osiris-bootstrap.sh << 'OSIRIS_BOOTSTRAP_EOF'
 # sur toutes les machines, il ne contient ni secret ni configuration.
 LOG=/var/log/osiris-bootstrap.log
 exec >> "$LOG" 2>&1
-ts() { date '+%Y-%m-%d %H:%M:%S'; }
+# Le fuseau fait partie de l'horodatage : une image cloud tourne en UTC alors que
+# l'exploitant lit ses journaux en heure locale. Sans le suffixe, on compare deux
+# horloges sans le savoir — ce qui est arrive le 2026-08-14, avec deux heures
+# d'ecart et un diagnostic fausse.
+ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 
 OSIRIS_URL=""
 [ -r /etc/osiris/bootstrap.conf ] && . /etc/osiris/bootstrap.conf
@@ -61,8 +65,13 @@ macs() {
 }
 
 SCRIPT=/run/osiris-firstboot.sh
-# 30 tentatives x 10 s = 5 min : de quoi laisser le bail DHCP s'etablir, et
-# couvrir le cas ou la VM demarre avant que sa fiche existe cote OSIRIS.
+# 30 tentatives, de quoi laisser le bail DHCP s'etablir et couvrir le cas ou la
+# VM demarre avant que sa fiche existe cote OSIRIS.
+#
+# La duree totale n'est PAS 5 minutes : quand OSIRIS est injoignable, chaque
+# curl consomme ses 20 s de `--max-time` avant de rendre 000. Une tentative
+# coute alors 30 s et non 10, soit un quart d'heure au total. C'est le pire cas,
+# et c'est exactement celui qu'on rencontre quand un pare-feu jette les paquets.
 for attempt in $(seq 1 30); do
     details=""
     for mac in $(macs); do
@@ -92,10 +101,19 @@ for attempt in $(seq 1 30); do
 done
 
 # On sort SANS desactiver l'unite : le script de premier demarrage est le seul a
-# le faire, une fois qu'il a reellement tourne. Une VM demarree trop tot
-# retentera donc au prochain boot au lieu de rester orpheline pour toujours.
-echo "[$(ts)] Abandon apres 5 minutes - nouvelle tentative au prochain demarrage."
-exit 0
+# le faire, une fois qu'il a reellement tourne.
+#
+# Et on sort en ERREUR. Rendre 0 ici disait « reussi » a systemd, qui affichait
+# alors « active (exited) » : ni la supervision, ni `systemctl status`, ni la
+# fiche OSIRIS ne pouvaient distinguer un deploiement termine d'un deploiement
+# jamais commence. Une VM restait « en attente » sans que rien, nulle part,
+# n'indique que plus personne n'appelait. Constate le 2026-08-14, ou seul un
+# `systemctl restart` manuel a relance la machine.
+#
+# Le code non nul est aussi ce qui autorise le `Restart=on-failure` de l'unite :
+# c'est lui qui transforme une fenetre unique en reessai perpetuel.
+echo "[$(ts)] Abandon apres $attempt tentatives - l unite va reessayer."
+exit 1
 OSIRIS_BOOTSTRAP_EOF
 chmod 755 /usr/local/sbin/osiris-bootstrap.sh
 
@@ -106,12 +124,26 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+# `simple` et non `oneshot` : `Restart=` est refuse sur un oneshot, or c'est lui
+# qui fait toute la difference ci-dessous.
+Type=simple
 ExecStart=/usr/local/sbin/osiris-bootstrap.sh
 RemainAfterExit=yes
 # Un premier demarrage installe des paquets et joint un domaine : il depasse
 # largement les 90 s du delai par defaut, qui tuerait le script en plein milieu.
 TimeoutStartSec=infinity
+
+# Le coeur du correctif. Sans ces deux lignes, une VM demarree avant que son
+# chemin reseau soit ouvert renoncait au bout d'un quart d'heure et n'essayait
+# plus jamais avant un redemarrage : elle restait « en attente » pour toujours,
+# en silence. Elle retente desormais toutes les 2 minutes, indefiniment.
+#
+# Ce n'est pas une boucle infinie couteuse : chaque tentative est un GET qui
+# echoue en quelques secondes, et le script se desactive de lui-meme des qu'il
+# reussit. Une VM qui n'aurait jamais de fiche cote OSIRIS ne fait donc qu'un
+# appel toutes les deux minutes, ce qu'aucun reseau ne remarque.
+Restart=on-failure
+RestartSec=120
 
 [Install]
 WantedBy=multi-user.target

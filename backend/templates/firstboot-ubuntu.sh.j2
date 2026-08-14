@@ -3,7 +3,11 @@
 LOG=/var/log/osiris-firstboot.log
 exec >> "$LOG" 2>&1
 
-ts() { date '+%H:%M:%S'; }
+# Le fuseau accompagne l'heure : ces lignes finissent dans le journal de
+# deploiement d'OSIRIS, a cote d'horodatages produits par le serveur. Une image
+# cloud tourne en UTC et le serveur en heure locale — sans le suffixe, le journal
+# melange deux horloges et personne ne s'en apercoit.
+ts() { date '+%H:%M:%S %Z'; }
 osiris_url="{{ osiris_url }}"
 # MAC de la fiche OSIRIS, gravee ici a la generation du script. On ne la rededuit
 # PAS de l'interface reseau : sur une machine a plusieurs cartes, celle qui porte
