@@ -85,7 +85,20 @@ for attempt in $(seq 1 30); do
             echo "[$(ts)] Fiche trouvee pour la MAC $mac - execution du premier demarrage."
             curl -sf -X POST "$OSIRIS_URL/machines/$mac/status?status=deploying" --max-time 15 || true
             chmod +x "$SCRIPT"
-            exec /bin/bash "$SCRIPT"
+            # PAS `exec`. Avec lui, le script de premier demarrage devient le
+            # processus principal de l'unite, et SON code de sortie decide du
+            # `Restart=on-failure` : un deploiement qui echoue en cours de route
+            # relancerait alors le deploiement entier toutes les deux minutes,
+            # indefiniment — reinstallation des paquets et jonction de domaine
+            # comprises.
+            #
+            # L'agent n'a qu'une responsabilite : joindre OSIRIS et livrer le
+            # script. Il a reussi a l'instant ou il l'a lance. Ce qui se passe
+            # ensuite regarde le deploiement, qui rapporte lui-meme son echec a
+            # OSIRIS — le reessai de l'unite ne doit couvrir QUE le cas « je n'ai
+            # jamais pu joindre le serveur ».
+            /bin/bash "$SCRIPT"
+            exit 0
         fi
         case "$code" in
             000) indice="serveur injoignable" ;;

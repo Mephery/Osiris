@@ -43,7 +43,28 @@ def test_labandon_sort_en_erreur(agent):
 def test_le_succes_reste_un_succes(agent):
     """Le chemin nominal ne doit pas devenir un échec au passage : quand la fiche
     est trouvée, le script passe la main au script de premier démarrage."""
-    assert "exec /bin/bash \"$SCRIPT\"" in agent
+    assert '/bin/bash "$SCRIPT"' in agent
+
+
+def test_un_deploiement_qui_echoue_ne_boucle_pas(agent):
+    """
+    Le piège du `Restart=on-failure`, trouvé avant qu'il n'atteigne la production.
+
+    Avec `exec`, le script de premier démarrage devient le processus principal de
+    l'unité : son code de sortie décide alors du redémarrage. Un déploiement qui
+    échoue en cours de route — jonction AD ratée, paquet absent — serait relancé
+    ENTIÈREMENT toutes les deux minutes, indéfiniment.
+
+    L'agent doit donc lancer le script comme un fils et sortir 0 : il a fait son
+    travail dès qu'il a livré le script, et l'échec du déploiement est déjà
+    rapporté à OSIRIS par le script lui-même.
+    """
+    lancement = agent.split('chmod +x "$SCRIPT"')[1].split("case ")[0]
+
+    assert "exec " not in lancement, \
+        "`exec` fait décider le déploiement du Restart= : boucle de redéploiement"
+    assert "exit 0" in lancement, \
+        "après avoir livré le script, l'agent a réussi — quoi qu'il advienne ensuite"
 
 
 # ── L'unité réessaie ─────────────────────────────────────────────────────────
