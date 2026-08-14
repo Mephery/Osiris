@@ -521,3 +521,68 @@ def test_un_hyperviseur_neuf_verifie_le_certificat_par_defaut(client, admin_head
     })
     assert resp.status_code in (200, 201), resp.text
     assert resp.json()["tls_verify"] is True
+
+
+# ── 7. Le message du conflit de réservation nomme la VRAIE cause ─────────────
+
+def test_une_fiche_perimee_est_nommee_et_son_sort_precise(client, test_machine,
+                                                          admin_headers, monkeypatch):
+    """
+    Rencontré le 2026-08-14. Une VM supprimée dans l'interface de l'hyperviseur
+    laisse sa fiche derrière elle ; `nextid` repropose le numéro, la réservation
+    le refuse, et le message accusait « un déploiement simultané » — ce que
+    l'opérateur n'avait pas fait. Il faut nommer la fiche fautive et dire que sa
+    VM a disparu, sinon on cherche un conflit qui n'existe pas.
+    """
+    hv_id = _hyperviseur()
+    _vm(hv_id, vm_id=150)                       # la fiche retient le 150
+
+    async def fake_get(h, path):
+        if path.endswith("/cluster/nextid"):
+            return "150"
+        if path.endswith("/config"):
+            # la VM du 150 n'existe plus : supprimée hors d'OSIRIS
+            raise main.HTTPException(status_code=502, detail="Proxmox 500: no such VM")
+        return {}
+
+    monkeypatch.setattr(main, "_proxmox_get", fake_get)
+    monkeypatch.setattr(main, "_proxmox_post", lambda *a, **k: None)
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "srv-neuf", "client": "Acme", "os": "ubuntu",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+
+    assert resp.status_code == 409, resp.text
+    d = resp.json()["detail"]
+    assert "PC-TEST" in d, "la fiche fautive doit être nommée"
+    assert "n'existe plus" in d, "il faut dire que la VM a disparu"
+    assert "Retirer la fiche" in d, "et quoi faire ensuite"
+    assert "simultané" not in d, "ce n'est PAS la cause ici"
+
+
+def test_un_vrai_conflit_reste_annonce_comme_tel(client, test_machine,
+                                                 admin_headers, monkeypatch):
+    """Le corollaire : quand la VM existe encore, c'est bien un numéro déjà pris."""
+    hv_id = _hyperviseur()
+    _vm(hv_id, vm_id=150)
+
+    async def fake_get(h, path):
+        if path.endswith("/cluster/nextid"):
+            return "150"
+        if path.endswith("/config"):
+            return config_vm_conforme()          # la VM est bien là
+        return {}
+
+    monkeypatch.setattr(main, "_proxmox_get", fake_get)
+    monkeypatch.setattr(main, "_proxmox_post", lambda *a, **k: None)
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "srv-neuf", "client": "Acme", "os": "ubuntu",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+
+    assert resp.status_code == 409, resp.text
+    d = resp.json()["detail"]
+    assert "existe toujours" in d
+    assert "Retirer la fiche" not in d, "surtout pas : la VM tourne"

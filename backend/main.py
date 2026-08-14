@@ -4577,10 +4577,8 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
         # creations simultanees se voyaient attribuer le meme identifiant, la
         # premiere creait la VM, et le rollback de la seconde la purgeait.
         if _est_conflit_de_reservation(exc):
-            raise HTTPException(status_code=409, detail=(
-                f"L'identifiant de VM {vm_id} est deja reserve par une autre fiche "
-                f"sur cet hyperviseur — un deploiement simultane l'a pris. Relancer "
-                f"la creation : aucune VM n'a ete creee ni modifiee."))
+            raise HTTPException(status_code=409,
+                                detail=await _explication_reservation(h, vm_id))
         raise HTTPException(
             status_code=500,
             detail=f"Impossible d'enregistrer la machine dans OSIRIS ({exc}) — "
@@ -4666,6 +4664,44 @@ async def _agrandir_disque_si_besoin(h: Hypervisor, node: str, vm_id: int,
     if taille_gb > actuel_gb:
         await _proxmox_request(h, "PUT", f"/api2/json/nodes/{node}/qemu/{vm_id}/resize",
                                {"disk": disque, "size": f"{taille_gb}G"})
+
+
+async def _explication_reservation(h: Hypervisor, vm_id: int) -> str:
+    """
+    Dire QUELLE fiche retient ce numéro, et si sa VM existe encore.
+
+    Le message d'origine accusait « un déploiement simultané ». C'est une cause
+    possible, mais rarement la vraie : le cas courant est une VM supprimée dans
+    l'interface de l'hyperviseur sans que sa fiche OSIRIS ait été retirée.
+    `nextid` repropose alors le numéro, la réservation le refuse, et l'opérateur
+    lit une explication qui ne correspond pas à ce qu'il vient de faire.
+
+    OSIRIS ne retire PAS la fiche de lui-même : elle porte un historique de
+    déploiement, et supprimer un enregistrement sur la seule foi d'une VM absente
+    serait exactement le raisonnement qu'on s'interdit partout ailleurs. On nomme
+    la fiche, on dit ce qu'on a constaté, l'opérateur tranche.
+    """
+    with Session(engine) as session:
+        autre = session.exec(select(Machine).where(
+            Machine.hypervisor_id == h.id,
+            Machine.proxmox_vm_id == vm_id)).first()
+        nom = autre.hostname if autre else ""
+        mac = autre.mac if autre else ""
+        node = autre.proxmox_node if autre else ""
+
+    if not nom:
+        return (f"L'identifiant de VM {vm_id} est déjà réservé sur cet hyperviseur. "
+                f"Relancer la création : aucune VM n'a été créée ni modifiée.")
+
+    if node and await _config_vm(h, node, vm_id) is None:
+        return (f"L'identifiant {vm_id} est retenu par la fiche « {nom} » ({mac}), "
+                f"mais cette VM n'existe plus sur l'hyperviseur — elle a été supprimée "
+                f"en dehors d'OSIRIS. Retirer la fiche dans Machines, puis relancer. "
+                f"Aucune VM n'a été créée ni modifiée.")
+
+    return (f"L'identifiant {vm_id} est déjà utilisé par la fiche « {nom} » ({mac}), "
+            f"dont la VM existe toujours — déploiement simultané, ou numéro réattribué. "
+            f"Relancer la création : aucune VM n'a été créée ni modifiée.")
 
 
 def _est_conflit_de_reservation(exc: Exception) -> bool:
