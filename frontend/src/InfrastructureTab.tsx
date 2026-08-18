@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { useState } from 'react'
 import { toast } from 'sonner'
-import type { ClusterStorage, Hypervisor, Organization, Profile, ProxmoxNode, ProxmoxTemplate } from './types'
+import type { ClusterStorage, Hypervisor, NetworkDefaults, Organization, Profile, ProxmoxNetwork, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { IcoX } from './icons'
 
@@ -16,6 +16,23 @@ interface InfrastructureTabProps {
   selectedOrg: number | null
   onRefreshHypervisors: () => void
   onVmCreated: () => void
+}
+
+/** L'adresse saisie tombe-t-elle dans le réseau du bridge choisi ? `null` si l'une
+ *  des deux n'est pas exploitable — on se tait plutôt que d'alarmer à tort.
+ *
+ *  Se tromper de réseau ne fait échouer aucun appel : la VM naît, démarre, ne route
+ *  nulle part et reste « en attente » sans un mot d'explication. C'est le symptôme
+ *  le plus coûteux de toute la chaîne, et le seul moment où il est bon marché de
+ *  l'attraper est ici, avant de valider. */
+const dansLeReseau = (ip: string, reseau: string): boolean | null => {
+  const adresse = ip.split('/')[0].trim()
+  const [base, prefixe] = reseau.split('/')
+  const quadruplet = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
+  if (!quadruplet.test(adresse) || !quadruplet.test(base ?? '')) return null
+  const entier = (a: string) => a.split('.').reduce((acc, o) => acc * 256 + Number(o), 0)
+  const masque = Number(prefixe) === 0 ? 0 : (-1 << (32 - Number(prefixe))) >>> 0
+  return ((entier(adresse) & masque) >>> 0) === ((entier(base) & masque) >>> 0)
 }
 
 export function InfrastructureTab({ token, hypervisors, profiles, organizations, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
@@ -32,7 +49,8 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   const [vmHvId, setVmHvId]             = useState<number | ''>('')
   const [vmNode, setVmNode]             = useState('')
   const [vmStorages, setVmStorages]     = useState<{storage:string;type:string;avail_gb:number;total_gb:number}[]>([])
-  const [vmNetworks, setVmNetworks]     = useState<{iface:string;type:string;address:string}[]>([])
+  const [vmNetworks, setVmNetworks]     = useState<ProxmoxNetwork[]>([])
+  const [vmNetDef, setVmNetDef]         = useState<NetworkDefaults | null>(null)
   const [vmNodes, setVmNodes]           = useState<ProxmoxNode[]>([])
   const [vmForm, setVmForm]             = useState({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '' })
   const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
@@ -94,7 +112,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   }
 
   const loadVmResources = (hvId: number, node: string) => {
-    setVmStorages([]); setVmNetworks([])
+    setVmStorages([]); setVmNetworks([]); setVmNetDef(null)
     const h = authHeader(token)
     fetch(`${API_URL}/hypervisors/${hvId}/nodes/${node}/storages`, { headers: h })
       .then(r => r.json()).then(setVmStorages).catch(() => {})
@@ -103,7 +121,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   }
 
   const handleVmHvChange = (hvId: number) => {
-    setVmHvId(hvId); setVmNode(''); setVmStorages([]); setVmNetworks([]); setVmNodes([])
+    setVmHvId(hvId); setVmNode(''); setVmStorages([]); setVmNetworks([]); setVmNodes([]); setVmNetDef(null)
     setVmForm(f => ({ ...f, storage: '', bridge: '', template_id: '' }))
     // Les templates sont ceux de TOUT l'hyperviseur, indépendamment du nœud : sur un
     // stockage partagé, le disque d'un template est lisible par tous les nœuds, et
@@ -123,9 +141,42 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
 
   const handleVmNodeChange = (node: string) => {
     setVmNode(node)
-    setVmStorages([]); setVmNetworks([])
+    setVmStorages([]); setVmNetworks([]); setVmNetDef(null)
     setVmForm(f => ({ ...f, storage: '', bridge: '' }))
     if (vmHvId) loadVmResources(Number(vmHvId), node)
+  }
+
+  // Choisir un réseau, c'est aussi choisir une passerelle et un DNS : ces deux
+  // valeurs appartiennent au réseau, pas à la machine. On ne remplit que les champs
+  // encore vides — une saisie de l'opérateur n'est jamais écrasée par une
+  // proposition, même mieux informée.
+  const handleVmBridgeChange = (bridge: string) => {
+    setVmForm(f => ({ ...f, bridge }))
+    setVmNetDef(null)
+    if (!vmHvId || !vmNode || !bridge) return
+    fetch(`${API_URL}/hypervisors/${vmHvId}/nodes/${vmNode}/network-defaults?bridge=${encodeURIComponent(bridge)}`,
+          { headers: authHeader(token) })
+      .then(r => r.ok ? r.json() : null)
+      .then((d: NetworkDefaults | null) => {
+        if (!d) return
+        setVmNetDef(d)
+        setVmForm(f => ({
+          ...f,
+          gateway:     f.gateway     || d.gateway,
+          dns_servers: f.dns_servers || d.dns_servers,
+        }))
+      })
+      .catch(() => {})
+  }
+
+  // L'adresse est saisie par l'opérateur — OSIRIS n'en propose jamais. Mais quand le
+  // préfixe du réseau est connu, l'oubli du « /24 » n'a pas à coûter un aller-retour
+  // avec le serveur : on complète ce qui manque, sans toucher au reste.
+  const completerPrefixe = () => {
+    if (!vmNetDef?.prefixe) return
+    setVmForm(f => f.ip_cidr && !f.ip_cidr.includes('/')
+      ? { ...f, ip_cidr: `${f.ip_cidr.trim()}/${vmNetDef.prefixe}` }
+      : f)
   }
 
   const handleCreateVm = (e: React.FormEvent) => {
@@ -154,11 +205,25 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
           : `VM "${data.hostname}" créée (VMID ${data.vm_id}) - en attente de boot PXE`
       )
       setShowVmForm(false)
+      setVmNetDef(null)
       setVmForm({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '' })
       onVmCreated()
     }).catch(err => toast.error(err.message))
       .finally(() => setVmCreating(false))
   }
+
+  // Recalculés à chaque frappe : ils ne bloquent rien, ils avertissent. Un VLAN peut
+  // légitimement porter plusieurs réseaux, et OSIRIS ne voit que ses propres fiches —
+  // dans les deux cas c'est l'opérateur qui tranche, pas nous.
+  const adresseSaisie = vmForm.ip_cidr.split('/')[0].trim()
+  const horsReseau    = !!(vmNetDef?.reseau && vmForm.ip_cidr
+                           && dansLeReseau(vmForm.ip_cidr, vmNetDef.reseau) === false)
+  const dejaPrise     = !!(adresseSaisie && vmNetDef?.occupees.includes(adresseSaisie))
+  const provenance    = vmNetDef
+    ? [...new Set(Object.values(vmNetDef.origines))]
+        .map(o => o === 'bridge' ? "lu sur l'hyperviseur" : 'repris des déploiements précédents')
+        .join(' · ')
+    : ''
 
   return (
     <div className="osiris-table-wrap p-5 space-y-6 max-w-4xl">
@@ -453,9 +518,16 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                   <option value="">Stockage...</option>
                   {vmStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type}) — {s.avail_gb} Go libres</option>)}
                 </select>
-                <select required value={vmForm.bridge} onChange={e => setVmForm(f => ({...f, bridge: e.target.value}))} className="osiris-input text-xs" disabled={vmNetworks.length === 0}>
+                <select required value={vmForm.bridge} onChange={e => handleVmBridgeChange(e.target.value)} className="osiris-input text-xs" disabled={vmNetworks.length === 0}>
                   <option value="">Bridge réseau...</option>
-                  {vmNetworks.map(n => <option key={n.iface} value={n.iface}>{n.iface}{n.address ? ` (${n.address})` : ''}</option>)}
+                  {/* Le commentaire porté par le bridge est le nom du VLAN côté réseau
+                      (« ADMIN », « Clients_MUTU »…) : c'est cela que l'exploitant a en
+                      tête, pas « vmbr320 ». */}
+                  {vmNetworks.map(n => (
+                    <option key={n.iface} value={n.iface}>
+                      {n.iface}{n.comments ? ` — ${n.comments}` : ''}{n.cidr ? ` (${n.cidr})` : ''}
+                    </option>
+                  ))}
                 </select>
                 <div className="flex items-center gap-1">
                   <label className="text-[10px] text-slate-500 shrink-0">vCPU</label>
@@ -479,8 +551,10 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                     Adressage IP <span className="normal-case text-slate-700">(vide = DHCP)</span>
                   </p>
                   <div className="grid grid-cols-3 gap-2">
-                    <input placeholder="10.0.0.60/24" value={vmForm.ip_cidr}
+                    <input placeholder={vmNetDef?.reseau ? `adresse dans ${vmNetDef.reseau}` : '10.0.0.60/24'}
+                      value={vmForm.ip_cidr}
                       onChange={e => setVmForm(f => ({...f, ip_cidr: e.target.value}))}
+                      onBlur={completerPrefixe}
                       className="osiris-input text-xs font-mono" />
                     <input placeholder="Passerelle" value={vmForm.gateway}
                       onChange={e => setVmForm(f => ({...f, gateway: e.target.value}))}
@@ -492,6 +566,45 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                   <p className="text-[9px] text-slate-600">
                     À renseigner sur un VLAN sans DHCP : sans adresse, la VM démarre et ne rappelle jamais OSIRIS. Adresse en notation CIDR (préfixe /24 obligatoire), passerelle sans préfixe.
                   </p>
+
+                  {/* Passerelle et DNS sont des propriétés du RÉSEAU, pas de la machine :
+                      les retaper de mémoire à chaque déploiement n'apporte rien qu'un
+                      risque de faute de frappe. L'adresse, elle, reste saisie à la main —
+                      OSIRIS ne voit que ses propres fiches et ne peut affirmer qu'une
+                      adresse est libre. On dit donc ce qu'on sait pris, jamais ce qu'on
+                      croit disponible. */}
+                  {vmNetDef && (
+                    <div className="text-[9px] space-y-0.5 border-l-2 border-slate-800 pl-2">
+                      {vmNetDef.reseau ? (
+                        <p className="text-slate-500">
+                          Réseau <span className="font-mono text-slate-400">{vmNetDef.reseau}</span>
+                          {vmNetDef.gateway && <> · passerelle <span className="font-mono text-slate-400">{vmNetDef.gateway}</span></>}
+                          {vmNetDef.dns_servers && <> · DNS <span className="font-mono text-slate-400">{vmNetDef.dns_servers}</span></>}
+                          {provenance && <span className="text-slate-600"> — {provenance}</span>}
+                        </p>
+                      ) : (
+                        <p className="text-slate-600">
+                          Adressage inconnu pour {vmNetDef.bridge} : ce réseau ne porte aucune adresse sur le nœud, et OSIRIS n'y a encore rien déployé. Tout est à saisir — cette fois seulement, le prochain déploiement reprendra ces valeurs.
+                        </p>
+                      )}
+                      {vmNetDef.occupees.length > 0 && (
+                        <p className="text-slate-600">
+                          Déjà attribuées par OSIRIS : <span className="font-mono">{vmNetDef.occupees.join(', ')}</span> — il ignore tout des machines posées à la main, cette liste dit ce qui est pris, jamais ce qui est libre.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {horsReseau && (
+                    <p className="text-[9px] text-amber-400">
+                      ⚠ {adresseSaisie} est hors de {vmNetDef?.reseau}. Une VM adressée hors de son réseau démarre, ne route nulle part et reste « en attente » sans un mot d'explication. À vérifier — un VLAN peut légitimement porter plusieurs réseaux.
+                    </p>
+                  )}
+                  {dejaPrise && (
+                    <p className="text-[9px] text-amber-400">
+                      ⚠ {adresseSaisie} est déjà l'adresse d'une machine enregistrée dans OSIRIS.
+                    </p>
+                  )}
                 </div>
 
                 {vmForm.boot_mode === 'pxe' ? (

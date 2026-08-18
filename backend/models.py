@@ -289,6 +289,12 @@ class Machine(SQLModel, table=True):
     hypervisor_id: Optional[int] = Field(default=None, foreign_key="hypervisor.id")
     proxmox_vm_id: int = Field(default=0)   # ID de la VM dans Proxmox (ex: 101), 0 = physique
     proxmox_node: str = Field(default="")   # noeud Proxmox sur lequel tourne la VM
+    # Bridge (Proxmox) / port group (vSphere) sur lequel la VM est raccordee.
+    # Sert a proposer l'adressage des DEPLOIEMENTS SUIVANTS sur le meme reseau : la
+    # plupart des bridges d'un noeud n'ont aucune adresse IP (le noeud n'est pas sur
+    # ce VLAN), donc l'hyperviseur ne sait pas dire quelle est la passerelle ni le
+    # DNS. Ce que nous avons deploye nous, si.
+    vm_bridge: str = Field(default="")
     # ANCRE D'IDENTITE de la VM : l'UUID SMBIOS que l'hyperviseur lui a genere.
     #
     # `proxmox_vm_id` ne suffit PAS a designer une VM dans le temps : `nextid` rend

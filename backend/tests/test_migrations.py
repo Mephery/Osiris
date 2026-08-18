@@ -171,6 +171,28 @@ def test_0027_ajoute_vraiment_ses_objets_sur_une_base_deja_migree():
     assert "ix_machine_vm_reservation" in index
 
 
+def test_0029_ajoute_vraiment_sa_colonne_sur_une_base_deja_migree():
+    """Même piège que la 0027, et même remède.
+
+    Sur une base vierge, la 0001 crée déjà `vm_bridge` depuis models.py : l'`IF NOT
+    EXISTS` de la 0029 la rend muette et son vrai travail passe sous les radars. Le
+    seul chemin qui compte en production part d'une base à la 0028, sans la colonne.
+    """
+    _wipe()
+    assert _alembic("upgrade", "head").returncode == 0
+
+    with _engine().connect() as conn:
+        conn.execute(sa.text("ALTER TABLE machine DROP COLUMN IF EXISTS vm_bridge"))
+        conn.execute(sa.text("UPDATE alembic_version SET version_num = '0028'"))
+        conn.commit()
+
+    res = _alembic("upgrade", "head")
+    assert res.returncode == 0, f"la 0029 echoue en ALTER :\n{res.stderr}"
+
+    insp = sa.inspect(_engine())
+    assert "vm_bridge" in {c["name"] for c in insp.get_columns("machine")}
+
+
 def test_la_reservation_didentifiant_de_vm_est_bien_unique_et_partielle():
     """L'index doit refuser deux VM au même numéro, mais tolérer N machines physiques.
 

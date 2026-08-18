@@ -347,10 +347,16 @@ class VSphereProvider:
             out = []
             for net in _cluster(si, node).network:
                 distributed = isinstance(net, vim.dvs.DistributedVirtualPortgroup)
+                # Un port group ne porte aucune adresse : vSphere ne décrit que la
+                # commutation, pas le plan d'adressage. Champs présents mais vides,
+                # pour que le formulaire traite les deux hyperviseurs de la même
+                # façon — la proposition viendra alors des déploiements passés.
                 out.append({
                     "iface": net.name,
                     "type": "dvportgroup" if distributed else "portgroup",
                     "address": "",
+                    "cidr": "",
+                    "gateway": "",
                     "comments": "port group distribué" if distributed else "port group standard",
                 })
             return sorted(out, key=lambda n: n["iface"])

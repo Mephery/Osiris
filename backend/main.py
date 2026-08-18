@@ -4171,13 +4171,19 @@ class ProxmoxProvider:
 
     @staticmethod
     async def list_networks(h: Hypervisor, node: str) -> list[dict]:
+        # `cidr` et `gateway` arrivent dans la MÊME réponse : les exposer ne coûte
+        # aucun appel de plus et donne au formulaire de quoi proposer un adressage.
+        # Ils sont vides sur la plupart des bridges — un bridge ne porte d'adresse
+        # que si le nœud est lui-même sur ce VLAN. Voir `_defauts_reseau`.
         networks = await _proxmox_get(h, f"/api2/json/nodes/{node}/network")
         return [
             {
                 "iface":    n["iface"],
                 "type":     n.get("type", "?"),
-                "address":  n.get("address", ""),
-                "comments": n.get("comments", ""),
+                "address":  n.get("address") or "",
+                "cidr":     n.get("cidr") or "",
+                "gateway":  n.get("gateway") or "",
+                "comments": " ".join((n.get("comments") or "").split()),
             }
             for n in networks
             if n.get("type") in ("bridge", "bond")
@@ -4275,6 +4281,111 @@ async def get_node_networks(hv_id: int, node: str, _: User = Depends(require_adm
     """Réseaux disponibles (bridges Proxmox / port groups vSphere)."""
     h = _get_hypervisor(hv_id)
     return await _provider(h).list_networks(h, node)
+
+
+def _defauts_reseau(bridge: dict, deja_deployees: list) -> dict:
+    """Ce qu'on peut affirmer de l'adressage d'un réseau, et d'où on le tient.
+
+    Le formulaire de création demandait adresse, passerelle et DNS sans jamais rien
+    proposer. Or seule l'adresse appartient à la machine : la passerelle et le DNS
+    sont des propriétés du RÉSEAU, identiques pour toutes les VM qui y sont
+    raccordées. Les retaper de mémoire à chaque déploiement, c'est offrir une prise
+    à la faute de frappe là où elle coûte le plus cher — une passerelle erronée ne
+    fait échouer aucun appel, la VM démarre, ne route nulle part, et reste « en
+    attente » sans un mot d'explication.
+
+    Deux sources, dans cet ordre :
+
+    1. **Le bridge lui-même**, lu en direct sur l'hyperviseur. Autoritaire, jamais
+       périmé — mais muet la plupart du temps : un bridge ne porte une adresse que
+       si le NŒUD est lui-même sur ce VLAN, ce qui est l'exception. Les réseaux de
+       VM, eux, ne sont généralement que commutés.
+    2. **Ce qu'OSIRIS a déjà déployé sur ce même réseau.** La seule source qui
+       reste pour les bridges sans adresse, et la seule, tout court, pour le DNS.
+
+    Ce qu'on ne fait PAS : proposer une adresse IP. OSIRIS ne voit que ses propres
+    fiches — il ignore tout des machines posées à la main, et une adresse « libre »
+    à ses yeux peut très bien être déjà prise. On rend donc le réseau, le préfixe et
+    les adresses qu'on sait occupées : de quoi choisir en connaissance de cause,
+    sans jamais désigner un numéro dont on ne répond pas.
+
+    Le DNS du NŒUD est écarté délibérément. Il existe, l'API le donne, et c'est un
+    piège : un résolveur public y est courant, alors qu'une VM qui doit rejoindre un
+    domaine Active Directory a besoin des contrôleurs de ce domaine. Le proposer
+    ferait échouer la jonction, avec la caution d'OSIRIS.
+    """
+    import ipaddress
+
+    origines: dict[str, str] = {}
+    reseau, prefixe, passerelle, dns = "", 0, "", ""
+
+    if bridge.get("cidr"):
+        try:
+            iface = ipaddress.ip_interface(bridge["cidr"])
+            reseau, prefixe = str(iface.network), iface.network.prefixlen
+            origines["reseau"] = "bridge"
+        except ValueError:
+            pass
+        if bridge.get("gateway"):
+            passerelle = bridge["gateway"]
+            origines["gateway"] = "bridge"
+
+    # Les fiches sont fournies de la plus récente à la plus ancienne : la première
+    # qui renseigne un champ gagne. Une valeur ancienne ne doit pas écraser celle
+    # d'un déploiement qui a suivi une renumérotation du réseau.
+    occupees: list[str] = []
+    for m in deja_deployees:
+        try:
+            adresse = ipaddress.ip_interface(m.ip_cidr)
+        except ValueError:
+            continue
+        if str(adresse.ip) not in occupees:
+            occupees.append(str(adresse.ip))
+        if not reseau:
+            reseau, prefixe = str(adresse.network), adresse.network.prefixlen
+            origines["reseau"] = "deploiement"
+        if not passerelle and m.gateway:
+            passerelle = m.gateway
+            origines["gateway"] = "deploiement"
+        if not dns and m.dns_servers:
+            dns = m.dns_servers
+            origines["dns_servers"] = "deploiement"
+
+    return {
+        "bridge":      bridge["iface"],
+        "libelle":     bridge.get("comments", ""),
+        "reseau":      reseau,
+        "prefixe":     prefixe,
+        "gateway":     passerelle,
+        "dns_servers": dns,
+        "origines":    origines,
+        "occupees":    sorted(occupees, key=lambda a: tuple(int(x) for x in a.split(".")))
+                       if all("." in a for a in occupees) else sorted(occupees),
+    }
+
+
+@app.get("/hypervisors/{hv_id}/nodes/{node}/network-defaults")
+async def get_network_defaults(hv_id: int, node: str, bridge: str,
+                               _: User = Depends(require_admin)):
+    """Adressage connu du réseau choisi, pour préremplir le formulaire de création."""
+    h = _get_hypervisor(hv_id)
+    reseaux = await _provider(h).list_networks(h, node)
+    fiche = next((n for n in reseaux if n["iface"] == bridge), None)
+    if fiche is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Le réseau « {bridge} » n'existe pas sur le nœud {node}.")
+
+    with Session(engine) as session:
+        deja = session.exec(
+            select(Machine)
+            .where(Machine.hypervisor_id == hv_id,
+                   Machine.vm_bridge == bridge,
+                   Machine.ip_cidr != "")
+            .order_by(Machine.id.desc())
+        ).all()
+
+    return _defauts_reseau(fiche, deja)
 
 
 @app.get("/hypervisors/{hv_id}/templates")
@@ -4598,6 +4709,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                 hypervisor_id=hv_id,
                 proxmox_vm_id=vm_id,
                 proxmox_node=body.node,
+                vm_bridge=body.bridge,
                 ip_cidr=body.ip_cidr.strip(),
                 gateway=body.gateway.strip(),
                 dns_servers=body.dns_servers.strip(),

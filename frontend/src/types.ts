@@ -208,6 +208,40 @@ export interface ProxmoxNode {
   maxmem_gb: number;
 }
 
+/** Réseau proposé au raccordement d'une VM — bridge Proxmox ou port group vSphere.
+ *  `cidr` et `gateway` ne sont renseignés que si le NŒUD est lui-même sur ce VLAN,
+ *  ce qui est l'exception : un réseau de VM n'est le plus souvent que commuté. */
+export interface ProxmoxNetwork {
+  iface: string;
+  type: string;
+  address: string;
+  cidr: string;
+  gateway: string;
+  comments: string;
+}
+
+/** Adressage connu d'un réseau, pour préremplir le formulaire de création.
+ *
+ *  `origines` dit d'où vient chaque valeur — « bridge » (lu en direct sur
+ *  l'hyperviseur) ou « deploiement » (repris de ce qu'OSIRIS a déjà déployé là).
+ *  L'afficher n'est pas cosmétique : une proposition sans provenance est une
+ *  affirmation, et l'opérateur doit pouvoir la peser avant de la valider.
+ *
+ *  `occupees` liste les adresses qu'OSIRIS SAIT prises sur ce réseau — ses propres
+ *  fiches, et rien d'autre. Aucune adresse n'est jamais proposée : OSIRIS ignore
+ *  tout des machines posées à la main, et ne peut donc affirmer qu'une adresse est
+ *  libre. */
+export interface NetworkDefaults {
+  bridge: string;
+  libelle: string;
+  reseau: string;
+  prefixe: number;
+  gateway: string;
+  dns_servers: string;
+  origines: Partial<Record<'reseau' | 'gateway' | 'dns_servers', string>>;
+  occupees: string[];
+}
+
 /** Stockage d'un hyperviseur où OSIRIS peut écrire — pool Proxmox ou datastore
  *  vSphere, ramenés au même format. `node` vide = partagé par tout le cluster. */
 export interface ClusterStorage {
