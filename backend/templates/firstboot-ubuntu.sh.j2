@@ -389,16 +389,29 @@ _add_test() {
     _smoke_json+="{\"name\":\"$(echo "$name" | sed 's/"/\\"/g')\",\"ok\":$ok_val,\"detail\":\"$detail_safe\"}"
 }
 
-# Ping passerelle par defaut
+# Resolution DNS - mesuree AVANT de juger la passerelle : une resolution qui
+# aboutit sort du reseau, donc elle prouve le routage a elle seule.
+if getent hosts www.google.com > /dev/null 2>&1; then _dns_ok=true; else _dns_ok=false; fi
+
+# Ping passerelle par defaut.
+#
+# Une passerelle qui ne repond pas a l'ICMP est la NORME des qu'elle est portee par
+# un pare-feu. La declarer en panne alors que le trafic passe produit une alarme
+# permanente sur une machine saine - et une alarme permanente cesse d'etre lue, ce
+# qui coute bien plus cher que le test ne rapporte. On ne conclut donc a la panne
+# que si rien d'autre ne prouve le routage.
 _gw=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
-if [ -n "$_gw" ] && ping -c 1 -W 3 "$_gw" > /dev/null 2>&1; then
+if [ -z "$_gw" ]; then
+    _add_test "Passerelle" false "Aucune route par defaut"
+elif ping -c 1 -W 3 "$_gw" > /dev/null 2>&1; then
     _add_test "Ping passerelle ($_gw)" true
+elif [ "$_dns_ok" = "true" ]; then
+    _add_test "Ping passerelle ($_gw)" true "ICMP filtre - routage prouve par la resolution DNS"
 else
     _add_test "Ping passerelle" false "Passerelle inatteignable"
 fi
 
-# Resolution DNS
-if getent hosts www.google.com > /dev/null 2>&1; then
+if [ "$_dns_ok" = "true" ]; then
     _add_test "Resolution DNS" true
 else
     _add_test "Resolution DNS" false "Echec DNS"
