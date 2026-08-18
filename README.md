@@ -857,10 +857,23 @@ jamais un disque déjà formaté — un redéploiement n'écrase pas les donnée
 
 ### Adressage IP des VM
 
-À la création d'une VM, les champs **IP / passerelle / DNS** sont facultatifs :
-laissés vides, la machine reste en DHCP. Renseignés, cloud-init applique
-l'adresse au premier démarrage — `ipconfig0` sur Proxmox, configuration réseau
-`guestinfo` sur vSphere. Même réglage, deux véhicules.
+À la création d'une VM, l'adressage est facultatif : les trois champs laissés
+vides, la machine reste en DHCP. Renseignés, cloud-init applique l'adresse au
+premier démarrage — `ipconfig0` sur Proxmox, configuration réseau `guestinfo` sur
+vSphere. Même réglage, deux véhicules.
+
+**Dès qu'une adresse fixe est saisie, le DNS devient obligatoire** et le formulaire
+refuse sans lui. Sans bail DHCP, personne ne fournit de résolveur : la VM n'en
+aurait aucun. Et la panne serait invisible — la VM démarre, rappelle OSIRIS (joint
+par son adresse, pas par un nom) et passe « déployée ». Seul échoue ce qui traverse
+un nom : `apt-get`, donc les applications du profil et l'agent de supervision. Une
+machine annoncée prête, à moitié vide.
+
+**Passerelle et DNS sont proposés** dès qu'on choisit le réseau. Ils viennent du
+bridge lui-même quand il porte une adresse, sinon du dernier déploiement fait sur
+ce même réseau, et chaque valeur affiche sa provenance. L'adresse IP, elle, n'est
+jamais proposée : OSIRIS ne connaît que ses propres fiches et ne peut pas affirmer
+qu'une adresse est libre — il signale en revanche celles qu'il sait prises.
 
 C'est indispensable sur un **VLAN serveur**, qui n'a généralement pas de DHCP.
 Sans adresse, la VM démarre, tourne, et ne rappelle jamais OSIRIS : elle reste

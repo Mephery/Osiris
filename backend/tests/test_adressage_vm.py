@@ -115,7 +115,8 @@ def test_une_passerelle_point_a_point_reste_autorisee(client, admin_headers, mon
     _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id,
-                  ip_cidr="172.29.12.200/32", gateway="172.29.99.1")
+                  ip_cidr="172.29.12.200/32", gateway="172.29.99.1",
+                  dns_servers="8.8.8.8")
 
     assert resp.status_code != 400, resp.text
 
@@ -197,3 +198,50 @@ def test_ladressage_est_valide_quel_que_soit_le_mode(client, admin_headers, monk
 
     assert resp.status_code == 400, f"mode {mode} : {resp.text}"
     assert appels == []
+
+
+# ── L'adresse fixe sans DNS : la panne qui se déclare « déployée » ───────────
+
+def test_une_adresse_fixe_sans_dns_est_refusee(client, admin_headers, monkeypatch):
+    """
+    Constaté le 18/08 en relisant le code : sans `dns_servers`, OSIRIS n'écrit aucun
+    `nameserver` dans cloud-init. En adressage fixe, personne ne prend le relais —
+    c'est justement le bail DHCP qui aurait fourni un résolveur.
+
+    Et la panne ne se voit pas. La VM démarre, rappelle OSIRIS (joint par son
+    adresse, pas par un nom) et passe « déployée ». Ce qui échoue ensuite ne passe
+    que par des noms : `apt-get`, donc les applications du profil et l'agent de
+    supervision. On obtient une machine annoncée prête, à moitié vide.
+    """
+    hv_id = _hv()
+    appels = _mouchard(monkeypatch)
+
+    resp = _creer(client, admin_headers, hv_id,
+                  ip_cidr="172.29.12.200/24", gateway="172.29.12.1", dns_servers="")
+
+    assert resp.status_code == 400, resp.text
+    assert "résolveur" in resp.json()["detail"]
+    assert appels == [], f"l'hyperviseur n'aurait pas dû être appelé : {appels}"
+
+
+def test_le_message_propose_les_deux_issues(client, admin_headers, monkeypatch):
+    """Renseigner un DNS, ou renoncer à l'adresse fixe. Un refus qui ne dit pas
+    comment en sortir se contourne en vidant le champ d'à côté, au hasard."""
+    hv_id = _hv()
+    _mouchard(monkeypatch)
+
+    d = _creer(client, admin_headers, hv_id, ip_cidr="172.29.12.200/24",
+               gateway="172.29.12.1", dns_servers="").json()["detail"]
+
+    assert "DNS" in d and "DHCP" in d
+
+
+def test_le_dhcp_reste_possible_sans_dns(client, admin_headers, monkeypatch):
+    """Le corollaire à ne pas casser : sans adresse fixe, le bail fournit le
+    résolveur et l'exiger n'aurait aucun sens."""
+    hv_id = _hv()
+    _mouchard(monkeypatch)
+
+    resp = _creer(client, admin_headers, hv_id, ip_cidr="", gateway="", dns_servers="")
+
+    assert resp.status_code != 400, resp.text

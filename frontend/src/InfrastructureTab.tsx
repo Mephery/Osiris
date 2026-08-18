@@ -565,12 +565,17 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                     <input placeholder="Passerelle" value={vmForm.gateway}
                       onChange={e => setVmForm(f => ({...f, gateway: e.target.value}))}
                       className="osiris-input text-xs font-mono" />
-                    <input placeholder="DNS (séparés par ,)" value={vmForm.dns_servers}
+                    {/* Exigé dès qu'une adresse fixe est saisie : sans DHCP pour en
+                        fournir un, la VM n'aurait AUCUN résolveur — et le dirait si peu
+                        qu'elle se déclarerait déployée. L'API refuse aussi, mais autant
+                        le dire avant d'envoyer le formulaire. */}
+                    <input placeholder={vmForm.ip_cidr ? 'DNS — obligatoire' : 'DNS (séparés par ,)'}
+                      required={!!vmForm.ip_cidr} value={vmForm.dns_servers}
                       onChange={e => setVmForm(f => ({...f, dns_servers: e.target.value}))}
                       className="osiris-input text-xs font-mono" />
                   </div>
                   <p className="text-[9px] text-slate-600">
-                    À renseigner sur un VLAN sans DHCP : sans adresse, la VM démarre et ne rappelle jamais OSIRIS. Adresse en notation CIDR (préfixe /24 obligatoire), passerelle sans préfixe.
+                    À renseigner sur un VLAN sans DHCP : sans adresse, la VM démarre et ne rappelle jamais OSIRIS. Adresse en notation CIDR (préfixe /24 obligatoire), passerelle sans préfixe. En adressage fixe, le DNS est obligatoire — aucun bail ne viendra en fournir un.
                   </p>
 
                   {/* Passerelle et DNS sont des propriétés du RÉSEAU, pas de la machine :

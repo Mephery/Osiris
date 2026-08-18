@@ -4596,6 +4596,10 @@ def _valider_adressage(body) -> None:
     hors sujet ne fait échouer aucun appel : la VM démarre, ne route nulle part, ne
     rappelle jamais OSIRIS, et reste « en attente » sans un mot d'explication —
     le symptôme le plus coûteux de toute la chaîne.
+
+    Et l'on refuse une adresse fixe sans DNS, pour la même raison exactement : c'est
+    le bail DHCP qui aurait fourni un résolveur, personne ne le remplace, et la VM
+    se déclare pourtant déployée.
     """
     import ipaddress
 
@@ -4637,6 +4641,20 @@ def _valider_adressage(body) -> None:
                 f"La passerelle {gw} est hors du réseau {interface.network} déduit de "
                 f"l'adresse. La VM démarrerait sans route utilisable et ne rappellerait "
                 f"jamais OSIRIS — elle resterait « en attente » sans explication."))
+
+    # Une adresse fixe SANS DNS produit une VM sans aucun résolveur : rien ne prend
+    # le relais, puisque c'est justement le bail DHCP qui en aurait fourni un. Et la
+    # panne ne se voit pas — la VM démarre, rappelle OSIRIS (joint par son adresse) et
+    # passe « déployée ». Ce qui échoue ensuite ne passe que par des noms : `apt-get`,
+    # donc les applications du profil et l'installation de l'agent de supervision. On
+    # obtient une machine qui se déclare prête avec la moitié de son contenu absente.
+    if not dns:
+        raise HTTPException(status_code=400, detail=(
+            f"L'adresse {ip} est fixe, mais aucun serveur DNS n'est renseigné : la VM "
+            f"démarrerait sans le moindre résolveur. Elle rappellerait bien OSIRIS, qui "
+            f"est joint par son adresse — mais tout ce qui passe par un nom échouerait "
+            f"en silence, à commencer par l'installation des applications. Renseigner "
+            f"un serveur DNS, ou vider l'adresse pour rester en DHCP."))
 
     for serveur in [x.strip() for x in dns.split(",") if x.strip()]:
         try:
