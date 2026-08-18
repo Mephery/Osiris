@@ -184,6 +184,11 @@ export interface Hypervisor {
   snippets_storage: string;
   /** URL d'OSIRIS telle que la voient les VM de cet hyperviseur. Vide = URL globale. */
   callback_url: string;
+  /** Collecteur Zabbix des VM de cet hyperviseur. Vide = celui de leur organisation.
+   *  Le collecteur dépend du SITE où la machine tourne, pas de son propriétaire :
+   *  visé depuis l'hyperviseur, c'est presque toujours un voisin du même
+   *  sous-réseau, et la supervision ne traverse aucun pare-feu. */
+  zabbix_server: string;
   organization_id: number | null;
   created_at: string;
 }

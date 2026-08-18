@@ -193,6 +193,24 @@ def test_0029_ajoute_vraiment_sa_colonne_sur_une_base_deja_migree():
     assert "vm_bridge" in {c["name"] for c in insp.get_columns("machine")}
 
 
+def test_0030_ajoute_vraiment_sa_colonne_sur_une_base_deja_migree():
+    """Même piège que les 0027 et 0029 : sur une base vierge la 0001 crée déjà la
+    colonne, et l'`IF NOT EXISTS` masque le seul chemin qui compte en production."""
+    _wipe()
+    assert _alembic("upgrade", "head").returncode == 0
+
+    with _engine().connect() as conn:
+        conn.execute(sa.text("ALTER TABLE hypervisor DROP COLUMN IF EXISTS zabbix_server"))
+        conn.execute(sa.text("UPDATE alembic_version SET version_num = '0029'"))
+        conn.commit()
+
+    res = _alembic("upgrade", "head")
+    assert res.returncode == 0, f"la 0030 echoue en ALTER :\n{res.stderr}"
+
+    insp = sa.inspect(_engine())
+    assert "zabbix_server" in {c["name"] for c in insp.get_columns("hypervisor")}
+
+
 def test_la_reservation_didentifiant_de_vm_est_bien_unique_et_partielle():
     """L'index doit refuser deux VM au même numéro, mais tolérer N machines physiques.
 

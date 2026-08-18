@@ -177,6 +177,17 @@ class Hypervisor(SQLModel, table=True):
     # une VM qui ne l'atteint pas ne rappelle jamais OSIRIS — elle reste
     # eternellement « en attente » sans que rien n'explique pourquoi.
     callback_url: str = Field(default="")
+    # Collecteur Zabbix des VM DE CET HYPERVISEUR. Vide = celui de l'organisation
+    # de la machine.
+    #
+    # Le collecteur depend de l'endroit ou la machine TOURNE, pas de son
+    # proprietaire : chaque site a son propre proxy Zabbix, et une VM doit parler a
+    # celui de son site, quel que soit le client a qui elle appartient. Porte par la
+    # seule organisation, le champ ne pouvait pas exprimer trois sites — toutes les
+    # VM visaient le proxy d'un site unique, ce qui obligeait a ouvrir un flux de
+    # supervision a travers chaque pare-feu traverse. Vise depuis l'hyperviseur, le
+    # collecteur est presque toujours un voisin du meme sous-reseau : aucune regle.
+    zabbix_server: str = Field(default="")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

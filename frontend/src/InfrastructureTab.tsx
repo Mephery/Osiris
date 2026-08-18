@@ -36,7 +36,7 @@ const dansLeReseau = (ip: string, reseau: string): boolean | null => {
 }
 
 export function InfrastructureTab({ token, hypervisors, profiles, organizations, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
-  const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '' })
+  const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '' })
   const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; storages?: ClusterStorage[]; error?: string } | null>>({})
   // Fiche en cours d'édition. Il n'existait AUCUN moyen de modifier un hyperviseur
   // enregistré : ni ici, ni ailleurs dans l'UI. Tout champ ajouté après coup — le
@@ -62,7 +62,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
       body: JSON.stringify(newHv),
-    }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
+    }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
       .catch(() => toast.error('Erreur création hyperviseur'))
   }
 
@@ -74,7 +74,8 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
     // formulaire = « ne pas y toucher », comme pour le secret du jeton.
     setEditHv({ name: h.name, url: h.url, token_id: h.token_id, token_secret: '', ca_cert: '',
                 tls_verify: h.tls_verify, pool: h.pool ?? '',
-                snippets_storage: h.snippets_storage ?? '', callback_url: h.callback_url ?? '' })
+                snippets_storage: h.snippets_storage ?? '', callback_url: h.callback_url ?? '',
+                zabbix_server: h.zabbix_server ?? '' })
   }
 
   const handleSaveHv = (e: React.FormEvent) => {
@@ -300,6 +301,11 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                     <input placeholder="URL de rappel — vide = URL globale" value={editHv.callback_url ?? ''}
                       onChange={e => setEditHv({ ...editHv, callback_url: e.target.value })}
                       className="osiris-input text-xs font-mono col-span-2" />
+                    <input placeholder="Collecteur Zabbix du site — vide = celui de l'organisation"
+                      value={editHv.zabbix_server ?? ''}
+                      onChange={e => setEditHv({ ...editHv, zabbix_server: e.target.value })}
+                      className="osiris-input text-xs font-mono col-span-2"
+                      title="Chaque site a son propre proxy Zabbix. Vise depuis l'hyperviseur, le collecteur est presque toujours un voisin du meme sous-reseau : la supervision ne traverse aucun pare-feu. Vide = celui de l'organisation de la machine." />
                     {/* Un cluster Proxmox signe ses noeuds avec SA propre autorite, qu'aucun
                         magasin public ne connait. La coller ici rend le certificat verifiable,
                         sans Let's Encrypt ni nom de domaine. Ce n'est pas un secret. */}
@@ -657,6 +663,10 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
             value={newHv.callback_url} onChange={e => setNewHv({ ...newHv, callback_url: e.target.value })}
             className="osiris-input text-xs font-mono col-span-2"
             title="À renseigner si les VM de cet hyperviseur joignent OSIRIS à une autre adresse que le réseau de déploiement. L'URL est gravée dans les scripts de premier démarrage." />
+          <input placeholder="Collecteur Zabbix des VM de cet hyperviseur — vide = celui de leur organisation"
+            value={newHv.zabbix_server} onChange={e => setNewHv({ ...newHv, zabbix_server: e.target.value })}
+            className="osiris-input text-xs font-mono col-span-2"
+            title="Chaque site a son propre proxy Zabbix. Vise depuis l'hyperviseur, le collecteur est presque toujours un voisin du meme sous-reseau : la supervision ne traverse aucun pare-feu. Vide = celui de l'organisation de la machine." />
         </div>
         <div className="flex items-center justify-between">
           <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">

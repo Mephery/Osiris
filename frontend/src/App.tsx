@@ -1806,11 +1806,14 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                 </label>
                 <p className="text-[10px] text-slate-600 leading-relaxed">
                   {(() => {
+                    // L'hyperviseur l'emporte : le collecteur dépend du site où la
+                    // machine tourne, pas du client à qui elle appartient.
                     const org = orgs.find(o => o.id === formData.organization_id)
-                    if (!org) return "L'agent n'est installé que si l'organisation de la machine déclare un collecteur Zabbix — celle-ci n'en a pas encore."
-                    return org.zabbix_server
-                      ? `Agent en mode actif vers ${org.zabbix_server} (TCP 10051).`
-                      : `${org.name} n'a pas de collecteur Zabbix : à renseigner dans Administration › Organisations.`
+                    const hv  = hypervisors.find(h => h.id === formData.hypervisor_id)
+                    if (hv?.zabbix_server) return `Agent en mode actif vers ${hv.zabbix_server} (TCP 10051), le collecteur de ${hv.name}.`
+                    if (org?.zabbix_server) return `Agent en mode actif vers ${org.zabbix_server} (TCP 10051).`
+                    if (!org) return "L'agent n'est installé que si un collecteur Zabbix est déclaré, sur l'hyperviseur ou sur l'organisation de la machine — aucun des deux n'en a."
+                    return `${org.name} n'a pas de collecteur Zabbix : à renseigner sur son hyperviseur, ou dans Administration › Organisations.`
                   })()}
                 </p>
               </div>

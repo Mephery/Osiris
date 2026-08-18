@@ -1698,6 +1698,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
         linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
         org = session.get(Organization, machine.organization_id) if machine.organization_id else None
+        hyperviseur = session.get(Hypervisor, machine.hypervisor_id) if machine.hypervisor_id else None
         profile_ctx = _profile_for_template(profile, session)
         osiris_url = _osiris_url_for(session, machine)
     tv_suffix = profile_ctx.get("tv_suffix", "")
@@ -1707,7 +1708,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         profile=profile_ctx,
         tv_password=tv_password,
         linux_apps=list(linux_apps),
-        zabbix=_zabbix_context(machine, org),
+        zabbix=_zabbix_context(machine, org, hyperviseur),
         # Le disque de données est une décision de PROFIL (« ce type de serveur a
         # un volume de données séparé »), sa taille une décision de formulaire.
         data_disk_gb=profile_ctx.get("vm_data_disk_gb", 0),
@@ -1716,22 +1717,36 @@ def _render_linux_firstboot(mac: str) -> Response:
     return Response(content=content, media_type="text/plain")
 
 
-def _zabbix_context(machine: Machine, org: Optional[Organization]) -> Optional[dict]:
+def _zabbix_context(machine: Machine, org: Optional[Organization],
+                   hyperviseur: Optional[Hypervisor] = None) -> Optional[dict]:
     """
     Paramètres de l'agent Zabbix pour cette machine, ou None s'il ne faut pas l'installer.
 
-    Deux conditions : la machine est cochée « supervisée » ET son organisation
-    déclare un collecteur. Sans organisation, pas d'adresse à qui parler — on
-    n'installe rien plutôt que d'installer un agent muet.
+    Deux conditions : la machine est cochée « supervisée » ET un collecteur est
+    connu. Sans adresse à qui parler, on n'installe rien plutôt qu'un agent muet.
+
+    **L'hyperviseur l'emporte sur l'organisation**, parce que le collecteur dépend
+    de l'endroit où la machine TOURNE, pas de son propriétaire : chaque site a son
+    propre relais, et une VM doit parler à celui de son site quel que soit le client
+    à qui elle appartient. Ce n'est pas une préférence d'architecture, cela se paie
+    en pare-feu — un collecteur distant fait traverser tous les filtres du trajet,
+    et il suffit qu'une autorisation manque sur l'un d'eux pour que la supervision
+    se taise sans que rien ne le signale. Le collecteur du site, lui, est presque
+    toujours un voisin du même sous-réseau : aucune règle à écrire.
+
+    L'organisation reste le défaut. C'est le seul champ dont dispose une machine
+    physique, qui n'a pas d'hyperviseur.
     """
-    if not machine.supervised or not org or not org.zabbix_server:
+    collecteur = ((hyperviseur.zabbix_server if hyperviseur else "") or
+                  (org.zabbix_server if org else "")).strip()
+    if not machine.supervised or not collecteur:
         return None
     return {
-        "server": org.zabbix_server,
+        "server": collecteur,
         "hostname": machine.hostname,
         # Lu par l'action d'auto-enregistrement côté Zabbix pour ranger l'hôte
         # dans le bon groupe / modèle sans avoir à le créer à la main.
-        "metadata": f"osiris linux {org.slug}".strip(),
+        "metadata": f"osiris linux {org.slug if org else ''}".strip(),
     }
 
 
@@ -3462,6 +3477,7 @@ class HypervisorCreate(SQLModel):
     pool: str = ""
     snippets_storage: str = ""
     callback_url: str = ""
+    zabbix_server: str = ""
     organization_id: Optional[int] = None
 
 class HypervisorPatch(SQLModel):
@@ -3475,6 +3491,7 @@ class HypervisorPatch(SQLModel):
     pool: Optional[str] = None
     snippets_storage: Optional[str] = None
     callback_url: Optional[str] = None
+    zabbix_server: Optional[str] = None
     organization_id: Optional[int] = None
 
 
@@ -3495,6 +3512,7 @@ def _hypervisor_dict(h: Hypervisor) -> dict:
         "pool": h.pool or "",
         "snippets_storage": h.snippets_storage or "",
         "callback_url": h.callback_url or "",
+        "zabbix_server": h.zabbix_server or "",
         "organization_id": h.organization_id,
         "created_at": h.created_at.isoformat(),
     }

@@ -950,15 +950,26 @@ déploiement mélange deux horloges sans que rien ne le signale.
 
 ## Supervision Zabbix
 
-Deux réglages, l'un par organisation, l'autre par machine :
+Trois réglages : où collecter, pour qui, et pour quelle machine.
 
 | Où | Champ | Effet |
 |---|---|---|
-| Administration › Organisations | `zabbix_server` | Adresse du serveur ou proxy qui collecte cette organisation. Vide = aucune supervision. |
-| Fiche machine | `supervised` | Coché par défaut. Décocher exclut la machine sans toucher à l'organisation. |
+| Infrastructure › Hyperviseur | `zabbix_server` | Collecteur des VM de cet hyperviseur. **Prioritaire.** Vide = celui de l'organisation. |
+| Administration › Organisations | `zabbix_server` | Collecteur par défaut des machines de cette organisation. Vide = aucune supervision. |
+| Fiche machine | `supervised` | Coché par défaut. Décocher exclut la machine sans toucher au reste. |
 
-L'agent n'est installé que si **les deux** conditions sont réunies : un agent sans
-collecteur à qui parler serait muet.
+L'agent n'est installé que si la machine est supervisée **et** qu'un collecteur est
+connu : un agent sans adresse à qui parler serait muet.
+
+**Pourquoi l'hyperviseur l'emporte.** Le collecteur dépend de l'endroit où la machine
+tourne, pas du client à qui elle appartient. Une infrastructure répartie sur plusieurs
+sites a généralement un relais par site ; viser celui d'un autre site fait traverser à
+la supervision tous les pare-feux du trajet, et il suffit qu'une autorisation manque
+sur l'un d'eux pour que l'agent se taise sans que rien ne le signale. Renseigné sur
+l'hyperviseur, le collecteur est presque toujours un voisin du même sous-réseau que
+les VM : aucune règle à écrire, aucun filtre à traverser.
+
+L'organisation reste le défaut, et le seul réglage possible pour une machine physique.
 
 Le premier démarrage installe `zabbix-agent2` (ou `zabbix-agent` à défaut) depuis les
 dépôts de la distribution, puis écrit un fichier à part —
