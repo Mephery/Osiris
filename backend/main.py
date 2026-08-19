@@ -1687,6 +1687,31 @@ def _osiris_url_for(session: Session, machine: Machine) -> str:
     return OSIRIS_BASE_URL
 
 
+def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: dict,
+                             linux_apps: list, zabbix: Optional[dict],
+                             osiris_url: str) -> str:
+    """Le script de premier démarrage Linux, rendu à partir d'un contexte explicite.
+
+    Volontairement sans accès à la base : le script est aussi embarqué dans le
+    cloud-init AU MOMENT de la création de la VM, et sur vSphere la MAC définitive
+    n'est connue qu'une fois le clone fait — la fiche machine porte encore la MAC
+    provisoire à cet instant. Passer par une recherche en base rendrait donc le
+    rendu impossible précisément là où on en a besoin.
+    """
+    tv_suffix = profile_ctx.get("tv_suffix", "")
+    return jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
+        machine={"hostname": hostname, "mac": mac, "ou": ou},
+        profile=profile_ctx,
+        tv_password=f"{hostname.upper()}{tv_suffix}" if tv_suffix else "",
+        linux_apps=linux_apps,
+        zabbix=zabbix,
+        # Le disque de données est une décision de PROFIL (« ce type de serveur a
+        # un volume de données séparé »), sa taille une décision de formulaire.
+        data_disk_gb=profile_ctx.get("vm_data_disk_gb", 0),
+        osiris_url=osiris_url,
+    )
+
+
 def _render_linux_firstboot(mac: str) -> Response:
     """Rend le script de premier démarrage Linux (Ubuntu et Debian partagent apt-get)."""
     clean_mac = validate_mac(mac)
@@ -1701,18 +1726,11 @@ def _render_linux_firstboot(mac: str) -> Response:
         hyperviseur = session.get(Hypervisor, machine.hypervisor_id) if machine.hypervisor_id else None
         profile_ctx = _profile_for_template(profile, session)
         osiris_url = _osiris_url_for(session, machine)
-    tv_suffix = profile_ctx.get("tv_suffix", "")
-    tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
-    content = jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
-        machine=machine,
-        profile=profile_ctx,
-        tv_password=tv_password,
-        linux_apps=list(linux_apps),
-        zabbix=_zabbix_context(machine, org, hyperviseur),
-        # Le disque de données est une décision de PROFIL (« ce type de serveur a
-        # un volume de données séparé »), sa taille une décision de formulaire.
-        data_disk_gb=profile_ctx.get("vm_data_disk_gb", 0),
-        osiris_url=osiris_url,
+        zabbix = _zabbix_context(machine, org, hyperviseur)
+    content = _firstboot_linux_content(
+        hostname=machine.hostname, mac=machine.mac, ou=machine.ou,
+        profile_ctx=profile_ctx, linux_apps=list(linux_apps),
+        zabbix=zabbix, osiris_url=osiris_url,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -4573,12 +4591,38 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str) -> str:
                           if a.id in ids and a.apt_package]
     osiris_url = (h.callback_url or "").rstrip("/") \
         or os.environ.get("OSIRIS_BASE_URL", "http://osiris:8000")
+
+    # Le script de premier démarrage voyage AVEC la VM, au lieu d'être téléchargé
+    # au boot. Une machine qui ne joint pas OSIRIS — VLAN sans route de retour,
+    # pare-feu, panne — se configurait alors à moitié : cloud-init posait bien le
+    # hostname, le compte et les paquets, mais tout ce que porte ce script (volume
+    # de données, agent Zabbix, jonction au domaine) était perdu avec le
+    # téléchargement. Embarqué, il s'exécute quoi qu'il arrive ; seul le compte
+    # rendu à OSIRIS dépend encore du réseau.
+    with Session(engine) as session:
+        org = (session.get(Organization, body.organization_id)
+               if body.organization_id else None)
+        zabbix = _zabbix_context(
+            Machine(mac=mac_plain, hostname=body.hostname, os=body.os),
+            org, h,
+        )
+    firstboot = _firstboot_linux_content(
+        hostname=body.hostname, mac=mac_plain, ou=body.ou,
+        profile_ctx=profile_tpl, linux_apps=linux_apps,
+        zabbix=zabbix, osiris_url=osiris_url,
+    )
+
     return jinja_env.get_template("cloud-init-user-data.j2").render(
         machine={"hostname": body.hostname, "password_hash": "", "mac": mac_plain},
         profile=profile_tpl,
         linux_apps=linux_apps,
         mac=mac_plain,
         osiris_url=osiris_url,
+        # base64 : le script contient guillemets, apostrophes et sauts de ligne à
+        # foison. L'inclure en clair dans du YAML demanderait une indentation
+        # parfaite sur 300 lignes, et la moindre dérive casserait le cloud-init
+        # entier sans rien dire.
+        firstboot_b64=base64.b64encode(firstboot.encode()).decode(),
     )
 
 

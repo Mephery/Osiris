@@ -32,10 +32,24 @@ packages:
 {% endfor %}
 {% endif %}
 
+{% if firstboot_b64 %}
+# Le script voyage avec la VM plutot que d'etre telecharge au demarrage : une
+# machine qui ne joint pas OSIRIS se configure quand meme entierement, et seul
+# son compte rendu se perd. Encode en base64 pour ne pas confier 300 lignes de
+# bash a l'indentation du YAML.
+write_files:
+  - path: /usr/local/bin/osiris-firstboot.sh
+    permissions: '0755'
+    encoding: b64
+    content: {{ firstboot_b64 }}
+{% endif %}
+
 runcmd:
-  - curl -sf -X POST '{{ osiris_url }}/machines/{{ mac }}/status?status=deploying' || true
+  - curl -sf -m 15 -X POST '{{ osiris_url }}/machines/{{ mac }}/status?status=deploying' || true
+{% if not firstboot_b64 %}
   - curl -sf -o /usr/local/bin/osiris-firstboot.sh '{{ osiris_url }}/firstboot-ubuntu/{{ mac }}'
   - chmod +x /usr/local/bin/osiris-firstboot.sh
+{% endif %}
   - /usr/local/bin/osiris-firstboot.sh
 
 final_message: "OSIRIS cloud-init termine pour {{ machine.hostname }}"
