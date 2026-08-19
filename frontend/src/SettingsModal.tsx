@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { QRCodeSVG } from 'qrcode.react'
 import { authHeader } from './types'
+import type { ApiKey } from './types'
 import { IcoX } from './icons'
 import { IntegrationsTab } from './IntegrationsTab'
 
@@ -11,7 +12,7 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
 export function SettingsModal({ token, onClose }: { token: string; onClose: () => void }) {
   const [settingsTab, setSettingsTab] = useState<'password' | 'totp' | 'apikeys' | 'integrations'>('password')
-  const [apiKeys, setApiKeys] = useState<any[]>([])
+  const [apiKeys, setApiKeys] = useState<ApiKey[]>([])
   const [newKeyName, setNewKeyName] = useState('')
   const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [pwCurrent, setPwCurrent] = useState('')
@@ -26,21 +27,21 @@ export function SettingsModal({ token, onClose }: { token: string; onClose: () =
   const [totpDisablePassword, setTotpDisablePassword] = useState('')
   const [totpStep, setTotpStep] = useState<null | 'setup' | 'confirm_disable'>(null)
 
-  const fetchTotpStatus = () => {
+  const fetchTotpStatus = useCallback(() => {
     fetch(`${API_URL}/auth/totp/status`, { headers: authHeader(token) })
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data) setTotpEnabled(data.totp_enabled) })
       .catch(() => {})
-  }
+  }, [token])
 
-  const fetchApiKeys = () => {
+  const fetchApiKeys = useCallback(() => {
     fetch(`${API_URL}/auth/api-keys`, { headers: authHeader(token) })
       .then(r => r.ok ? r.json() : [])
       .then(setApiKeys)
       .catch(() => {})
-  }
+  }, [token])
 
-  useEffect(() => { fetchTotpStatus(); fetchApiKeys() }, [token])
+  useEffect(() => { fetchTotpStatus(); fetchApiKeys() }, [token, fetchTotpStatus, fetchApiKeys])
 
   const startTotpSetup = () => {
     fetch(`${API_URL}/auth/totp/setup`, { headers: authHeader(token) })
@@ -124,7 +125,7 @@ export function SettingsModal({ token, onClose }: { token: string; onClose: () =
             { id: 'apikeys', label: 'Cles API' },
             { id: 'integrations', label: 'Integrations' },
           ] as const).map(t => (
-            <button key={t.id} onClick={() => { setSettingsTab(t.id as any); if (t.id === 'apikeys') fetchApiKeys() }}
+            <button key={t.id} onClick={() => { setSettingsTab(t.id); if (t.id === 'apikeys') fetchApiKeys() }}
               className={`px-5 py-2.5 text-xs font-semibold tracking-wide border-b-2 transition-colors cursor-pointer ${settingsTab === t.id ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-600 hover:text-slate-400'}`}>
               {t.label}
             </button>
@@ -182,7 +183,7 @@ export function SettingsModal({ token, onClose }: { token: string; onClose: () =
             {/* Liste des cles */}
             {apiKeys.length > 0 ? (
               <div className="space-y-1">
-                {apiKeys.map((k: any) => (
+                {apiKeys.map((k) => (
                   <div key={k.id} className="flex items-center justify-between py-2 px-3 border border-slate-800/60 rounded">
                     <div>
                       <span className="text-white text-xs font-medium">{k.name}</span>

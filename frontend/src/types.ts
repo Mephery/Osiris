@@ -28,6 +28,31 @@ export type OrganizationPatch = Partial<Omit<Organization, 'has_bios_password'>>
   bios_password?: string;
 };
 
+export interface DomainConfig {
+  id: number;
+  organization_id: number;
+  name: string;
+  domain: string;
+  join_user: string;
+  default_ou: string;
+  wifi_ssid: string;
+  has_wifi_password: boolean;
+}
+
+export interface SmokeTest {
+  name: string;
+  ok: boolean;
+  detail?: string;
+}
+
+export interface ApiKey {
+  id: number;
+  name: string;
+  prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
 export interface VpnTunnel {
   id: number;
   organization_id: number;

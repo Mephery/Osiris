@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import type { Machine } from './types'
 import { authHeader } from './types'
@@ -17,13 +17,13 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
   const [captureStep, setCaptureStep] = useState(1)
   const prevStatuses = useRef<Record<string, string>>({})
 
-  const fetchCaptures = () => {
+  const fetchCaptures = useCallback(() => {
     fetch(`${API_URL}/capture`, { headers: authHeader(token) })
       .then(r => r.json()).then(d => setCaptureJobs(d.jobs ?? []))
       .catch(() => {})
-  }
+  }, [token])
 
-  useEffect(() => { fetchCaptures() }, [token, refreshSignal])
+  useEffect(() => { fetchCaptures() }, [token, refreshSignal, fetchCaptures])
 
   // Polling live tant qu'une capture est en attente de boot ou en cours,
   // pour refléter les changements de statut sans clic manuel sur « Rafraîchir ».
@@ -32,7 +32,7 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
     if (!hasActive) return
     const id = setInterval(fetchCaptures, 5000)
     return () => clearInterval(id)
-  }, [captureJobs, token])
+  }, [captureJobs, token, fetchCaptures])
 
   // Auto-avancement de l'étape + notifications aux transitions de statut.
   // On ne réagit qu'aux VRAIS changements (job déjà vu qui change d'état) :

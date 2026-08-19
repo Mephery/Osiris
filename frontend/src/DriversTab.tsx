@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import type { DriverPack } from './types'
 import { authHeader } from './types'
@@ -11,23 +11,25 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
 export function DriversTab({ token }: { token: string }) {
   const [drivers, setDrivers]           = useState<DriverPack[]>([])
-  const [driversLoading, setDriversLoading] = useState(false)
+  // Vrai dès le premier rendu : l'effet de montage n'a alors plus besoin de
+  // basculer l'état de manière synchrone, ce que React 19 signale comme un
+  // rendu en cascade. Les rafraîchissements manuels le basculent eux-mêmes.
+  const [driversLoading, setDriversLoading] = useState(true)
   const [syncing, setSyncing]           = useState<string | null>(null)
   const [downloadingPack, setDownloadingPack] = useState<number | null>(null)
   const [driverSearch, setDriverSearch]       = useState('')
   const [expandedVendors, setExpandedVendors] = useState<Set<string>>(new Set())
 
-  const fetchDrivers = (vendor = 'all') => {
-    setDriversLoading(true)
+  const fetchDrivers = useCallback((vendor = 'all') => {
     const qs = vendor !== 'all' ? `?vendor=${vendor}` : ''
     fetch(`${API_URL}/drivers${qs}`, { headers: authHeader(token) })
       .then((r) => r.json())
       .then((d) => setDrivers(Array.isArray(d) ? d : []))
       .catch(() => {})
       .finally(() => setDriversLoading(false))
-  }
+  }, [token])
 
-  useEffect(() => { fetchDrivers() }, [token])
+  useEffect(() => { fetchDrivers() }, [token, fetchDrivers])
 
   const handleSync = (vendor: string, delay: number) => {
     setSyncing(vendor)
@@ -39,13 +41,13 @@ export function DriversTab({ token }: { token: string }) {
           setSyncing(null)
           return
         }
-        setTimeout(() => { fetchDrivers(); setSyncing(null) }, delay)
+        setTimeout(() => { setDriversLoading(true); fetchDrivers(); setSyncing(null) }, delay)
       })
       .catch((err) => { toast.error(`Erreur réseau : ${err.message}`); setSyncing(null) })
   }
 
   const toggleVendor = (vendor: string) =>
-    setExpandedVendors(prev => { const s = new Set(prev); s.has(vendor) ? s.delete(vendor) : s.add(vendor); return s })
+    setExpandedVendors(prev => { const s = new Set(prev); if (s.has(vendor)) s.delete(vendor); else s.add(vendor); return s })
 
   const handleDownloadPack = (id: number) => {
     setDownloadingPack(id)
@@ -60,7 +62,7 @@ export function DriversTab({ token }: { token: string }) {
       <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800/80">
         <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Catalogue Drivers</h2>
         <div className="flex gap-2 flex-wrap">
-          <button onClick={() => fetchDrivers()} className="osiris-btn-ghost text-[10px]">
+          <button onClick={() => { setDriversLoading(true); fetchDrivers() }} className="osiris-btn-ghost text-[10px]">
             {driversLoading ? 'Chargement…' : <><IcoRefresh cls="w-3 h-3 inline" /> Rafraîchir</>}
           </button>
           <button onClick={() => handleSync('dell', 15000)} disabled={syncing !== null} className="osiris-btn text-xs">

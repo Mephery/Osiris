@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Toaster, toast } from 'sonner'
 import './App.css'
 import type {
   AuthState, Organization, OrganizationPatch, Machine, Profile, Application,
   DeploymentEvent, Hypervisor, OsImage, SnapshotEntry, LiveEvent, VpnTunnel,
+  DomainConfig, DriverPack, SmokeTest,
 } from './types'
 import { IMAGE_STATUS, EMPTY_FORM, authHeader } from './types'
 import {
@@ -89,7 +90,7 @@ export default function App() {
   // Fiche telle qu'elle était à l'ouverture de la modale (cf. openEdit).
   const [formSnapshot, setFormSnapshot] = useState<Machine>(EMPTY_FORM)
   const [submitError, setSubmitError]   = useState<string | null>(null)
-  const [driverPacks, setDriverPacks]   = useState<any[]>([])
+  const [driverPacks, setDriverPacks]   = useState<DriverPack[]>([])
 
   // Confirmation suppression
   const [deletingMac, setDeletingMac]         = useState<string | null>(null)
@@ -268,12 +269,12 @@ export default function App() {
 
   // Domaines AD par organisation
   const EMPTY_DOMAIN_CONFIG = { organization_id: 0, name: '', domain: '', join_user: '', join_password: '', default_ou: '', wifi_ssid: '', wifi_password: '' }
-  const [domainConfigs, setDomainConfigs] = useState<any[]>([])
+  const [domainConfigs, setDomainConfigs] = useState<DomainConfig[]>([])
   const [newDomainConfig, setNewDomainConfig] = useState(EMPTY_DOMAIN_CONFIG)
   // id de la config AD en cours d'édition (null = mode création)
   const [editingDcId, setEditingDcId] = useState<number | null>(null)
 
-  const startEditDomainConfig = (dc: any) => {
+  const startEditDomainConfig = (dc: DomainConfig) => {
     setEditingDcId(dc.id)
     // les mots de passe ne sont jamais renvoyés par l'API → champs laissés vides = « inchangé »
     setNewDomainConfig({
@@ -290,7 +291,7 @@ export default function App() {
     if (!newDomainConfig.organization_id || !newDomainConfig.name || !newDomainConfig.domain) { toast.error('Organisation, nom et domaine requis'); return }
     if (editingDcId !== null) {
       // PATCH : on n'envoie les mots de passe que s'ils ont été saisis (vide = conserver l'existant, sinon on les effacerait)
-      const body: any = {
+      const body: Record<string, string> = {
         name: newDomainConfig.name, domain: newDomainConfig.domain, join_user: newDomainConfig.join_user,
         default_ou: newDomainConfig.default_ou, wifi_ssid: newDomainConfig.wifi_ssid,
       }
@@ -317,7 +318,7 @@ export default function App() {
 
   // ── Chargement des données ──────────────────────────────────────────────────
 
-  const fetchAll = (token: string, orgFilter: number | null = null) => {
+  const fetchAll = useCallback((token: string, orgFilter: number | null = null) => {
     setLoading(true)
     setError(null)  // repart propre : sinon une erreur précédente (ex. « Session expirée » sur token périmé) reste affichée après une reconnexion réussie
     const url = orgFilter ? `${API_URL}/machines?org_id=${orgFilter}` : `${API_URL}/machines`
@@ -325,66 +326,73 @@ export default function App() {
       .then((res) => { if (res.status === 401) { setAuth(null); throw new Error("Session expirée") } if (!res.ok) throw new Error("Erreur API"); return res.json() })
       .then((data) => { setMachines(data); setLoading(false) })
       .catch((err) => { setError(err.message); setLoading(false) })
-  }
+  }, [])
 
-  const fetchOrgs = (token: string) => {
+  const fetchOrgs = useCallback((token: string) => {
     fetch(`${API_URL}/organizations`, { headers: authHeader(token) })
       .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
       .then((data) => setOrgs(Array.isArray(data) ? data : []))
       .catch(() => {})
-  }
+  }, [])
 
-  const fetchUsers = (token: string) => {
+  const fetchUsers = useCallback((token: string) => {
     fetch(`${API_URL}/users`, { headers: authHeader(token) })
       .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
       .then((data) => setUsers(Array.isArray(data) ? data : []))
       .catch(() => {})
-  }
+  }, [])
 
-  const fetchImages = (token: string) => {
+  const fetchImages = useCallback((token: string) => {
     fetch(`${API_URL}/images`, { headers: authHeader(token) })
       .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
       .then((data) => setImages(Array.isArray(data) ? data : []))
       .catch(() => {})
-  }
+  }, [])
 
-  const fetchProfiles = (token: string) => {
+  const fetchProfiles = useCallback((token: string) => {
     fetch(`${API_URL}/profiles`, { headers: authHeader(token) })
       .then((res) => { if (res.status === 401) setAuth(null); return res.ok ? res.json() : [] })
       .then((data) => setProfiles(Array.isArray(data) ? data : []))
       .catch(() => {})
-  }
+  }, [])
 
-  const fetchDriverPacks = (token: string) => {
+  const fetchDriverPacks = useCallback((token: string) => {
     fetch(`${API_URL}/drivers`, { headers: authHeader(token) })
       .then((res) => res.ok ? res.json() : [])
-      .then((data) => setDriverPacks(Array.isArray(data) ? data.filter((p: any) => p.status === 'ready') : []))
+      .then((data) => setDriverPacks(Array.isArray(data) ? data.filter((p: DriverPack) => p.status === 'ready') : []))
       .catch(() => {})
-  }
+  }, [])
 
-  const fetchApps = (token: string) => {
+  const fetchApps = useCallback((token: string) => {
     fetch(`${API_URL}/apps`, { headers: authHeader(token) })
       .then((res) => res.ok ? res.json() : [])
       .then((data) => setApps(Array.isArray(data) ? data : []))
       .catch(() => {})
-  }
+  }, [])
 
 
-  const fetchDomainConfigs = (token: string, orgId?: number) => {
+  const fetchDomainConfigs = useCallback((token: string, orgId?: number) => {
     const url = orgId ? `${API_URL}/domain-configs?org_id=${orgId}` : `${API_URL}/domain-configs`
     fetch(url, { headers: authHeader(token) })
       .then(r => r.ok ? r.json() : [])
       .then(setDomainConfigs)
       .catch(() => {})
-  }
+  }, [])
 
-  const fetchVpnTunnels = (token: string, orgId?: number) => {
+  const fetchVpnTunnels = useCallback((token: string, orgId?: number) => {
     const url = orgId ? `${API_URL}/vpn-tunnels?org_id=${orgId}` : `${API_URL}/vpn-tunnels`
     fetch(url, { headers: authHeader(token) })
       .then(r => r.ok ? r.json() : [])
       .then(setVpnTunnels)
       .catch(() => {})
-  }
+  }, [setVpnTunnels])
+
+  const fetchHypervisors = useCallback((token: string) => {
+    fetch(`${API_URL}/hypervisors`, { headers: authHeader(token) })
+      .then(r => { if (r.status === 401) setAuth(null); return r.ok ? r.json() : [] })
+      .then((data) => setHypervisors(Array.isArray(data) ? data : []))
+      .catch(() => {})
+  }, [])
 
   const submitTotpLogin = () => {
     if (!pendingTotp) return
@@ -418,7 +426,7 @@ export default function App() {
         .then(res => {
           fetchAll(auth.token, selectedOrg)
           const msg = `${res.created} machine(s) importée(s)${res.skipped ? `, ${res.skipped} ignorée(s)` : ''}${res.errors?.length ? `, ${res.errors.length} erreur(s)` : ''}`
-          res.errors?.length ? toast.error(msg) : toast.success(msg)
+          if (res.errors?.length) toast.error(msg); else toast.success(msg)
         })
         .catch(() => toast.error('Erreur lors de l\'import'))
         .finally(() => { setCsvImporting(false); e.target.value = '' })
@@ -444,7 +452,7 @@ export default function App() {
     fetchOrgs(auth.token)
     fetchProfiles(auth.token)
     if (auth.role === 'admin') { fetchUsers(auth.token); fetchImages(auth.token); fetchApps(auth.token); fetchDriverPacks(auth.token) }
-  }, [auth, selectedOrg])
+  }, [auth, selectedOrg, fetchAll, fetchOrgs, fetchProfiles, fetchUsers, fetchImages, fetchApps, fetchDriverPacks])
 
   useEffect(() => {
     if (!auth) return
@@ -455,7 +463,7 @@ export default function App() {
       else if (adminSubTab === 'vpn') fetchVpnTunnels(auth.token)
     }
     else if (activeTab === 'infrastructure') fetchHypervisors(auth.token)
-  }, [activeTab, adminSubTab])
+  }, [activeTab, adminSubTab, auth, fetchDomainConfigs, fetchVpnTunnels, fetchHypervisors])
 
   // Auto-refresh des images en cours de téléchargement/extraction
   useEffect(() => {
@@ -464,7 +472,7 @@ export default function App() {
     if (!inProgress) return
     const interval = setInterval(() => fetchImages(auth.token), 2000)
     return () => clearInterval(interval)
-  }, [auth, images])
+  }, [auth, images, fetchImages])
 
   // ── WebSocket : mises à jour de statut en temps réel ───────────────────────
   useEffect(() => {
@@ -815,7 +823,7 @@ export default function App() {
 
   // ── Sélection en lot ──────────────────────────────────────────────────────
   const toggleSelect = (mac: string) =>
-    setSelectedMacs(prev => { const s = new Set(prev); s.has(mac) ? s.delete(mac) : s.add(mac); return s })
+    setSelectedMacs(prev => { const s = new Set(prev); if (s.has(mac)) s.delete(mac); else s.add(mac); return s })
 
   const toggleSelectAll = () =>
     setSelectedMacs(selectedMacs.size === filteredMachines.length && filteredMachines.length > 0
@@ -837,13 +845,6 @@ export default function App() {
       fetch(`${API_URL}/machines/${mac}/wol`, { method: 'POST', headers: authHeader(auth!.token) }).catch(() => {})
     }
     setSelectedMacs(new Set())
-  }
-
-  const fetchHypervisors = (token: string) => {
-    fetch(`${API_URL}/hypervisors`, { headers: authHeader(token) })
-      .then(r => { if (r.status === 401) setAuth(null); return r.ok ? r.json() : [] })
-      .then((data) => setHypervisors(Array.isArray(data) ? data : []))
-      .catch(() => {})
   }
 
   const orgName     = (id: number | null | undefined) => orgs.find(o => o.id === id)?.name ?? '—'
@@ -1204,7 +1205,7 @@ export default function App() {
             <p className="text-[10px] text-slate-600">Configurez les credentials AD au niveau de l'organisation. Les profils peuvent utiliser ces configs au lieu de saisir le domaine manuellement.</p>
             {domainConfigs.length > 0 && (
               <div className="space-y-1">
-                {domainConfigs.map((dc: any) => (
+                {domainConfigs.map((dc) => (
                   <div key={dc.id} className={`flex items-center justify-between py-1.5 px-3 border rounded text-xs ${editingDcId === dc.id ? 'border-blue-700/70 bg-blue-950/20' : 'border-slate-800/60'}`}>
                     <div>
                       <span className="text-white font-medium">{dc.name}</span>
@@ -1530,7 +1531,7 @@ export default function App() {
                         <span className="inline-block mt-1 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-700 text-amber-400 cursor-pointer"
                           title="Cliquer pour voir les details"
                           onClick={() => openDetail(machine.mac)}>
-                          {(() => { try { const t = JSON.parse(machine.smoke_results ?? '[]'); const n = t.filter((x: any) => !x.ok).length; return `${n} alerte${n > 1 ? 's' : ''}` } catch { return 'Alertes' } })()}
+                          {(() => { try { const t: SmokeTest[] = JSON.parse(machine.smoke_results ?? '[]'); const n = t.filter((x) => !x.ok).length; return `${n} alerte${n > 1 ? 's' : ''}` } catch { return 'Alertes' } })()}
                         </span>
                       )}
                     </td>
@@ -1792,7 +1793,7 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                       dernier recours. Le libellé disait l'inverse et a fait douter. */}
                   <select value={formData.driver_pack_id ?? ''} onChange={(e) => setFormData({ ...formData, driver_pack_id: e.target.value ? Number(e.target.value) : null })} className="osiris-input text-xs">
                     <option value="">— Choix automatique (identifiant matériel, puis modèle) —</option>
-                    {driverPacks.map((p: any) => <option key={p.id} value={p.id}>{p.vendor.toUpperCase()} · {p.model} [{p.os_code}]</option>)}
+                    {driverPacks.map((p) => <option key={p.id} value={p.id}>{p.vendor.toUpperCase()} · {p.model} [{p.os_code}]</option>)}
                   </select>
                   {driverPacks.length === 0 && <p className="text-[10px] text-slate-600">Aucun pack téléchargé — va dans l'onglet Drivers pour en télécharger un.</p>}
                 </div>

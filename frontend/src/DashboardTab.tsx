@@ -1,12 +1,24 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { authHeader } from './types'
 import type { LiveEvent } from './types'
 import { IcoRefresh } from './icons'
 import { SkeletonStatCards } from './Skeleton'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+
+type StatusCounts = { deployed: number; pending: number; deploying: number; failed: number }
+type OrgStats = StatusCounts & { org_id: number; org_name: string; total: number }
+type DashboardAlert = { type: 'stuck_deploying' | 'failed_recent'; hostname: string; mac: string; since: string }
+type RecentDeployment = { hostname: string; mac: string; status: string; os: string; profile_name: string; timestamp: string }
+type Dashboard = {
+  status_counts: StatusCounts
+  total_machines: number
+  org_stats: OrgStats[]
+  alerts: DashboardAlert[]
+  recent_deployments: RecentDeployment[]
+}
 
 // Anime un compteur de 0 jusqu'à sa valeur cible (ease-out, pas de rebond) à chaque changement de valeur.
 function useCountUp(target: number, duration = 700) {
@@ -83,24 +95,26 @@ function LiveActivityStream({ events }: { events: LiveEvent[] }) {
 }
 
 export function DashboardTab({ token, liveEvents }: { token: string; liveEvents: LiveEvent[] }) {
-  const [dashboard, setDashboard] = useState<any>(null)
-  const [dashboardLoading, setDashboardLoading] = useState(false)
+  const [dashboard, setDashboard] = useState<Dashboard | null>(null)
+  // Vrai dès le premier rendu : l'effet de montage n'a alors plus besoin de
+  // basculer l'état de manière synchrone, ce que React 19 signale comme un
+  // rendu en cascade. Le rafraîchissement manuel, lui, le bascule explicitement.
+  const [dashboardLoading, setDashboardLoading] = useState(true)
 
-  const fetchDashboard = () => {
-    setDashboardLoading(true)
+  const fetchDashboard = useCallback(() => {
     fetch(`${API_URL}/dashboard`, { headers: authHeader(token) })
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(data => { setDashboard(data); setDashboardLoading(false) })
       .catch(() => { setDashboard(null); setDashboardLoading(false) })
-  }
+  }, [token])
 
-  useEffect(() => { fetchDashboard() }, [token])
+  useEffect(() => { fetchDashboard() }, [token, fetchDashboard])
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-6 space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Tableau de bord</h2>
-        <button onClick={fetchDashboard} className="osiris-btn text-xs">
+        <button onClick={() => { setDashboardLoading(true); fetchDashboard() }} className="osiris-btn text-xs">
           {dashboardLoading ? 'Chargement...' : <><IcoRefresh cls="w-3 h-3 inline" /> Rafraichir</>}
         </button>
       </div>
@@ -130,7 +144,7 @@ export function DashboardTab({ token, liveEvents }: { token: string; liveEvents:
             {dashboard.alerts.length > 0 && (
               <div className="space-y-1">
                 <p className="text-[9px] uppercase tracking-widest text-slate-600">Alertes</p>
-                {dashboard.alerts.map((a: any, i: number) => (
+                {dashboard.alerts.map((a, i) => (
                   <div key={i} className={`text-xs p-2 rounded border font-mono ${a.type === 'stuck_deploying' ? 'border-amber-800/50 bg-amber-950/30 text-amber-400' : 'border-red-800/50 bg-red-950/30 text-red-400'}`}>
                     {a.type === 'stuck_deploying' ? `En cours depuis plus de 30 min` : `Echec recent`} - <strong>{a.hostname}</strong> ({a.mac})
                   </div>
@@ -142,7 +156,7 @@ export function DashboardTab({ token, liveEvents }: { token: string; liveEvents:
             {dashboard.org_stats.length > 0 && (
               <div className="space-y-2">
                 <p className="text-[9px] uppercase tracking-widest text-slate-600">Par organisation</p>
-                {dashboard.org_stats.sort((a: any, b: any) => b.total - a.total).map((o: any) => (
+                {dashboard.org_stats.slice().sort((a, b) => b.total - a.total).map((o) => (
                   <div key={o.org_id} className="bg-slate-900 border border-slate-800/60 rounded p-3 flex items-center gap-4">
                     <span className="text-slate-300 text-sm font-medium w-40 truncate">{o.org_name}</span>
                     <div className="flex-1 flex gap-1 h-2">
@@ -163,7 +177,7 @@ export function DashboardTab({ token, liveEvents }: { token: string; liveEvents:
               <div className="space-y-1">
                 <p className="text-[9px] uppercase tracking-widest text-slate-600">Deploiements recents</p>
                 <div className="border border-slate-800/60 rounded overflow-hidden">
-                  {dashboard.recent_deployments.map((e: any, i: number) => (
+                  {dashboard.recent_deployments.map((e, i) => (
                     <div key={i} className={`flex items-center gap-3 px-3 py-2 text-xs font-mono ${i % 2 === 0 ? 'bg-slate-900/40' : ''}`}>
                       <span className={`w-16 text-center rounded px-1 py-0.5 text-[9px] font-bold ${e.status === 'deployed' ? 'bg-green-900/60 text-green-400' : 'bg-red-900/60 text-red-400'}`}>{e.status}</span>
                       <span className="text-slate-300 w-40 truncate">{e.hostname}</span>

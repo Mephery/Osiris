@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { AuditLogEntry } from './types'
 import { ACTION_META, authHeader, formatMac, formatDetails } from './types'
 import { IcoSearch, IcoRefresh } from './icons'
@@ -10,13 +10,20 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
 export function JournalTab({ token, onUnauthorized }: { token: string; onUnauthorized: () => void }) {
   const [auditLogs, setAuditLogs]         = useState<AuditLogEntry[]>([])
-  const [auditLoading, setAuditLoading]   = useState(false)
+  // Vrai dès le premier rendu : l'effet de montage n'a alors plus besoin de
+  // basculer l'état de manière synchrone, ce que React 19 signale comme un
+  // rendu en cascade. Filtrer et réinitialiser le basculent eux-mêmes.
+  const [auditLoading, setAuditLoading]   = useState(true)
   const [auditFilterAction, setAuditFilterAction] = useState('')
   const [auditFilterEmail, setAuditFilterEmail]   = useState('')
   const [auditFilterMac, setAuditFilterMac]       = useState('')
 
-  const fetchAuditLogs = (action = auditFilterAction, email = auditFilterEmail, mac = auditFilterMac) => {
-    setAuditLoading(true)
+  // Défauts fixes plutôt qu'un repli sur l'état des filtres : les boutons
+  // « Filtrer » et « Reset » passent toujours les valeurs courantes en argument,
+  // donc seul l'effet de montage (appel sans argument) utilise ces défauts, et
+  // toujours avant toute saisie. Fermer sur l'état des filtres aurait obligé à
+  // les lister en dépendance, et l'effet aurait alors tourné à chaque frappe.
+  const fetchAuditLogs = useCallback((action = '', email = '', mac = '') => {
     const params = new URLSearchParams({ limit: '100' })
     if (action)  params.set('action', action)
     if (email)   params.set('user_email', email)
@@ -25,9 +32,9 @@ export function JournalTab({ token, onUnauthorized }: { token: string; onUnautho
       .then((res) => { if (res.status === 401) onUnauthorized(); return res.ok ? res.json() : [] })
       .then((data) => { setAuditLogs(Array.isArray(data) ? data : []); setAuditLoading(false) })
       .catch(() => setAuditLoading(false))
-  }
+  }, [token, onUnauthorized])
 
-  useEffect(() => { fetchAuditLogs() }, [token])
+  useEffect(() => { fetchAuditLogs() }, [token, fetchAuditLogs])
 
   return (
     <div className="osiris-table-wrap overflow-x-auto">
@@ -42,11 +49,11 @@ export function JournalTab({ token, onUnauthorized }: { token: string; onUnautho
           placeholder="Utilisateur…" className="osiris-input text-[10px] py-1 w-36" />
         <input value={auditFilterMac} onChange={e => setAuditFilterMac(e.target.value)}
           placeholder="MAC…" className="osiris-input text-[10px] py-1 w-32 font-mono" />
-        <button onClick={() => fetchAuditLogs(auditFilterAction, auditFilterEmail, auditFilterMac)}
+        <button onClick={() => { setAuditLoading(true); fetchAuditLogs(auditFilterAction, auditFilterEmail, auditFilterMac) }}
           className="osiris-btn text-[10px]">
           {auditLoading ? '…' : <><IcoSearch cls="w-3 h-3 inline" /> Filtrer</>}
         </button>
-        <button onClick={() => { setAuditFilterAction(''); setAuditFilterEmail(''); setAuditFilterMac(''); fetchAuditLogs('', '', '') }}
+        <button onClick={() => { setAuditFilterAction(''); setAuditFilterEmail(''); setAuditFilterMac(''); setAuditLoading(true); fetchAuditLogs('', '', '') }}
           className="osiris-btn-ghost text-[10px]">
           <IcoRefresh cls="w-3 h-3 inline" /> Reset
         </button>

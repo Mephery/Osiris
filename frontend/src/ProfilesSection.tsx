@@ -265,7 +265,7 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
             const selected = new Set((newProfile.app_ids ?? '').split(',').filter(Boolean))
             const toggle = (id: number) => {
               const s = new Set(selected)
-              s.has(String(id)) ? s.delete(String(id)) : s.add(String(id))
+              if (s.has(String(id))) s.delete(String(id)); else s.add(String(id))
               setNewProfile({ ...newProfile, app_ids: Array.from(s).join(',') })
             }
             return (
@@ -453,7 +453,7 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                 const selected = new Set((editingProfile.app_ids ?? '').split(',').filter(Boolean))
                 const toggle = (id: number) => {
                   const s = new Set(selected)
-                  s.has(String(id)) ? s.delete(String(id)) : s.add(String(id))
+                  if (s.has(String(id))) s.delete(String(id)); else s.add(String(id))
                   setEditingProfile({ ...editingProfile, app_ids: Array.from(s).join(',') })
                 }
                 return (
