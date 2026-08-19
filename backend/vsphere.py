@@ -412,12 +412,12 @@ class VSphereProvider:
                 detail="vSphere : seul le mode cloud-init est supporté "
                        "(le PXE d'OSIRIS ne traverse pas les tunnels).",
             )
-        if not body.cloud_template_id:
-            raise HTTPException(status_code=400, detail="cloud_template_id requis")
+        if not body.template_id:
+            raise HTTPException(status_code=400, detail="template_id requis")
 
         def work():
             si = _connect(h)
-            template = _find_vm(si, body.cloud_template_id)
+            template = _find_vm(si, body.template_id)
             if template is None:
                 raise HTTPException(status_code=404, detail="Template vSphere introuvable")
             cluster = _cluster(si, body.node)
