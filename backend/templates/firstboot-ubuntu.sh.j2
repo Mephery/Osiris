@@ -417,6 +417,16 @@ else
     _add_test "Resolution DNS" false "Echec DNS"
 fi
 
+# Acces internet reel, pas seulement DNS : un resolveur peut repondre sans que le
+# trafic HTTPS ne sorte derriere - un pare-feu peut filtrer le port 443 plus
+# strictement qu'il ne filtre le DNS. curl est deja garanti present : c'est lui
+# qui a recupere ce script au demarrage de la machine.
+if curl -fsS -m 5 -o /dev/null https://www.google.com; then
+    _add_test "Acces internet (HTTPS)" true
+else
+    _add_test "Acces internet (HTTPS)" false "https://www.google.com injoignable en HTTPS"
+fi
+
 {% if profile.join_domain %}
 # Jonction domaine AD
 if realm list 2>/dev/null | grep -q "{{ profile.domain }}"; then
