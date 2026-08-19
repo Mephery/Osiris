@@ -1,0 +1,16 @@
+[Unit]
+Description=Répétition de restauration OSIRIS, chaque semaine
+
+[Timer]
+# Le dimanche, après la sauvegarde de la nuit : on répète sur une archive
+# fraîche. Hebdomadaire et non quotidien parce que ce contrôle restaure la base
+# entière — la vérification légère, elle, tourne déjà à chaque sauvegarde.
+OnCalendar=Sun *-*-* 03:30:00
+RandomizedDelaySec=900
+# Une machine éteinte le dimanche ne doit pas sauter son tour en silence : sans
+# ce rattrapage, la répétition pourrait ne jamais tourner sans que rien ne dise
+# qu'elle a été sautée.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

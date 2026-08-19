@@ -8,8 +8,10 @@
 # garde en revanche l'inventaire, pour savoir quoi retelecharger si l'on doit
 # repartir de la seule archive.
 #
-#   osiris-backup.sh            sauvegarde puis purge selon la retention
-#   osiris-backup.sh --verifier controle la derniere archive sans en creer
+#   osiris-backup.sh              sauvegarde puis purge selon la retention
+#   osiris-backup.sh --verifier   controle la derniere archive sans en creer
+#   osiris-backup.sh --repetition restaure la derniere archive pour de vrai,
+#                                 dans une base jetable, et la detruit ensuite
 set -euo pipefail
 
 DESTINATION=${DESTINATION:-/srv/backup}
@@ -17,6 +19,13 @@ RETENTION=${RETENTION:-14}          # nombre d'archives conservees
 DEPOT=${DEPOT:-/opt/osiris}
 BASE=${BASE:-osiris}
 GOLDEN=${GOLDEN:-/srv/data/windows/Golden_Image.wim}
+
+# Reglages de la repetition de restauration (--repetition). La base jetable est
+# creee, remplie, controlee, puis detruite : elle ne doit JAMAIS porter le nom
+# de la base de production, d'ou le garde-fou au debut de repetition().
+REPETITION_BASE=${REPETITION_BASE:-osiris_repetition}
+TABLES_VITALES=${TABLES_VITALES:-"user organization hypervisor"}
+PYTHON=${PYTHON:-$DEPOT/backend/venv/bin/python}
 
 HORODATAGE=$(date +%Y%m%d-%H%M%S)
 ARCHIVE="$DESTINATION/osiris-$HORODATAGE.tar.zst"
@@ -39,7 +48,118 @@ verifier() {
     journal "archive lisible et dump restaurable ($(du -h "$archive" | cut -f1))"
 }
 
-[ "${1:-}" = "--verifier" ] && { verifier; exit 0; }
+psql_repetition() { sudo -u postgres psql -d "$REPETITION_BASE" -tAc "$1"; }
+
+# Volontairement globales : le trap EXIT s'execute une fois repetition() rendue,
+# donc apres la disparition de ses variables locales. Les y avoir laissees
+# faisait echouer le nettoyage sur un « variable sans liaison » et abandonnait
+# derriere lui une base jetable pleine de vraies donnees.
+REPETITION_TMP=""
+
+nettoyer_repetition() {
+    [ -n "$REPETITION_TMP" ] && rm -rf "$REPETITION_TMP"
+    sudo -u postgres dropdb --if-exists "$REPETITION_BASE" >/dev/null 2>&1 || true
+    return 0
+}
+
+repetition() {
+    # `pg_restore --list` prouve qu'un dump n'est pas tronque, rien de plus : il
+    # lit la table des matieres et s'arrete la. Une archive peut donc passer la
+    # verification chaque nuit pendant des mois et ne pas remonter le jour ou on
+    # en a besoin. La repetition, elle, restaure pour de vrai dans une base
+    # jetable, controle ce qui en ressort, puis detruit la base.
+    local archive=${1:-$(ls -1t "$DESTINATION"/osiris-*.tar.zst 2>/dev/null | head -1)}
+    [ -z "$archive" ] && { echo "aucune archive dans $DESTINATION" >&2; exit 1; }
+    if [ "$REPETITION_BASE" = "$BASE" ]; then
+        echo "REPETITION_BASE vaut « $BASE » : la repetition detruirait la production" >&2
+        exit 1
+    fi
+
+    journal "repetition de restauration depuis $(basename "$archive")"
+    # Trap sur EXIT et non sur RETURN : les controles ci-dessous sortent en
+    # erreur des qu'ils echouent, et un RETURN ne serait alors jamais joue —
+    # on laisserait derriere nous une base jetable pleine de vraies donnees.
+    REPETITION_TMP=$(mktemp -d)
+    trap nettoyer_repetition EXIT
+    local tmp=$REPETITION_TMP
+
+    tar --zstd -xf "$archive" -C "$tmp" --wildcards '*/base.dump' '*/config/backend.env'
+
+    # Base neuve a chaque fois : restaurer par-dessus les restes de la veille
+    # reussirait meme avec un dump ampute de la moitie de ses tables.
+    sudo -u postgres dropdb --if-exists "$REPETITION_BASE" >/dev/null 2>&1 || true
+    sudo -u postgres createdb "$REPETITION_BASE"
+
+    # --exit-on-error est le coeur du controle : par defaut pg_restore signale
+    # ses erreurs et sort quand meme en 0, donc une restauration a moitie faite
+    # passerait pour un succes. Le dump arrive par stdin parce qu'il est dans un
+    # dossier que l'utilisateur postgres ne peut pas lire — et il contient toute
+    # la base : l'ouvrir en lecture a tous, meme brievement, serait un prix
+    # absurde pour economiser une redirection.
+    if ! sudo -u postgres pg_restore --exit-on-error --no-owner --no-acl \
+            -d "$REPETITION_BASE" < "$tmp"/*/base.dump; then
+        echo "la restauration a echoue : cette archive ne remonte pas" >&2
+        exit 1
+    fi
+    journal "  restauration acceptee sans une seule erreur"
+
+    # Un schema a demi migre se restaure sans broncher, mais l'application le
+    # refuse au demarrage : on veut savoir de quelle version on repartirait.
+    local revision; revision=$(psql_repetition "select version_num from alembic_version")
+    if [ -z "$revision" ]; then
+        echo "alembic_version est vide : schema d'origine inconnu" >&2
+        exit 1
+    fi
+    journal "  schema restaure en version $revision"
+
+    # Un dump peut etre parfaitement valide ET vide. On exige donc du contenu la
+    # ou il y en a forcement : sans utilisateur ni organisation, l'OSIRIS
+    # restaure ne laisserait meme pas ouvrir une session.
+    local vides=""
+    for table in $TABLES_VITALES; do
+        local lignes; lignes=$(psql_repetition "select count(*) from \"$table\"")
+        journal "  $table : $lignes lignes"
+        [ "$lignes" -eq 0 ] && vides="$vides $table"
+    done
+    if [ -n "$vides" ]; then
+        echo "tables vitales vides apres restauration :$vides" >&2
+        exit 1
+    fi
+
+    # Le controle qui manquait le plus. Les secrets sont chiffres en base, et la
+    # cle vit dans .env : une archive dont les deux ne vont pas ensemble se
+    # restaure parfaitement et ne rend que des secrets illisibles — jonction AD,
+    # PIN BitLocker, jetons d'hyperviseur, tous a ressaisir a la main. Un seul
+    # dechiffrement suffit a prouver que la paire est coherente.
+    local env_archive; env_archive=$(ls "$tmp"/*/config/backend.env 2>/dev/null | head -1)
+    local jeton; jeton=$(psql_repetition "select token_secret from hypervisor where token_secret <> '' limit 1")
+    if [ -z "$env_archive" ]; then
+        journal "  pas de backend.env dans l'archive : coherence des secrets non controlee"
+    elif [ ! -x "$PYTHON" ]; then
+        journal "  $PYTHON absent : coherence des secrets non controlee"
+    elif [ -z "$jeton" ]; then
+        journal "  aucun secret chiffre en base : rien a controler de ce cote"
+    else
+        local cle; cle=$(grep -m1 '^FERNET_KEY=' "$env_archive" | cut -d= -f2-)
+        # Le clair n'est ni affiche ni conserve : on ne veut savoir que si la
+        # cle l'ouvre.
+        if ! FERNET_KEY="$cle" JETON="$jeton" "$PYTHON" -c 'import os
+from cryptography.fernet import Fernet
+Fernet(os.environ["FERNET_KEY"].encode()).decrypt(os.environ["JETON"].encode())' 2>/dev/null; then
+            echo "la FERNET_KEY de l'archive ne dechiffre pas ses propres secrets :" \
+                 "restaurable, mais tous les mots de passe seraient perdus" >&2
+            exit 1
+        fi
+        journal "  la cle de l'archive dechiffre bien les secrets qu'elle accompagne"
+    fi
+
+    journal "repetition reussie : $(basename "$archive") remonte une base complete et lisible"
+}
+
+case "${1:-}" in
+    --verifier)   verifier; exit 0 ;;
+    --repetition) repetition "${2:-}"; exit 0 ;;
+esac
 
 # Si la destination est un volume dedie, il doit etre monte. Sans ce controle,
 # un disque absent ferait ecrire les sauvegardes sur le disque systeme — donc

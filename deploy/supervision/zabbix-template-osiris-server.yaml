@@ -228,6 +228,28 @@ zabbix_export:
               expression: 'last(/OSIRIS server/systemd.unit.info["osiris-backup.service","Result","Service"])<>"success"'
               name: 'OSIRIS: la derniere sauvegarde a echoue ({ITEM.VALUE})'
               priority: HIGH
+        - uuid: 0505774221ec43638ae1b58d5fc19d38
+          name: 'OSIRIS: resultat de la derniere repetition de restauration'
+          type: ZABBIX_ACTIVE
+          key: 'systemd.unit.info["osiris-repetition.service","Result","Service"]'
+          delay: 1h
+          history: 90d
+          trends: '0'
+          value_type: CHAR
+          description: |
+            La sauvegarde nocturne ne verifie que la lisibilite du dump. Cette
+            repetition hebdomadaire le restaure pour de vrai dans une base
+            jetable, controle son contenu et la coherence de la FERNET_KEY qui
+            l'accompagne, puis detruit la base. Un echec ici veut dire que les
+            archives existent mais ne remontent pas.
+          tags:
+            - tag: Application
+              value: OSIRIS
+          triggers:
+            - uuid: 48aaf890347f41838e85e62be5ed371f
+              expression: 'last(/OSIRIS server/systemd.unit.info["osiris-repetition.service","Result","Service"])<>"success"'
+              name: 'OSIRIS: la derniere repetition de restauration a echoue ({ITEM.VALUE})'
+              priority: HIGH
         - uuid: d358c1fa838744e4a5ba9c39bd8295ee
           name: 'OSIRIS: unite dnsmasq'
           type: ZABBIX_ACTIVE

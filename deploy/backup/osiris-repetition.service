@@ -1,0 +1,14 @@
+[Unit]
+Description=Répétition de restauration OSIRIS (restaure la dernière archive dans une base jetable)
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/osiris-backup.sh --repetition
+# Tourne en root : lecture des archives (600) et création d'une base jetable.
+User=root
+# Comme la sauvegarde elle-même, ce contrôle s'efface devant le service rendu :
+# il restaure des dizaines de Mo et n'a aucune raison d'être prioritaire.
+IOSchedulingClass=idle
+Nice=10
