@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import type { ClusterStorage, Hypervisor, NetworkDefaults, Organization, Profile, ProxmoxNetwork, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { IcoX } from './icons'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau } from './vmForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
@@ -18,22 +19,6 @@ interface InfrastructureTabProps {
   onVmCreated: () => void
 }
 
-/** L'adresse saisie tombe-t-elle dans le réseau du bridge choisi ? `null` si l'une
- *  des deux n'est pas exploitable — on se tait plutôt que d'alarmer à tort.
- *
- *  Se tromper de réseau ne fait échouer aucun appel : la VM naît, démarre, ne route
- *  nulle part et reste « en attente » sans un mot d'explication. C'est le symptôme
- *  le plus coûteux de toute la chaîne, et le seul moment où il est bon marché de
- *  l'attraper est ici, avant de valider. */
-const dansLeReseau = (ip: string, reseau: string): boolean | null => {
-  const adresse = ip.split('/')[0].trim()
-  const [base, prefixe] = reseau.split('/')
-  const quadruplet = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/
-  if (!quadruplet.test(adresse) || !quadruplet.test(base ?? '')) return null
-  const entier = (a: string) => a.split('.').reduce((acc, o) => acc * 256 + Number(o), 0)
-  const masque = Number(prefixe) === 0 ? 0 : (-1 << (32 - Number(prefixe))) >>> 0
-  return ((entier(adresse) & masque) >>> 0) === ((entier(base) & masque) >>> 0)
-}
 
 export function InfrastructureTab({ token, hypervisors, profiles, organizations, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
   const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '' })
@@ -175,9 +160,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   // avec le serveur : on complète ce qui manque, sans toucher au reste.
   const completerPrefixe = () => {
     if (!vmNetDef?.prefixe) return
-    setVmForm(f => f.ip_cidr && !f.ip_cidr.includes('/')
-      ? { ...f, ip_cidr: `${f.ip_cidr.trim()}/${vmNetDef.prefixe}` }
-      : f)
+    setVmForm(f => ({ ...f, ip_cidr: completerPrefixeCidr(f.ip_cidr, vmNetDef.prefixe) }))
   }
 
   const handleCreateVm = (e: React.FormEvent) => {
@@ -187,13 +170,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
     fetch(`${API_URL}/hypervisors/${vmHvId}/create-vm`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
-      body: JSON.stringify({
-        ...vmForm,
-        node: vmNode,
-        profile_id: vmForm.profile_id ? Number(vmForm.profile_id) : null,
-        template_id: vmForm.template_id ? Number(vmForm.template_id) : null,
-        organization_id: vmForm.organization_id === '' ? null : Number(vmForm.organization_id),
-      }),
+      body: JSON.stringify(buildCreateVmPayload(vmForm, vmNode)),
     }).then(async r => {
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Erreur') }
       return r.json()
