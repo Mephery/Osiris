@@ -16,10 +16,15 @@ https://osiris.example.local {
     # ouverts : les machines deployees en ont besoin pour se declarer, et ils n'ont
     # aucune raison d'atteindre la page de connexion.
     #
+    # Plages autorisees : tout FIT (10.231/16, wifi equipe compris) et la plage du VPN
+    # d'administration. N'ouvrir QUE les VPN qui routent reellement vers ce
+    # reseau : un VPN d'acces externe n'y donne pas acces, l'autoriser ici ne
+    # ferait qu'elargir la surface sans rien debloquer.
+    #
     # Le refus AFFICHE l'adresse vue par Caddy. Sans cela, un acces legitime
     # bloque (VPN, nouveau VLAN) donne un 403 muet, et il faut fouiller les
     # journaux du serveur pour comprendre d'ou l'on vient vraiment.
-    @interne_refuse not remote_ip 10.0.0.0/16 127.0.0.1/32 ::1
+    @interne_refuse not remote_ip 10.0.0.0/16 172.16.0.0/24 127.0.0.1/32 ::1
     handle @interne_refuse {
         respond "OSIRIS : interface reservee au reseau interne.
 Votre adresse vue par le serveur : {http.request.remote.host}
@@ -51,10 +56,15 @@ https://10.0.0.1 {
     # ouverts : les machines deployees en ont besoin pour se declarer, et ils n'ont
     # aucune raison d'atteindre la page de connexion.
     #
+    # Plages autorisees : tout FIT (10.231/16, wifi equipe compris) et la plage du VPN
+    # d'administration. N'ouvrir QUE les VPN qui routent reellement vers ce
+    # reseau : un VPN d'acces externe n'y donne pas acces, l'autoriser ici ne
+    # ferait qu'elargir la surface sans rien debloquer.
+    #
     # Le refus AFFICHE l'adresse vue par Caddy. Sans cela, un acces legitime
     # bloque (VPN, nouveau VLAN) donne un 403 muet, et il faut fouiller les
     # journaux du serveur pour comprendre d'ou l'on vient vraiment.
-    @interne_refuse not remote_ip 10.0.0.0/16 127.0.0.1/32 ::1
+    @interne_refuse not remote_ip 10.0.0.0/16 172.16.0.0/24 127.0.0.1/32 ::1
     handle @interne_refuse {
         respond "OSIRIS : interface reservee au reseau interne.
 Votre adresse vue par le serveur : {http.request.remote.host}
