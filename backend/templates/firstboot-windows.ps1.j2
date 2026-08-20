@@ -538,14 +538,27 @@ try {
 {% endif %}
 
 {% if profile.post_script %}
-# ── Script post-install personnalise ─────────────────────────────────────────
-Write-Log "Execution du script post-install personnalise..."
+# ── Script post-install du profil ────────────────────────────────────────────
+Write-Log "Execution du script post-install du profil..."
 try {
 {{ profile.post_script }}
 } catch {
-    Write-Log "AVERTISSEMENT : Script post-install - $_"
+    Write-Log "AVERTISSEMENT : Script post-install du profil - $_"
 }
-Write-Log "Script post-install termine."
+Write-Log "Script post-install du profil termine."
+{% endif %}
+
+{% if machine.post_script %}
+# ── Script post-install de la machine ────────────────────────────────────────
+# APRES celui du profil : le profil pose le socle commun a un type de machine,
+# celui-ci ne vaut que pour cette machine. Les deux se cumulent.
+Write-Log "Execution du script post-install de la machine..."
+try {
+{{ machine.post_script }}
+} catch {
+    Write-Log "AVERTISSEMENT : Script post-install de la machine - $_"
+}
+Write-Log "Script post-install de la machine termine."
 {% endif %}
 
 {% if profile.laps_rotation_days > 0 %}

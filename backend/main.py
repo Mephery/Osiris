@@ -1703,7 +1703,7 @@ def _osiris_url_for(session: Session, machine: Machine) -> str:
 
 def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: dict,
                              linux_apps: list, zabbix: Optional[dict],
-                             osiris_url: str) -> str:
+                             osiris_url: str, post_script: str = "") -> str:
     """Le script de premier démarrage Linux, rendu à partir d'un contexte explicite.
 
     Volontairement sans accès à la base : le script est aussi embarqué dans le
@@ -1714,7 +1714,8 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
     """
     tv_suffix = profile_ctx.get("tv_suffix", "")
     return jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
-        machine={"hostname": hostname, "mac": mac, "ou": ou},
+        machine={"hostname": hostname, "mac": mac, "ou": ou,
+                 "post_script": post_script},
         profile=profile_ctx,
         tv_password=f"{hostname.upper()}{tv_suffix}" if tv_suffix else "",
         linux_apps=linux_apps,
@@ -1745,6 +1746,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         hostname=machine.hostname, mac=machine.mac, ou=machine.ou,
         profile_ctx=profile_ctx, linux_apps=list(linux_apps),
         zabbix=zabbix, osiris_url=osiris_url,
+        post_script=machine.post_script or "",
     )
     return Response(content=content, media_type="text/plain")
 
@@ -4494,6 +4496,9 @@ class VmCreateBody(SQLModel):
     iso: str = ""
     # template / cloudinit : VMID du template Proxmox a cloner
     template_id: Optional[int] = None
+    # Script de post-installation propre a CETTE VM, joue a la fin du premier
+    # demarrage, apres celui du profil. Voir Machine.post_script.
+    post_script: str = ""
 
 
 def _rollback_vm_machine(user: User, body, hv_id: int, vm_id: int,
@@ -4624,6 +4629,7 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str) -> str:
         hostname=body.hostname, mac=mac_plain, ou=body.ou,
         profile_ctx=profile_tpl, linux_apps=linux_apps,
         zabbix=zabbix, osiris_url=osiris_url,
+        post_script=getattr(body, "post_script", "") or "",
     )
 
     return jinja_env.get_template("cloud-init-user-data.j2").render(
@@ -4807,6 +4813,10 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                 ip_cidr=body.ip_cidr.strip(),
                 gateway=body.gateway.strip(),
                 dns_servers=body.dns_servers.strip(),
+                # Conserve sur la fiche : le script doit rester disponible pour un
+                # redeploiement ou une relance de /firstboot-*, longtemps apres que
+                # la requete de creation a disparu.
+                post_script=body.post_script or "",
             )
             session.add(machine)
             _log(session, current_user, "create_vm", target_mac=mac_plain, details={

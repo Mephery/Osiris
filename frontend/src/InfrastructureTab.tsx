@@ -37,7 +37,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   const [vmNetworks, setVmNetworks]     = useState<ProxmoxNetwork[]>([])
   const [vmNetDef, setVmNetDef]         = useState<NetworkDefaults | null>(null)
   const [vmNodes, setVmNodes]           = useState<ProxmoxNode[]>([])
-  const [vmForm, setVmForm]             = useState({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '' })
+  const [vmForm, setVmForm]             = useState({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '', post_script: '' })
   const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
   const [vmCreating, setVmCreating]     = useState(false)
 
@@ -184,7 +184,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
       )
       setShowVmForm(false)
       setVmNetDef(null)
-      setVmForm({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '' })
+      setVmForm({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '', post_script: '' })
       onVmCreated()
     }).catch(err => toast.error(err.message))
       .finally(() => setVmCreating(false))
@@ -616,6 +616,21 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                   : vmForm.boot_mode === 'template'
                     ? 'Clone du template + MAC neuve. Le clone lit sa MAC au démarrage et rappelle OSIRIS (agent cuit dans le template). Démarrage ~2 min, aucune injection.'
                     : 'Clone complet du template + cloud-init injecté via snippets Proxmox. Démarrage ~30s, pas de PXE requis.'}
+              </div>
+              <div className="space-y-1">
+                <p className="text-[9px] uppercase tracking-widest text-slate-600">
+                  Script de post-installation — propre a CETTE VM (optionnel)
+                </p>
+                <textarea rows={4} value={vmForm.post_script}
+                  onChange={e => setVmForm(f => ({...f, post_script: e.target.value}))}
+                  placeholder={vmForm.os === 'windows' ? 'PowerShell, execute en fin de premier demarrage' : 'Commandes bash, executees en fin de premier demarrage'}
+                  className="osiris-input text-[10px] font-mono w-full resize-y" />
+                <p className="text-[9px] text-slate-600">
+                  Joue APRES le script du profil : le profil pose le socle commun, celui-ci
+                  ne vaut que pour cette VM. Une erreur est journalisee sans faire echouer le
+                  deploiement. Execute en root, et grave dans la configuration de la VM cote
+                  hyperviseur : y faire CHERCHER un secret, jamais l'y ecrire.
+                </p>
               </div>
               <button type="submit" disabled={vmCreating || !vmNode || !vmForm.storage || !vmForm.bridge} className="osiris-btn text-xs px-4 w-full disabled:opacity-50">
                 {vmCreating ? 'Création en cours...' : 'Créer et démarrer la VM'}

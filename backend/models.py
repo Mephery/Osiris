@@ -306,6 +306,17 @@ class Machine(SQLModel, table=True):
     supervised: bool = Field(default=True)
     # Notes libres
     notes: str = Field(default="")
+    # Script propre a CETTE machine, execute a la fin du premier demarrage, apres
+    # celui du profil. Le profil porte le socle commun a un type de machine ; ce
+    # champ porte ce qui ne vaut que pour celle-ci — amorcer un role applicatif,
+    # l'enregistrer dans un inventaire, declencher une configuration externe.
+    # Les deux se cumulent au lieu de s'exclure : on ne recopie pas le socle pour
+    # ajouter trois lignes.
+    #
+    # C'est du code execute en ROOT sur la machine, et il est aussi grave dans la
+    # configuration de la VM cote hyperviseur (guestinfo vSphere, snippet Proxmox) :
+    # y faire CHERCHER un secret, jamais l'y ecrire.
+    post_script: str = Field(default="")
     # Smoke tests post-deploiement
     smoke_status: str = Field(default="")   # "" | "ok" | "warnings"
     smoke_results: str = Field(default="")  # JSON : [{"name": "...", "ok": true, "detail": "..."}]

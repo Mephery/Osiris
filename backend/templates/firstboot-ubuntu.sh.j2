@@ -374,11 +374,27 @@ _log "SSH : auth par mot de passe desactivee, root interdit"
 {% endif %}
 
 {% if profile.post_script %}
-_log "Execution du script post-install personnalise..."
+_log "Execution du script post-install du profil..."
 (
 {{ profile.post_script }}
-) || echo "[$(ts)] AVERTISSEMENT : Script post-install termine avec une erreur"
-_log "Script post-install termine."
+) || echo "[$(ts)] AVERTISSEMENT : Script post-install du profil termine avec une erreur"
+_log "Script post-install du profil termine."
+{% endif %}
+
+{% if machine.post_script %}
+# APRES celui du profil : le profil pose le socle commun a un type de machine,
+# ce script-ci ne vaut que pour celle-la. Les deux se cumulent, on ne duplique
+# pas un profil entier pour trois lignes.
+#
+# Sous-shell et erreur non fatale, comme pour le profil : un script de
+# personnalisation qui echoue ne doit pas emporter un deploiement par ailleurs
+# reussi — mais il se voit dans le journal, qui est le seul temoin sur une
+# machine distante.
+_log "Execution du script post-install de la machine..."
+(
+{{ machine.post_script }}
+) || echo "[$(ts)] AVERTISSEMENT : Script post-install de la machine termine avec une erreur"
+_log "Script post-install de la machine termine."
 {% endif %}
 
 _log "Premier demarrage OSIRIS termine."
