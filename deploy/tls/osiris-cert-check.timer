@@ -1,0 +1,12 @@
+[Unit]
+Description=Controle quotidien du certificat et du jeton Gandi
+
+[Timer]
+OnCalendar=*-*-* 07:15:00
+RandomizedDelaySec=600
+# Une machine eteinte a l'heure dite ne doit pas sauter son tour : c'est
+# precisement les jours ou l'on n'a rien regarde que l'echeance approche.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

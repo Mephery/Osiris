@@ -1,0 +1,10 @@
+[Unit]
+Description=Etat du certificat TLS et du jeton Gandi (pour la supervision)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/osiris-cert-check.sh
+# Tourne en root : lecture du jeton Gandi, en 600.
+User=root

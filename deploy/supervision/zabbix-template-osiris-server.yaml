@@ -250,6 +250,69 @@ zabbix_export:
               expression: 'last(/OSIRIS server/systemd.unit.info["osiris-repetition.service","Result","Service"])<>"success"'
               name: 'OSIRIS: la derniere repetition de restauration a echoue ({ITEM.VALUE})'
               priority: HIGH
+        - uuid: 8ea6c26bf9d54082bcd20d960b8b3423
+          name: 'OSIRIS: jours avant expiration du certificat TLS'
+          type: ZABBIX_ACTIVE
+          key: 'osiris.cert.jours'
+          delay: 1h
+          history: 90d
+          value_type: FLOAT
+          units: 'd'
+          description: |
+            Certificat Let's Encrypt de l'interface. Renouvele automatiquement a
+            J-30 par certbot ; si ce compteur passe sous 21 jours, c'est que le
+            renouvellement a echoue plusieurs fois sans que personne ne le voie.
+            -1 = certificat absent ou illisible.
+          tags:
+            - tag: Application
+              value: OSIRIS
+          triggers:
+            - uuid: d5c5bf25c1e446c3843001951e62bb35
+              expression: 'last(/OSIRIS server/osiris.cert.jours)<21'
+              name: 'OSIRIS: le certificat TLS expire dans moins de 21 jours ({ITEM.VALUE} j)'
+              priority: HIGH
+        - uuid: 70361aa577a647cc86ad69bfea1662c4
+          name: 'OSIRIS: validite du jeton Gandi'
+          type: ZABBIX_ACTIVE
+          key: 'osiris.gandi.ok'
+          delay: 1h
+          history: 90d
+          value_type: FLOAT
+          units: ''
+          description: |
+            1 = le jeton ouvre encore la zone DNS servant au renouvellement.
+            Un jeton expire, revoque, ou cree dans la MAUVAISE organisation
+            Gandi rend 403 : le renouvellement echouera alors en silence, et
+            rien ne se manifestera avant la mort du certificat, 90 jours plus
+            tard. C'est exactement le piege rencontre a l'installation.
+          tags:
+            - tag: Application
+              value: OSIRIS
+          triggers:
+            - uuid: de8bb2e7ca0e4237ad380382fe2e531c
+              expression: 'last(/OSIRIS server/osiris.gandi.ok)=0'
+              name: 'OSIRIS: le jeton Gandi ne donne plus acces a la zone DNS'
+              priority: HIGH
+        - uuid: f40a7d2a7e1c4833869e77aa1c8721d7
+          name: 'OSIRIS: jours avant expiration du jeton Gandi'
+          type: ZABBIX_ACTIVE
+          key: 'osiris.gandi.jours'
+          delay: 1h
+          history: 90d
+          value_type: FLOAT
+          units: 'd'
+          description: |
+            Echeance declaree du jeton d'acces Gandi. Previent AVANT la panne :
+            sans cela, on ne decouvre son expiration qu'au renouvellement suivant
+            du certificat. -1 = date non renseignee dans gandi.ini.
+          tags:
+            - tag: Application
+              value: OSIRIS
+          triggers:
+            - uuid: 83e6d1881909482bbb5e3bec4cec397b
+              expression: 'last(/OSIRIS server/osiris.gandi.jours)<30 and last(/OSIRIS server/osiris.gandi.jours)>=0'
+              name: 'OSIRIS: le jeton Gandi expire dans moins de 30 jours ({ITEM.VALUE} j)'
+              priority: AVERAGE
         - uuid: d358c1fa838744e4a5ba9c39bd8295ee
           name: 'OSIRIS: unite dnsmasq'
           type: ZABBIX_ACTIVE

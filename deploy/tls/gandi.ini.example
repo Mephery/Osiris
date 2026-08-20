@@ -1,0 +1,21 @@
+# Modele de /etc/letsencrypt/gandi.ini — a copier, remplir, et mettre en 600.
+#
+# Jeton d'acces personnel Gandi, avec DEUX permissions et pas une de plus :
+#   - Voir et renouveler les domaines
+#   - Gerer la configuration technique des domaines   <- c'est elle qui donne
+#                                                        l'ecriture DNS
+#
+# ATTENTION : le jeton doit etre cree depuis l'ORGANISATION qui detient la zone.
+# Un jeton valide mais cree ailleurs repond 403, et l'erreur ne se voit qu'au
+# moment du renouvellement. Le verifier avant de lancer certbot :
+#   curl -H "Authorization: Bearer $GANDI_TOKEN" \
+#        https://api.gandi.net/v5/livedns/domains/<zone>     # doit rendre 200
+GANDI_TOKEN=
+
+# Zone LiveDNS a modifier. Declaree et non deduite du nom demande : deduire la
+# zone suppose de connaitre les suffixes publics, et se trompe en silence.
+GANDI_ZONE=data-expertise.com
+
+# Echeance du jeton, relevee a sa creation. Uniquement pour la supervision, qui
+# previent AVANT l'expiration — un jeton mort casse le renouvellement sans bruit.
+GANDI_TOKEN_EXPIRE=
