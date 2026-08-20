@@ -403,14 +403,23 @@ class VSphereProvider:
         dépend de cette MAC, puisque c'est par elle que la machine s'identifiera
         auprès d'OSIRIS. Injecter le cloud-init dès le clone graverait l'ancienne.
 
-        Le mode PXE n'a pas de sens ici : le réseau de déploiement d'OSIRIS n'est
-        pas routable jusqu'à Namek (DHCP et TFTP ne se routent pas).
+        Deux modes de clonage :
+
+        - `cloudinit` : le clone reçoit sa configuration par `guestinfo`. Réservé
+          aux images Linux qui embarquent cloud-init.
+        - `template` : clone NU, sans rien injecter. Le gabarit porte déjà tout ce
+          qu'il faut — l'agent d'amorçage y a été posé avant le scellement — et le
+          clone lit sa propre MAC au premier démarrage pour rappeler OSIRIS. C'est
+          la seule voie possible pour Windows ici, faute de cloud-init.
+
+        Le mode PXE, lui, n'a pas de sens : le réseau de déploiement d'OSIRIS n'est
+        pas routable jusqu'aux sites distants (DHCP et TFTP ne se routent pas).
         """
-        if body.boot_mode != "cloudinit":
+        if body.boot_mode not in ("cloudinit", "template"):
             raise HTTPException(
                 status_code=400,
-                detail="vSphere : seul le mode cloud-init est supporté "
-                       "(le PXE d'OSIRIS ne traverse pas les tunnels).",
+                detail="vSphere : seuls les modes cloud-init et template sont "
+                       "supportés (le PXE d'OSIRIS ne traverse pas les tunnels).",
             )
         if not body.template_id:
             raise HTTPException(status_code=400, detail="template_id requis")
@@ -546,6 +555,25 @@ def _metadata(body, mac_plain: str) -> str:
     return meta + "\n".join(lines) + "\n"
 
 
+def payload_cloud_init(body, user_data: str, render_user_data, mac_plain: str) -> str:
+    """Ce qu'il faut injecter en `guestinfo`, ou rien du tout.
+
+    Isolée de `_finish` pour être vérifiable sans vCenter : c'est une décision
+    metier — « ce mode de clonage recoit-il une configuration ? » — et non un
+    detail de la plateforme.
+
+    En mode `template` le clone doit rester VIERGE. Y injecter un cloud-init
+    serait sans effet sur un Windows sysprepé (il n'a pas de cloud-init pour le
+    lire), mais graverait tout de meme la configuration — mots de passe compris —
+    dans la fiche de la VM cote hyperviseur, pour rien.
+    """
+    if body.boot_mode != "cloudinit":
+        return ""
+    if render_user_data and mac_plain:
+        return render_user_data(mac_plain)
+    return user_data
+
+
 def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
     """
     Rebranche la carte, ajoute le disque de données, injecte le cloud-init et
@@ -595,9 +623,7 @@ def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
     # L'équivalent vSphere des snippets Proxmox, et sans son défaut : la
     # donnée voyage dans la config de la VM, aucun stockage à préparer,
     # aucun téléversement qui puisse être refusé.
-    payload = user_data
-    if render_user_data and real_plain:
-        payload = render_user_data(real_plain)
+    payload = payload_cloud_init(body, user_data, render_user_data, real_plain)
     if payload:
         meta = _metadata(body, real_plain)
         _wait(vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(extraConfig=[
