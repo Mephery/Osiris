@@ -1,17 +1,70 @@
-# Copier ce fichier en Caddyfile et remplacer les IP par les vôtres.
-# Le Caddyfile réel est ignoré par git (il contient l'IP de gestion interne).
-# OSIRIS — Reverse proxy
+# OSIRIS — Reverse proxy (Humans-Connexion Production)
 {
     auto_https disable_redirects
 }
 
 # ── HTTPS — Interface d'administration & API ─────────────────────────────────
-https://10.0.0.1 {
-    tls /etc/caddy/certs/osiris.crt /etc/caddy/certs/osiris.key
+# Le nom public, avec un certificat Let's Encrypt reconnu partout : c'est l'acces
+# normal a l'interface. L'acces par IP est conserve juste en dessous — il reste
+# le seul possible si le DNS tombe, et c'est celui qu'utilisent les signets
+# existants.
+https://osiris.example.local {
+    tls /etc/caddy/certs/osiris-le.crt /etc/caddy/certs/osiris-le.key
+    # ── Acces reserve au reseau interne ───────────────────────────────────────
+    # L'interface et l'API d'administration ne doivent repondre qu'au bureau. Les
+    # rappels des machines, eux, passent par le bloc HTTP plus bas et restent
+    # ouverts : les machines deployees en ont besoin pour se declarer, et ils n'ont
+    # aucune raison d'atteindre la page de connexion.
+    #
+    # Le refus AFFICHE l'adresse vue par Caddy. Sans cela, un acces legitime
+    # bloque (VPN, nouveau VLAN) donne un 403 muet, et il faut fouiller les
+    # journaux du serveur pour comprendre d'ou l'on vient vraiment.
+    @interne_refuse not remote_ip 10.0.0.0/16 127.0.0.1/32 ::1
+    handle @interne_refuse {
+        respond "OSIRIS : interface reservee au reseau interne.
+Votre adresse vue par le serveur : {http.request.remote.host}
+Si cet acces doit etre autorise, ajouter cette plage au Caddyfile." 403
+    }
+
 
     # Définition du matcher nommé (Ici, Caddy adore les listes d'espaces !)
     @backend path /auth/* /machines* /hypervisors* /dashboard* /organizations* /users* /profiles* /images* /audit-logs* /domain-configs* /vpn-tunnels* /apps* /capture* /drivers* /wims* /webhooks* /health* /docs* /openapi.json /ws/*
+    
+    handle @backend {
+        reverse_proxy localhost:8000
+    }
 
+    # Serveur de fichiers pour le Frontend React
+    handle {
+        root * /opt/osiris/frontend/dist
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# ── HTTP — Routes iPXE & Redirection automatique ────────────────────────────
+https://10.0.0.1 {
+    tls /etc/caddy/certs/osiris.crt /etc/caddy/certs/osiris.key
+    # ── Acces reserve au reseau interne ───────────────────────────────────────
+    # L'interface et l'API d'administration ne doivent repondre qu'au bureau. Les
+    # rappels des machines, eux, passent par le bloc HTTP plus bas et restent
+    # ouverts : les machines deployees en ont besoin pour se declarer, et ils n'ont
+    # aucune raison d'atteindre la page de connexion.
+    #
+    # Le refus AFFICHE l'adresse vue par Caddy. Sans cela, un acces legitime
+    # bloque (VPN, nouveau VLAN) donne un 403 muet, et il faut fouiller les
+    # journaux du serveur pour comprendre d'ou l'on vient vraiment.
+    @interne_refuse not remote_ip 10.0.0.0/16 127.0.0.1/32 ::1
+    handle @interne_refuse {
+        respond "OSIRIS : interface reservee au reseau interne.
+Votre adresse vue par le serveur : {http.request.remote.host}
+Si cet acces doit etre autorise, ajouter cette plage au Caddyfile." 403
+    }
+
+
+    # Définition du matcher nommé (Ici, Caddy adore les listes d'espaces !)
+    @backend path /auth/* /machines* /hypervisors* /dashboard* /organizations* /users* /profiles* /images* /audit-logs* /domain-configs* /vpn-tunnels* /apps* /capture* /drivers* /wims* /webhooks* /health* /docs* /openapi.json /ws/*
+    
     handle @backend {
         reverse_proxy localhost:8000
     }
@@ -28,7 +81,7 @@ https://10.0.0.1 {
 http://10.0.0.1 {
     # Définition du matcher nommé pour le déploiement réseau
     @pxe path /boot* /cloud-init/* /static/* /machines/* /winpe-script/* /winpe-auto /unattend.xml* /firstboot-ubuntu/* /firstboot-debian/* /firstboot-linux/* /firstboot-windows/* /bootstrap/* /preseed/* /capture/*
-
+    
     handle @pxe {
         reverse_proxy localhost:8000
     }
