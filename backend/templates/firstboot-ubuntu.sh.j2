@@ -120,8 +120,17 @@ _log "TeamViewer configure - ID : $(teamviewer info 2>/dev/null | grep 'TeamView
 _log "Installation des applications via apt..."
 apt-get update -qq
 {% for app in linux_apps %}
-apt-get install -y {{ app.apt_package }} 2>&1 | tail -1
-_log "Installe : {{ app.name }}"
+# Le compte rendu suit le RESULTAT. Annoncer « Installe » sans regarder faisait
+# dire a OSIRIS qu'un paquet etait pose sur une machine ou apt venait d'echouer,
+# faute de route vers les depots — un mensonge que rien ne rattrapait, puisque le
+# smoke test cense le verifier ne s'executait jamais (voir plus bas). Un echec
+# n'interrompt pas le deploiement, le reste de la configuration vaut d'etre
+# applique, mais il se voit.
+if apt-get install -y {{ app.apt_package }} > /dev/null 2>&1; then
+    _log "Installe : {{ app.name }}"
+else
+    _log "ECHEC : {{ app.name }} ({{ app.apt_package }}) non installe - depots injoignables ?"
+fi
 {% if app.linux_post_install %}
 _log "Post-installation : {{ app.name }}"
 (
@@ -486,13 +495,15 @@ else
 fi
 {% endif %}
 
-{% if ubuntu_packages %}
-# Presence des paquets installes
-{% for pkg in ubuntu_packages %}
-if dpkg -s "{{ pkg }}" > /dev/null 2>&1; then
-    _add_test "Paquet : {{ pkg }}" true
+{% if linux_apps %}
+# Presence REELLE des paquets demandes. Ce bloc bouclait sur `ubuntu_packages`,
+# une variable qu'aucun appelant n'a jamais passee : le controle ne s'executait
+# donc jamais, sur aucune machine, et une installation ratee passait inapercue.
+{% for app in linux_apps %}
+if dpkg -s "{{ app.apt_package }}" > /dev/null 2>&1; then
+    _add_test "Paquet : {{ app.name }}" true
 else
-    _add_test "Paquet : {{ pkg }}" false "Non installe"
+    _add_test "Paquet : {{ app.name }}" false "{{ app.apt_package }} non installe"
 fi
 {% endfor %}
 {% endif %}
