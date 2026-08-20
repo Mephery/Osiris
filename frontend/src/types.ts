@@ -158,6 +158,9 @@ export interface Profile {
   laps_rotation_days: number;
   machine_type: string;
   ssh_authorized_keys: string;
+  ntp_servers: string;
+  apt_mirror: string;
+  apt_proxy: string;
   /** Gabarit matériel des VM créées avec ce profil (valeurs par défaut du formulaire). */
   vm_vcpus: number;
   vm_ram_mb: number;

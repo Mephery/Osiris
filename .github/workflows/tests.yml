@@ -69,7 +69,7 @@ jobs:
         run: python -m pytest --tb=short
 
   frontend:
-    name: Verification frontend (tsc + eslint)
+    name: Verification frontend (tsc + eslint + vitest)
     runs-on: ubuntu-latest
 
     steps:
@@ -97,3 +97,7 @@ jobs:
       - name: Verifier le lint ESLint
         working-directory: frontend
         run: npx eslint . --max-warnings 0
+
+      - name: Lancer les tests unitaires
+        working-directory: frontend
+        run: npm test

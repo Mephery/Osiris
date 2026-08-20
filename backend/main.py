@@ -346,6 +346,9 @@ class ProfileCreate(SQLModel):
     app_ids: str = ""
     machine_type: str = "workstation"
     ssh_authorized_keys: str = ""
+    ntp_servers: str = ""
+    apt_mirror: str = ""
+    apt_proxy: str = ""
     vm_vcpus: int = 2
     vm_ram_mb: int = 2048
     vm_disk_gb: int = 20
@@ -374,6 +377,9 @@ class ProfilePatch(SQLModel):
     app_ids: Optional[str] = None
     machine_type: Optional[str] = None
     ssh_authorized_keys: Optional[str] = None
+    ntp_servers: Optional[str] = None
+    apt_mirror: Optional[str] = None
+    apt_proxy: Optional[str] = None
     vm_vcpus: Optional[int] = None
     vm_ram_mb: Optional[int] = None
     vm_disk_gb: Optional[int] = None
@@ -1135,6 +1141,9 @@ def _profile_dict(p: Profile) -> dict:
         "app_ids": p.app_ids or "",
         "machine_type": p.machine_type or "workstation",
         "ssh_authorized_keys": p.ssh_authorized_keys or "",
+        "ntp_servers": p.ntp_servers or "",
+        "apt_mirror": p.apt_mirror or "",
+        "apt_proxy": p.apt_proxy or "",
         "vm_vcpus": p.vm_vcpus,
         "vm_ram_mb": p.vm_ram_mb,
         "vm_disk_gb": p.vm_disk_gb,
@@ -1196,6 +1205,11 @@ def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
         "ssh_authorized_keys": p.ssh_authorized_keys or "",
         "set_root_password": p.set_root_password,
         "vm_data_disk_gb": p.vm_data_disk_gb,
+        # Temps et depots : appliques par cloud-init lui-meme (directives natives),
+        # donc valables meme quand la machine ne joint pas OSIRIS.
+        "ntp_servers": [x.strip() for x in (p.ntp_servers or "").split(",") if x.strip()],
+        "apt_mirror": (p.apt_mirror or "").strip(),
+        "apt_proxy": (p.apt_proxy or "").strip(),
     }
 
 

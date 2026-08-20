@@ -22,6 +22,38 @@ users:
 chpasswd:
   expire: false
 
+{% if profile.ntp_servers %}
+# Serveurs de temps, poses par cloud-init lui-meme : la machine est a l'heure
+# avant meme le premier demarrage d'OSIRIS, et elle le reste si elle ne le joint
+# jamais. Ce n'est pas du confort : Kerberos refuse toute authentification
+# au-dela de cinq minutes d'ecart, et une machine qui derive perd sa jonction au
+# domaine sans qu'aucun message ne parle d'horloge. Les pools publics de l'image
+# cloud, eux, sont injoignables des que le reseau ne sort pas librement.
+ntp:
+  enabled: true
+  servers:
+{% for serveur in profile.ntp_servers %}
+    - {{ serveur }}
+{% endfor %}
+{% endif %}
+
+{% if profile.apt_mirror or profile.apt_proxy %}
+# Depots apt. Pose AVANT `packages:` ci-dessous, sans quoi l'installation
+# viserait encore le miroir d'origine de l'image.
+apt:
+{% if profile.apt_proxy %}
+  proxy: {{ profile.apt_proxy }}
+{% endif %}
+{% if profile.apt_mirror %}
+  primary:
+    - arches: [default]
+      uri: {{ profile.apt_mirror }}
+  security:
+    - arches: [default]
+      uri: {{ profile.apt_mirror }}
+{% endif %}
+{% endif %}
+
 package_update: true
 package_upgrade: false
 

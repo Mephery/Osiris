@@ -117,6 +117,22 @@ class Profile(SQLModel, table=True):
     laps_rotation_days: int = Field(default=0)      # 0 = rotation desactivee
     machine_type: str = Field(default="workstation")       # "workstation" | "server"
     ssh_authorized_keys: str = Field(default="")           # clés SSH (une par ligne)
+    # Serveurs de temps, séparés par des virgules. Vide = on ne touche à rien et la
+    # distribution garde ses pools publics. Sur un réseau qui ne sort pas librement,
+    # ces pools sont injoignables et la machine dérive en silence — or l'heure est
+    # une dépendance dure de Kerberos : au-delà de cinq minutes d'écart, la jonction
+    # au domaine et toute authentification AD échouent, avec des messages qui ne
+    # parlent jamais d'horloge. Viser les contrôleurs de domaine résout les deux
+    # problèmes à la fois : ils sont joignables en interne, et ce sont eux qui font
+    # référence pour l'AD.
+    ntp_servers: str = Field(default="")
+    # Miroir Debian/Ubuntu à utiliser à la place de celui par défaut de l'image.
+    # Vide = miroir d'origine. Utile quand le pare-feu n'autorise QUE certaines
+    # destinations : l'image cloud pointe vers archive.ubuntu.com, qui n'est pas
+    # forcément celui que le réseau laisse passer.
+    apt_mirror: str = Field(default="")
+    # Proxy/cache apt (ex. http://apt-cache.local:3142). Vide = accès direct.
+    apt_proxy: str = Field(default="")
     # Gabarit materiel des VM creees avec ce profil. Sert de valeur par defaut au
     # formulaire de creation : un profil « serveur de fichiers » n'a pas les memes
     # besoins qu'un poste, et les resaisir a chaque VM est une source d'erreur.

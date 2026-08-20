@@ -9,7 +9,7 @@ import { APP_LOGOS } from './appIconMap'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
-const EMPTY_PROFILE: Partial<Profile> = { os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '' }
+const EMPTY_PROFILE: Partial<Profile> = { os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '', ntp_servers: '', apt_mirror: '', apt_proxy: '' }
 
 interface ProfilesSectionProps {
   token: string
@@ -154,6 +154,21 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                 <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
                 <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" value={newProfile.ssh_authorized_keys ?? ''} onChange={e => setNewProfile({ ...newProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
                 <p className="text-[9px] text-slate-600">Le compte local est créé au premier démarrage s'il n'existe pas, et ces clés lui ouvrent le SSH. Sans clé, une VM clonée reste inaccessible.</p>
+              </div>
+              <div className="col-span-2 sm:col-span-3 space-y-1">
+                <p className="text-[9px] uppercase tracking-widest text-slate-600">Temps et dépôts</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <input placeholder="Serveurs NTP (séparés par ,)" value={newProfile.ntp_servers ?? ''}
+                    onChange={e => setNewProfile({ ...newProfile, ntp_servers: e.target.value })}
+                    className="osiris-input text-[10px] font-mono" />
+                  <input placeholder="Miroir apt (http://...)" value={newProfile.apt_mirror ?? ''}
+                    onChange={e => setNewProfile({ ...newProfile, apt_mirror: e.target.value })}
+                    className="osiris-input text-[10px] font-mono" />
+                  <input placeholder="Proxy apt (http://...:3142)" value={newProfile.apt_proxy ?? ''}
+                    onChange={e => setNewProfile({ ...newProfile, apt_proxy: e.target.value })}
+                    className="osiris-input text-[10px] font-mono" />
+                </div>
+                <p className="text-[9px] text-slate-600">Vide = réglages d'origine de l'image. Sur un réseau qui ne sort pas librement, les serveurs publics sont injoignables : viser les contrôleurs de domaine règle l'heure ET l'AD, qui refuse toute authentification au-delà de 5 min d'écart.</p>
               </div>
               <div className="col-span-2 sm:col-span-3 space-y-1">
                 <p className="text-[9px] uppercase tracking-widest text-slate-600">Gabarit des VM créées avec ce profil</p>
@@ -389,6 +404,19 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                   <p className="text-[9px] uppercase tracking-widest text-slate-600">Cles SSH autorisees (une par ligne)</p>
                   <textarea rows={3} placeholder="ssh-ed25519 AAAA... user@host" defaultValue={editingProfile.ssh_authorized_keys} onChange={e => setEditingProfile({ ...editingProfile, ssh_authorized_keys: e.target.value })} className="osiris-input text-[10px] font-mono w-full resize-y" />
                   <p className="text-[9px] text-slate-600">Le compte local est créé au premier démarrage s'il n'existe pas, et ces clés lui ouvrent le SSH. Sans clé, une VM clonée reste inaccessible.</p>
+                  <p className="text-[9px] uppercase tracking-widest text-slate-600 pt-2">Temps et dépôts</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <input placeholder="Serveurs NTP (séparés par ,)" defaultValue={editingProfile.ntp_servers}
+                      onChange={e => setEditingProfile({ ...editingProfile, ntp_servers: e.target.value })}
+                      className="osiris-input text-[10px] font-mono" />
+                    <input placeholder="Miroir apt (http://...)" defaultValue={editingProfile.apt_mirror}
+                      onChange={e => setEditingProfile({ ...editingProfile, apt_mirror: e.target.value })}
+                      className="osiris-input text-[10px] font-mono" />
+                    <input placeholder="Proxy apt (http://...:3142)" defaultValue={editingProfile.apt_proxy}
+                      onChange={e => setEditingProfile({ ...editingProfile, apt_proxy: e.target.value })}
+                      className="osiris-input text-[10px] font-mono" />
+                  </div>
+                  <p className="text-[9px] text-slate-600">Vide = réglages d'origine de l'image. Sur un réseau qui ne sort pas librement, les serveurs publics sont injoignables : viser les contrôleurs de domaine règle l'heure ET l'AD, qui refuse toute authentification au-delà de 5 min d'écart.</p>
                   <p className="text-[9px] uppercase tracking-widest text-slate-600 pt-2">Gabarit des VM créées avec ce profil</p>
                   <div className="grid grid-cols-4 gap-2">
                     <input type="number" min={1} max={64} title="vCPU"

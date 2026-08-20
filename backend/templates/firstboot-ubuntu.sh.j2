@@ -426,6 +426,27 @@ else
     _add_test "Resolution DNS" false "Echec DNS"
 fi
 
+{% if profile.ntp_servers %}
+# Source de temps REELLEMENT retenue par le systeme, pas celle qu'on a demandee.
+# L'ecart d'horloge est une dependance dure de Kerberos : au-dela de cinq minutes,
+# la jonction au domaine et toute authentification AD echouent, avec des messages
+# qui ne parlent jamais d'heure. Une machine qui derive est donc une panne AD en
+# preparation, et rien d'autre ne la signale.
+#
+# Le verdict porte sur la presence d'une source active (deterministe des le
+# demarrage) et non sur l'etat de synchronisation, qui peut demander plus de temps
+# que les quelques secondes ecoulees ici : un test qui echouerait une fois sur deux
+# sur une machine saine cesserait vite d'etre lu.
+_ntp_src=$(timedatectl show-timesync --property=ServerName --value 2>/dev/null)
+[ -z "$_ntp_src" ] && _ntp_src=$(chronyc -n sources 2>/dev/null | awk '/^\^\*/{print $2}' | head -1)
+_ntp_sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null)
+if [ -n "$_ntp_src" ]; then
+    _add_test "Serveur de temps" true "$_ntp_src (synchronise : ${_ntp_sync:-inconnu})"
+else
+    _add_test "Serveur de temps" false "aucune source de temps active"
+fi
+{% endif %}
+
 # Acces internet reel, pas seulement DNS : un resolveur peut repondre sans que le
 # trafic HTTPS ne sorte derriere - un pare-feu peut filtrer le port 443 plus
 # strictement qu'il ne filtre le DNS. curl est deja garanti present : c'est lui
