@@ -175,7 +175,9 @@ if [ "$SEAL" -eq 1 ]; then
     rm -f /var/lib/dbus/machine-id
     rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
     rm -f /var/log/osiris-bootstrap.log /var/log/osiris-firstboot.log
-    echo "[OSIRIS] Template scelle. Eteindre la VM puis 'qm template <vmid>'."
+    echo "[OSIRIS] Template scelle. Eteindre la VM, puis la convertir en modele :"
+    echo "[OSIRIS]   Proxmox : qm template <vmid>"
+    echo "[OSIRIS]   vSphere : clic droit sur la VM > Modele > Convertir en modele"
 else
     echo "[OSIRIS] Avant de convertir cette VM en template, relancer avec --seal"
     echo "         (remise a zero de machine-id, des cles SSH et de cloud-init)."

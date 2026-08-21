@@ -216,7 +216,9 @@ Write-Host ""
 Write-Host "[OSIRIS] Lancement de sysprep. La VM va s'eteindre."
 Write-Host "         NE PAS la redemarrer ensuite : la rallumer consommerait le"
 Write-Host "         passage OOBE, et le template naitrait deja personnalise."
-Write-Host "         Enchainer directement sur : qm template <vmid>"
+Write-Host "         Convertir en modele SANS rallumer :"
+Write-Host "           Proxmox : qm template <vmid>"
+Write-Host "           vSphere : clic droit sur la VM > Modele > Convertir en modele"
 Start-Sleep -Seconds 3
 
 & "$env:SystemRoot\System32\Sysprep\sysprep.exe" /generalize /oobe /shutdown /unattend:$reponses
