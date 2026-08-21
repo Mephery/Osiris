@@ -582,6 +582,39 @@ def payload_cloud_init(body, user_data: str, render_user_data, mac_plain: str) -
     return user_data
 
 
+def guestinfo_reseau(body) -> list[tuple[str, str]]:
+    """L'adressage qu'un clone NU va lire lui-même, par VMware Tools.
+
+    Contredit en apparence `payload_cloud_init`, qui veut un clone vierge — et la
+    distinction mérite d'être posée noir sur blanc, parce qu'elle sera relue.
+    Ce qu'on refuse d'injecter dans un clone nu, c'est une CONFIGURATION : profil,
+    applications, mots de passe. Ici il ne s'agit que de trois valeurs sans
+    secret, et sans elles la machine ne peut atteindre personne — donc pas même
+    OSIRIS, qui porte tout le reste. C'est le strict minimum pour que le clone
+    puisse aller chercher sa configuration au lieu de la recevoir.
+
+    Nécessaire parce qu'un sysprep remet la carte réseau en DHCP et que les VLAN
+    serveurs n'en ont pas : le clone démarre alors en 169.254.x.x, tourne, et ne
+    rappelle jamais. Constaté le 21/08 sur le premier clone Windows du vCenter.
+
+    Rendu vide hors du mode `template` : en `cloudinit`, c'est `_metadata` qui
+    porte le réseau, et deux mécanismes concurrents finiraient par diverger.
+    """
+    if getattr(body, "boot_mode", "") != "template":
+        return []
+    ip = (getattr(body, "ip_cidr", "") or "").strip()
+    if not ip:
+        return []                       # rien d'imposé : le clone fera du DHCP
+    paires = [("guestinfo.osiris.ip", ip)]
+    gw = (getattr(body, "gateway", "") or "").strip()
+    if gw:
+        paires.append(("guestinfo.osiris.gateway", gw))
+    dns = [d.strip() for d in (getattr(body, "dns_servers", "") or "").split(",") if d.strip()]
+    if dns:
+        paires.append(("guestinfo.osiris.dns", ",".join(dns)))
+    return paires
+
+
 def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
     """
     Rebranche la carte, ajoute le disque de données, injecte le cloud-init et
@@ -643,6 +676,15 @@ def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
                 key="guestinfo.metadata",
                 value=base64.b64encode(meta.encode()).decode()),
             vim.option.OptionValue(key="guestinfo.metadata.encoding", value="base64"),
+        ])))
+
+    # ── Adressage d'un clone nu ──
+    # Lu par l'agent d'amorçage gravé dans le gabarit, avant toute tentative de
+    # joindre OSIRIS — c'est justement ce qui la rend possible.
+    reseau = guestinfo_reseau(body)
+    if reseau:
+        _wait(vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(extraConfig=[
+            vim.option.OptionValue(key=cle, value=valeur) for cle, valeur in reseau
         ])))
 
     # Le disque système du template est rarement à la bonne taille.

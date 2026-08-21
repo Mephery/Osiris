@@ -110,6 +110,131 @@ if (-not $OsirisUrl) {
 }
 Ecrire "===== Amorcage OSIRIS - serveur $OsirisUrl ====="
 
+# ── Adressage fourni par l'hyperviseur ───────────────────────────────────────
+# Un sysprep remet la carte reseau en DHCP. Sur un VLAN serveur qui n'en a pas,
+# le clone se rabat sur une adresse 169.254.x.x, tourne parfaitement... et ne
+# joint personne, donc pas meme OSIRIS qui porte tout le reste. Il faut donc
+# qu'il sache s'adresser AVANT d'avoir un reseau : VMware Tools lit la
+# configuration de la VM sans passer par le reseau, c'est la seule voie.
+# Constate le 21/08 sur le premier clone Windows du vCenter.
+#
+# On ne touche a rien des qu'une adresse utilisable existe : sur un reseau avec
+# DHCP, le bail fait le travail, et ecraser une configuration qui marche serait
+# le meilleur moyen de casser ce qu'on essaie de reparer. Rejouable tel quel.
+function AdresseUtilisable {
+    Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -notlike "169.254.*" -and $_.IPAddress -ne "127.0.0.1" }
+}
+
+function CheminVmtoolsd {
+    @("C:\Program Files\VMware\VMware Tools\vmtoolsd.exe",
+      "C:\Program Files (x86)\VMware\VMware Tools\vmtoolsd.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
+function InfoGet($cle) {
+    # Plusieurs candidats plutot que $env:ProgramFiles seul : dans un processus
+    # 32 bits cette variable vaut "C:\Program Files (x86)", et l'outil serait
+    # declare absent alors qu'il est installe. On chercherait alors une panne de
+    # VMware Tools la ou il n'y a qu'une console mal choisie.
+    #
+    # Chaque sortie a vide DIT pourquoi. Premiere version : les trois causes
+    # (outil absent, commande en echec, valeur vide) rendaient le meme "" et le
+    # journal disait "aucun adressage fourni" dans les trois cas. Il a fallu une
+    # console pour trancher ce que le journal aurait du dire - exactement le
+    # genre de panne muette que ce projet passe son temps a supprimer ailleurs.
+    $exe = CheminVmtoolsd
+    if (-not $exe) {
+        Ecrire "  guestinfo : vmtoolsd introuvable."
+        return ""
+    }
+    $valeur = ""
+    try {
+        $valeur = ("" + (& $exe --cmd "info-get $cle" 2>$null)).Trim()
+    } catch {
+        Ecrire "  guestinfo : $cle - lancement de vmtoolsd impossible : $_"
+        return ""
+    }
+    $code = $LASTEXITCODE
+    if ($code -ne 0) {
+        # Relance en capturant le message : la premiere passe le jette pour ne
+        # pas polluer la valeur, mais en echec c'est lui qui porte la cause.
+        $detail = ("" + (& $exe --cmd "info-get $cle" 2>&1)).Trim()
+        Ecrire "  guestinfo : $cle - vmtoolsd sort en $code : $detail"
+        return ""
+    }
+    if (-not $valeur) { Ecrire "  guestinfo : $cle - lue, mais vide." }
+    return $valeur
+}
+
+if (-not (AdresseUtilisable)) {
+    Ecrire "Aucune adresse IPv4 utilisable - lecture de l'adressage fourni par l'hyperviseur."
+    # VMware Tools demarre PENDANT que l'amorcage tourne deja. Constate le 21/08 :
+    # deux lectures a 16:59 et 17:04 rendent vide, la meme commande tapee a la
+    # main a 17:14 rend l'adresse. Une lecture unique condamnait donc la machine
+    # pour de bon - rien ne la ramene jamais dans ce bloc.
+    # On n'insiste QUE si vmtoolsd existe : ailleurs (Proxmox), attendre trois
+    # minutes pour rien retarderait chaque deploiement sain.
+    $cidr = ""
+    if (-not (CheminVmtoolsd)) {
+        Ecrire "  guestinfo : vmtoolsd absent - machine hors vSphere, poursuite en DHCP."
+    } else {
+        for ($essaiIp = 1; $essaiIp -le 18; $essaiIp++) {
+            $cidr = InfoGet "guestinfo.osiris.ip"
+            if ($cidr) {
+                if ($essaiIp -gt 1) { Ecrire "  guestinfo : lue au bout de $($essaiIp * 10) s." }
+                break
+            }
+            if ($essaiIp -lt 18) { Start-Sleep -Seconds 10 }
+        }
+    }
+    # Formule POSITIVE volontairement : `-notmatch` alimente lui aussi $Matches,
+    # mais la regle est assez subtile pour qu'une relecture s'y trompe, et un
+    # $Matches vide donnerait ici une adresse vide posee sans erreur.
+    if ($cidr -match '^([0-9]{1,3}(?:\.[0-9]{1,3}){3})/([0-9]{1,2})$') {
+        $ip      = $Matches[1]
+        $prefixe = [int] $Matches[2]
+        # netsh veut un masque en notation pointee, pas une longueur de prefixe.
+        $bits    = ("1" * $prefixe).PadRight(32, "0")
+        $masque  = (0..3 | ForEach-Object { [Convert]::ToByte($bits.Substring($_ * 8, 8), 2) }) -join "."
+        $gw      = InfoGet "guestinfo.osiris.gateway"
+        $dns     = InfoGet "guestinfo.osiris.dns"
+        $carte   = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
+        if (-not $carte) {
+            Ecrire "ERREUR : aucune carte reseau active - adressage impossible."
+        } else {
+            $nom = $carte.Name
+            # netsh plutot que New-NetIPAddress : il REMPLACE la configuration au
+            # lieu d'en empiler une par-dessus l'adresse d'auto-configuration, ce
+            # qui evite toute une famille d'echecs "parametre invalide" (87).
+            if ($gw) {
+                netsh interface ipv4 set address name="$nom" static $ip $masque $gw | Out-Null
+            } else {
+                netsh interface ipv4 set address name="$nom" static $ip $masque | Out-Null
+            }
+            $rang = 1
+            foreach ($serveur in ($dns -split "," | Where-Object { $_.Trim() })) {
+                $serveur = $serveur.Trim()
+                if ($rang -eq 1) {
+                    netsh interface ipv4 set dnsservers name="$nom" static $serveur primary | Out-Null
+                } else {
+                    netsh interface ipv4 add dnsservers name="$nom" $serveur index=$rang | Out-Null
+                }
+                $rang++
+            }
+            Start-Sleep -Seconds 5
+            if (AdresseUtilisable) {
+                Ecrire "Adresse posee : $ip/$prefixe via $nom (passerelle ${gw}, DNS ${dns})"
+            } else {
+                Ecrire "AVERTISSEMENT : adresse $ip/$prefixe demandee mais toujours pas active."
+            }
+        }
+    } else {
+        Ecrire "Pas d'adressage exploitable (guestinfo.osiris.ip = '$cidr') - on poursuit en DHCP."
+    }
+}
+
 # Cartes physiques uniquement : un adaptateur de bouclage, un pont Hyper-V ou une
 # carte virtuelle ne correspond a aucune fiche OSIRIS.
 function Macs {
