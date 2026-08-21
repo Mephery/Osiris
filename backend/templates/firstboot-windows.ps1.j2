@@ -145,6 +145,32 @@ if ($mac) {
     }
 }
 
+# ── Nom de la machine ─────────────────────────────────────────────────────────
+# Sur la voie PXE, le nom est deja pose par le <ComputerName> du fichier de
+# reponses ecrit POUR CETTE MACHINE par WinPE : il n'y a plus rien a faire ici.
+# Sur la voie clone, c'est impossible - le fichier de reponses d'un gabarit sert
+# a TOUS ses clones, il ne peut donc contenir aucun nom. Le clone demarre alors
+# sous le nom aleatoire tire par sysprep (WIN-XXXXXXXXXXX) et c'est ce
+# firstboot-ci, seul a savoir qui est la machine, qui doit le corriger.
+# Constate le 21/08 sur le premier clone Windows du vCenter : deploiement
+# entierement reussi... sur une machine encore nommee WIN-DUAJQ4V5LOA.
+$nomVoulu  = @'
+{{ machine.hostname }}
+'@.Trim()
+$nomActuel = $env:COMPUTERNAME
+$renommageAFaire = $false
+if (-not $nomVoulu) {
+    Write-Log "Nom : aucun nom attendu - machine laissee en $nomActuel"
+} elseif ($nomActuel -ieq $nomVoulu) {
+    Write-Log "Nom : deja $nomActuel"
+} elseif ($nomVoulu.Length -gt 15) {
+    # NetBIOS plafonne a 15 caracteres. Rename-Computer echouerait ; on le dit
+    # plutot que de laisser croire au renommage.
+    Write-Log "AVERTISSEMENT : nom '$nomVoulu' trop long (15 caracteres maximum) - machine laissee en $nomActuel"
+} else {
+    $renommageAFaire = $true
+}
+
 {% if profile.join_domain and profile.domain_join_user and profile.domain_join_password %}
 # ── Jonction au domaine AD ────────────────────────────────────────────────────
 # L'unattend.xml tente deja la jonction, mais pendant la passe *specialize* :
@@ -187,6 +213,14 @@ if ($csDom -and $csDom.PartOfDomain) {
             Force       = $true
             ErrorAction = 'Stop'
         }
+        # Renommer PUIS joindre creerait l'objet AD sous l'ancien nom : le
+        # renommage n'est effectif qu'au redemarrage, alors que la jonction, elle,
+        # est immediate. `-NewName` fait les deux en une seule operation, du cote
+        # du controleur de domaine comme du cote de la machine.
+        if ($renommageAFaire) {
+            $djArgs['NewName'] = $nomVoulu
+            Write-Log "Nom : $nomActuel -> $nomVoulu (applique avec la jonction au domaine)"
+        }
 {% if machine.ou %}
         $djArgs['OUPath'] = @'
 {{ machine.ou }}
@@ -207,6 +241,7 @@ if ($csDom -and $csDom.PartOfDomain) {
             try {
                 Add-Computer @djArgs
                 Write-Log "Domaine : jonction reussie a {{ profile.domain }} (effective au redemarrage final)"
+                $renommageAFaire = $false
                 break
             } catch {
                 $djErr = "$_"
@@ -232,6 +267,19 @@ if ($csDom -and $csDom.PartOfDomain) {
     }
 }
 {% endif %}
+
+# Renommage hors domaine, ou rattrapage si la jonction n'a pas abouti. Effectif
+# au redemarrage final que ce script declenche de toute facon.
+if ($renommageAFaire) {
+    try {
+        Rename-Computer -NewName $nomVoulu -Force -ErrorAction Stop
+        Write-Log "Nom : $nomActuel -> $nomVoulu (effectif au redemarrage final)"
+    } catch {
+        # Non fatal : une machine mal nommee reste une machine deployee et
+        # joignable. On le journalise pour qu'OSIRIS le montre, sans tout perdre.
+        Write-Log "AVERTISSEMENT : renommage en $nomVoulu echoue - $_"
+    }
+}
 
 # ── LAPS - Mot de passe administrateur local unique ───────────────────────────
 # Sert aussi de garde-fou : on ne supprimera le compte de deploiement osiris-admin
