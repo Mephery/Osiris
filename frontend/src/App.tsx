@@ -1839,12 +1839,20 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                 La machine <span className="font-mono text-white">{machines.find(m => m.mac === deletingMac)?.hostname ?? deletingMac}</span> sera définitivement supprimée.
               </p>
               <p className="text-xs text-slate-600">Cette action est <span className="text-red-400 font-semibold">irréversible</span>.</p>
-              {machines.find(m => m.mac === deletingMac)?.proxmox_vm_id ? (
-                <label className="flex items-center gap-2 text-xs text-red-400 cursor-pointer">
-                  <input type="checkbox" checked={deleteDestroyVm} onChange={e => setDeleteDestroyVm(e.target.checked)} className="accent-red-500" />
-                  Supprimer aussi la VM dans Proxmox (VMID {machines.find(m => m.mac === deletingMac)?.proxmox_vm_id})
-                </label>
-              ) : null}
+              {/* Nommer le VRAI hyperviseur : ce libellé disait « Proxmox » en dur, y
+                  compris devant une VM vSphere — sur une action irréversible, c'est
+                  le pire endroit pour laisser croire qu'on parle d'une autre machine. */}
+              {(() => {
+                const cible = machines.find(m => m.mac === deletingMac)
+                if (!cible?.proxmox_vm_id) return null
+                const hv = cible.hypervisor_id ? hypervisors.find(h => h.id === cible.hypervisor_id) : undefined
+                return (
+                  <label className="flex items-center gap-2 text-xs text-red-400 cursor-pointer">
+                    <input type="checkbox" checked={deleteDestroyVm} onChange={e => setDeleteDestroyVm(e.target.checked)} className="accent-red-500" />
+                    Supprimer aussi la VM sur {hv ? hv.name : "l'hyperviseur"} (VMID {cible.proxmox_vm_id})
+                  </label>
+                )
+              })()}
               <div className="flex gap-3 justify-end">
                 <button onClick={() => { setDeletingMac(null); setDeleteDestroyVm(false) }} className="osiris-btn-ghost">Annuler</button>
                 <button onClick={() => handleDelete(deletingMac!)} className="osiris-btn osiris-btn--danger">Supprimer</button>
