@@ -1826,9 +1826,32 @@ def get_windows_bootstrap():
     return Response(content=content, media_type="text/plain")
 
 
+CLE_PRODUIT_RE = re.compile(r"^[A-Za-z0-9]{5}(-[A-Za-z0-9]{5}){4}$")
+
+
+def valider_cle_produit(cle: str) -> str:
+    """Une clé de produit Windows, ou rien du tout.
+
+    Le format est vérifié plutôt que simplement échappé : cette chaîne finit
+    dans un fichier de réponses gravé pour TOUS les clones d'un gabarit, et une
+    valeur fantaisiste n'y produirait pas d'erreur — elle ferait échouer la
+    passe `specialize` en silence, des semaines plus tard, sur chaque clone.
+    """
+    cle = (cle or "").strip().upper()
+    if not cle:
+        return ""
+    if not CLE_PRODUIT_RE.match(cle):
+        raise HTTPException(
+            status_code=400,
+            detail="Clé de produit attendue au format XXXXX-XXXXX-XXXXX-XXXXX-XXXXX",
+        )
+    return cle
+
+
 @app.get("/bootstrap/windows/unattend.xml")
 def get_windows_sysprep_unattend(locale: str = "fr-FR",
-                                 timezone: str = "Romance Standard Time"):
+                                 timezone: str = "Romance Standard Time",
+                                 product_key: str = ""):
     """
     Fichier de réponses GÉNÉRIQUE, celui que sysprep applique pour sceller un
     template. À ne pas confondre avec `/unattend.xml?mac=…`, rendu POUR UNE
@@ -1838,11 +1861,20 @@ def get_windows_sysprep_unattend(locale: str = "fr-FR",
     `<ComputerName>`, que le firstboot d'OSIRIS pose ensuite. Le mot de passe
     d'`osiris-admin` n'est pas un secret durable : le compte est supprimé en fin
     de premier démarrage, une fois LAPS en place.
+
+    `product_key` est OPTIONNEL et le reste : un gabarit sert plusieurs clients,
+    chacun avec sa licence, saisie après coup. Sans clé, le rendu supprime la
+    page « entrez votre clé » de l'OOBE et Windows démarre non activé — sinon un
+    support sous licence l'y arrête et le clone n'amorce jamais.
+    ⚠️ Fournie, elle transite en clair dans l'URL et se retrouve donc dans les
+    journaux d'accès : ne le faire que pour une clé publique (KMS client setup
+    key), jamais pour une MAK.
     """
     content = jinja_env.get_template("unattend-sysprep.xml.j2").render(
         locale=locale.replace("_", "-")[:5],
         win_timezone=timezone,
         admin_password=WINDOWS_TEMPLATE_ADMIN_PASSWORD,
+        product_key=valider_cle_produit(product_key),
     )
     return Response(content=content, media_type="application/xml")
 
@@ -4438,6 +4470,15 @@ async def get_network_defaults(hv_id: int, node: str, bridge: str,
         ).all()
 
     return _defauts_reseau(fiche, deja)
+
+
+@app.get("/hypervisors/{hv_id}/folders")
+async def list_hypervisor_folders(hv_id: int, _: User = Depends(require_admin)):
+    """Dossiers où ranger une VM. Liste vide sur les hyperviseurs sans dossiers,
+    pour que le formulaire interroge les deux de la même façon."""
+    h = _get_hypervisor(hv_id)
+    lister = getattr(_provider(h), "list_folders", None)
+    return await lister(h) if lister else []
 
 
 @app.get("/hypervisors/{hv_id}/templates")

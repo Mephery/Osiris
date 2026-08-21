@@ -21,6 +21,19 @@
         machine : sur un clone, ce script n'existe pas encore. C'est l'amorcage qui
         lira la MAC et ira le chercher aupres d'OSIRIS.
 
+    LA CLE DE PRODUIT EST NECESSAIRE sur un support SOUS LICENCE (par opposition
+    a un support d'evaluation, qui porte la sienne) : sans elle, l'OOBE de chaque
+    clone s'arrete sur « entrez votre cle » et attend un humain.
+    Il N'EXISTE PAS de directive pour masquer cette page : `UserData/ProductKey`
+    n'est PAS valide dans la passe oobeSystem, et un fichier de reponses invalide
+    fait echouer la passe ENTIERE - donc aussi la session automatique et
+    l'amorcage. Essaye et constate le 21/08 : « Un composant ou un parametre
+    specifie dans le fichier de reponses n'existe pas ».
+    La reponse est une KMS client setup key (GVLK), cle PUBLIQUE publiee par
+    Microsoft pour chaque edition : elle n'active rien et ne consomme aucune
+    licence, elle laisse simplement l'OOBE passer. Le client pose ensuite la
+    sienne avec `slmgr /ipk`, comme aujourd'hui.
+
     Volontairement ABSENT : l'element ComputerName. Windows en genere un
     aleatoire, et le firstboot d'OSIRIS renomme ensuite la machine avec son vrai
     nom. En graver un ici le donnerait, identique, a tous les clones.
@@ -42,6 +55,9 @@
                    publicKeyToken="31bf3856ad364e35"
                    language="neutral" versionScope="nonSxS">
             <TimeZone>{{ win_timezone }}</TimeZone>
+{%- if product_key %}
+            <ProductKey>{{ product_key | e }}</ProductKey>
+{%- endif %}
         </component>
     </settings>
 

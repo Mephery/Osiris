@@ -11,6 +11,10 @@
 
      & ([scriptblock]::Create((irm {{ osiris_url }}/bootstrap/windows))) -Seal
 
+ Ajouter -ProductKey XXXXX-XXXXX-XXXXX-XXXXX-XXXXX pour graver une cle dans le
+ gabarit. Sans elle, Windows demarre non active et la page qui la reclame - qui
+ arreterait l'OOBE de chaque clone - n'est pas affichee.
+
  Ce qu'il installe ne contient AUCUN identifiant et AUCUNE logique metier :
  juste « lis ta MAC, demande ton script a OSIRIS, execute-le ». Tout le reste
  (profil, applications, jonction au domaine, supervision, BitLocker, LAPS) est
@@ -29,7 +33,16 @@ param(
     # Ecrit le fichier de reponses generique et lance sysprep. A ne faire qu'une
     # fois tout le reste pret : la VM s'eteint et ne doit PLUS etre redemarree
     # avant d'avoir ete convertie en template.
-    [switch] $Seal
+    [switch] $Seal,
+    # NECESSAIRE sur un support sous licence : sans clef, l'OOBE de chaque clone
+    # s'arrete sur « entrez votre cle » et attend un humain - donc pas de session
+    # automatique, pas d'amorcage, aucun rappel. Il n'existe AUCUNE directive
+    # d'unattend pour masquer cette page (essaye et constate le 21/08 : la passe
+    # oobeSystem entiere devient invalide).
+    # Y mettre la KMS client setup key (GVLK) de l'edition : clef PUBLIQUE de
+    # Microsoft, qui n'active rien et ne consomme aucune licence - elle laisse
+    # juste passer l'OOBE. Le client pose ensuite la sienne avec `slmgr /ipk`.
+    [string] $ProductKey = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -203,7 +216,18 @@ if (-not $Seal) {
 }
 
 Write-Host "[OSIRIS] Recuperation du fichier de reponses generique..."
-Invoke-WebRequest -Uri "$OsirisUrl/bootstrap/windows/unattend.xml" `
+$uriReponses = "$OsirisUrl/bootstrap/windows/unattend.xml"
+if ($ProductKey) {
+    $uriReponses += "?product_key=" + [uri]::EscapeDataString($ProductKey)
+    Write-Host "[OSIRIS] Clef de produit fournie : elle sera gravee dans le gabarit."
+} else {
+    Write-Host "[OSIRIS] AVERTISSEMENT : aucune clef de produit."
+    Write-Host "         Sur un support SOUS LICENCE, l'OOBE de chaque clone s'arretera"
+    Write-Host "         sur « entrez votre cle de produit » et attendra un humain."
+    Write-Host "         Utiliser la KMS client setup key (GVLK) de l'edition installee :"
+    Write-Host "           -ProductKey XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"
+}
+Invoke-WebRequest -Uri $uriReponses `
                   -OutFile $reponses -UseBasicParsing -TimeoutSec 30
 Write-Host "[OSIRIS] Fichier de reponses ecrit : $reponses"
 
@@ -221,4 +245,15 @@ Write-Host "           Proxmox : qm template <vmid>"
 Write-Host "           vSphere : clic droit sur la VM > Modele > Convertir en modele"
 Start-Sleep -Seconds 3
 
-& "$env:SystemRoot\System32\Sysprep\sysprep.exe" /generalize /oobe /shutdown /unattend:$reponses
+# Sur un Windows 64 bits, une console PowerShell 32 bits voit C:\Windows\System32
+# REDIRIGE vers SysWOW64, qui ne contient aucun dossier Sysprep : la commande
+# echoue en "n'est pas reconnu", ce qui ressemble a une installation abimee alors
+# que le fichier est bien la. `Sysnative` est l'echappatoire prevue par Windows
+# pour retrouver le vrai System32 depuis un processus 32 bits.
+# Constate le 21/08 : scellement lance depuis "Windows PowerShell (x86)".
+$dossierSysteme = "$env:SystemRoot\System32"
+if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+    $dossierSysteme = "$env:SystemRoot\Sysnative"
+    Write-Host "[OSIRIS] Console 32 bits detectee - sysprep atteint via Sysnative."
+}
+& "$dossierSysteme\Sysprep\sysprep.exe" /generalize /oobe /shutdown /unattend:$reponses
