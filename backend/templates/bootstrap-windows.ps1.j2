@@ -148,23 +148,29 @@ function InfoGet($cle) {
         Ecrire "  guestinfo : vmtoolsd introuvable."
         return ""
     }
-    $valeur = ""
+    # Invocation NUE, sur sa propre ligne. Emballee dans une expression
+    # ("" + (& $exe ... 2>$null)), la sortie revenait vide ET $LASTEXITCODE nul.
+    $sortie = ""
     try {
-        $valeur = ("" + (& $exe --cmd "info-get $cle" 2>$null)).Trim()
+        $sortie = & $exe --cmd "info-get $cle" 2>&1
     } catch {
         Ecrire "  guestinfo : $cle - lancement de vmtoolsd impossible : $_"
         return ""
     }
-    $code = $LASTEXITCODE
-    if ($code -ne 0) {
-        # Relance en capturant le message : la premiere passe le jette pour ne
-        # pas polluer la valeur, mais en echec c'est lui qui porte la cause.
-        $detail = ("" + (& $exe --cmd "info-get $cle" 2>&1)).Trim()
-        Ecrire "  guestinfo : $cle - vmtoolsd sort en $code : $detail"
+    $code  = "$LASTEXITCODE"
+    $texte = (($sortie | Out-String) -replace "`r", "").Trim()
+
+    # On juge sur la VALEUR, pas sur le code de sortie. Le 21/08, un code de
+    # sortie NUL - donc different de 0, donc pris pour un echec - faisait jeter
+    # une valeur qui aurait tres bien pu etre la bonne. Le code de sortie est un
+    # indice, la valeur est ce qu'on est venu chercher : c'est elle qui tranche,
+    # et l'appelant verifie de toute facon qu'elle ressemble a une adresse.
+    if (-not $texte) {
+        Ecrire "  guestinfo : $cle - aucune sortie (code '$code')."
         return ""
     }
-    if (-not $valeur) { Ecrire "  guestinfo : $cle - lue, mais vide." }
-    return $valeur
+    Ecrire "  guestinfo : $cle = '$texte' (code '$code')"
+    return $texte
 }
 
 if (-not (AdresseUtilisable)) {

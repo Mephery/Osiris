@@ -172,8 +172,8 @@ def test_chaque_echec_de_lecture_DIT_sa_cause(agent):
     qui ne distingue pas les causes ne sert qu'à rassurer."""
     bloc = _code(agent).split("function InfoGet")[1].split("if (-not (AdresseUtilisable))")[0]
     assert "vmtoolsd introuvable" in bloc
-    assert "sort en $code" in bloc
-    assert "mais vide" in bloc
+    assert "lancement de vmtoolsd impossible" in bloc
+    assert "aucune sortie (code" in bloc
 
 
 def test_on_attend_que_vmware_tools_soit_pret(agent):
@@ -197,3 +197,21 @@ def test_le_reessai_s_arrete_des_qu_il_a_l_adresse(agent):
     bloc = _code(agent).split("if (-not (AdresseUtilisable))")[1]
     assert "if ($cidr) {" in bloc
     assert "break" in bloc
+
+
+def test_la_valeur_prime_sur_le_code_de_sortie(agent):
+    """Le 21/08, `vmtoolsd` a rendu un code de sortie NUL. Comme `$null -ne 0`,
+    la lecture était comptée en échec et la valeur jetée — alors qu'elle était
+    peut-être bonne. Le code de sortie est un indice ; la valeur est ce qu'on est
+    venu chercher, et l'appelant vérifie de toute façon qu'elle ressemble à une
+    adresse. C'est donc elle qui décide."""
+    bloc = _code(agent).split("function InfoGet")[1].split("if (-not (AdresseUtilisable))")[0]
+    assert "if (-not $texte)" in bloc
+    assert "$code -ne 0" not in bloc, "le code de sortie ne doit plus décider"
+
+
+def test_l_invocation_de_vmtoolsd_est_nue(agent):
+    """Emballée dans une expression, elle rendait une sortie vide ET un
+    $LASTEXITCODE nul — deux symptômes pour une seule cause."""
+    bloc = _code(agent).split("function InfoGet")[1].split("if (-not (AdresseUtilisable))")[0]
+    assert '$sortie = & $exe --cmd "info-get $cle" 2>&1' in bloc
