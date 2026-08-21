@@ -162,14 +162,67 @@ def _wait(task):
     return task.info.result
 
 
-def _vm_folder(si, template):
+def choisir_dossier(chemins: list[str], demande: str) -> str:
+    """Le chemin de dossier retenu, à partir de ce que l'opérateur a saisi.
+
+    Isolée de vCenter pour être vérifiable : c'est une règle d'ergonomie, pas un
+    détail de plateforme. Un vCenter organisé par clients a des dossiers
+    imbriqués, et exiger le chemin complet à chaque création serait pénible ;
+    mais accepter un nom ambigu déposerait la VM chez le mauvais client, ce qui
+    est bien pire que de refuser.
     """
-    Dossier d'accueil des VM créées : la racine « VM et modèles » du datacenter.
+    demande = (demande or "").strip().strip("/")
+    if not demande:
+        return ""                       # racine du datacenter, comportement d'origine
+    if demande in chemins:
+        return demande
+    feuilles = [c for c in chemins if c.rsplit("/", 1)[-1].lower() == demande.lower()]
+    if len(feuilles) == 1:
+        return feuilles[0]
+    if not feuilles:
+        raise HTTPException(status_code=400,
+                            detail=f"Dossier « {demande} » introuvable sur ce vCenter")
+    raise HTTPException(
+        status_code=400,
+        detail=f"Dossier « {demande} » ambigu : {', '.join(sorted(feuilles))}. "
+               f"Donner le chemin complet.")
+
+
+def _chemins_dossiers(si) -> dict:
+    """Tous les dossiers de VM, indexés par leur chemin sous la racine.
+
+    La racine elle-même (« vm ») n'y figure pas : elle est déjà le défaut, et
+    l'exposer comme un choix parmi d'autres la ferait passer pour un rangement
+    alors qu'elle est justement l'absence de rangement.
+    """
+    out = {}
+
+    def descendre(dossier, prefixe):
+        for enfant in getattr(dossier, "childEntity", []):
+            if not isinstance(enfant, vim.Folder):
+                continue
+            chemin = f"{prefixe}/{enfant.name}" if prefixe else enfant.name
+            out[chemin] = enfant
+            descendre(enfant, chemin)
+
+    for dc in si.content.rootFolder.childEntity:
+        if isinstance(dc, vim.Datacenter):
+            descendre(dc.vmFolder, "")
+    return out
+
+
+def _vm_folder(si, template, chemin: str = ""):
+    """
+    Dossier d'accueil des VM créées : celui demandé, sinon la racine
+    « VM et modèles » du datacenter.
 
     Surtout PAS `template.parent` : les templates vivent dans un dossier dédié,
     et y déposer les VM de production le transforme en fourre-tout où l'on ne
     distingue plus les modèles des machines réelles.
     """
+    if chemin:
+        dossiers = _chemins_dossiers(si)
+        return dossiers[choisir_dossier(list(dossiers), chemin)]
     node = template.parent
     while node is not None and not isinstance(node, vim.Datacenter):
         node = getattr(node, "parent", None)
@@ -349,6 +402,13 @@ class VSphereProvider:
         return await _run(work)
 
     @staticmethod
+    async def list_folders(h: Hypervisor) -> list[dict]:
+        """Les dossiers où ranger une VM. Vide = racine du datacenter."""
+        def work():
+            return [{"path": c} for c in sorted(_chemins_dossiers(_connect(h)))]
+        return await _run(work)
+
+    @staticmethod
     async def list_networks(h: Hypervisor, node: str) -> list[dict]:
         def work():
             si = _connect(h)
@@ -463,7 +523,8 @@ class VSphereProvider:
             relocate = vim.vm.RelocateSpec(datastore=datastore, pool=cluster.resourcePool)
             clone = vim.vm.CloneSpec(location=relocate, config=config,
                                      powerOn=False, template=False)
-            vm = _wait(template.CloneVM_Task(folder=_vm_folder(si, template),
+            vm = _wait(template.CloneVM_Task(folder=_vm_folder(si, template,
+                                                             getattr(body, "folder", "")),
                                              name=body.hostname, spec=clone))
             try:
                 return _finish(vm, network, body, user_data, render_user_data)

@@ -35,9 +35,12 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   const [vmNode, setVmNode]             = useState('')
   const [vmStorages, setVmStorages]     = useState<{storage:string;type:string;avail_gb:number;total_gb:number}[]>([])
   const [vmNetworks, setVmNetworks]     = useState<ProxmoxNetwork[]>([])
+  // Dossiers vSphere. Liste vide sur Proxmox, qui n'en a pas : le champ
+  // disparaît alors du formulaire au lieu d'y proposer un choix inexistant.
+  const [vmFolders, setVmFolders]       = useState<{ path: string }[]>([])
   const [vmNetDef, setVmNetDef]         = useState<NetworkDefaults | null>(null)
   const [vmNodes, setVmNodes]           = useState<ProxmoxNode[]>([])
-  const [vmForm, setVmForm]             = useState({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '', post_script: '' })
+  const [vmForm, setVmForm]             = useState({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '', post_script: '' })
   const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
   const [vmCreating, setVmCreating]     = useState(false)
 
@@ -108,7 +111,10 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
 
   const handleVmHvChange = (hvId: number) => {
     setVmHvId(hvId); setVmNode(''); setVmStorages([]); setVmNetworks([]); setVmNodes([]); setVmNetDef(null)
-    setVmForm(f => ({ ...f, storage: '', bridge: '', template_id: '' }))
+    setVmFolders([])
+    setVmForm(f => ({ ...f, storage: '', bridge: '', folder: '', template_id: '' }))
+    fetch(`${API_URL}/hypervisors/${hvId}/folders`, { headers: authHeader(token) })
+      .then(r => r.json()).then(setVmFolders).catch(() => {})
     // Les templates sont ceux de TOUT l'hyperviseur, indépendamment du nœud : sur un
     // stockage partagé, le disque d'un template est lisible par tous les nœuds, et
     // OSIRIS sait cloner vers celui qu'on choisit. Les lier au nœud enfermait le
@@ -184,7 +190,7 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
       )
       setShowVmForm(false)
       setVmNetDef(null)
-      setVmForm({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '', post_script: '' })
+      setVmForm({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '', post_script: '' })
       onVmCreated()
     }).catch(err => toast.error(err.message))
       .finally(() => setVmCreating(false))
@@ -512,6 +518,13 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                     </option>
                   ))}
                 </select>
+                {/* Rangement vSphere. Absent sur Proxmox : la liste revient vide. */}
+                {vmFolders.length > 0 && (
+                  <select value={vmForm.folder} onChange={e => setVmForm(f => ({...f, folder: e.target.value}))} className="osiris-input text-xs col-span-2">
+                    <option value="">Dossier : racine du datacenter</option>
+                    {vmFolders.map(d => <option key={d.path} value={d.path}>{d.path}</option>)}
+                  </select>
+                )}
                 <div className="flex items-center gap-1">
                   <label className="text-[10px] text-slate-500 shrink-0">vCPU</label>
                   <input type="number" min={1} max={64} value={vmForm.vcpus} onChange={e => setVmForm(f => ({...f, vcpus: Number(e.target.value)}))} className="osiris-input text-xs w-full" />

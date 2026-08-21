@@ -4515,6 +4515,11 @@ class VmCreateBody(SQLModel):
     node: str                        # noeud Proxmox cible
     storage: str                     # pool de stockage (ex: local-lvm)
     bridge: str = "vmbr0"            # bridge réseau
+    # vSphere uniquement : dossier d'accueil dans « VM et modèles ». Vide = racine
+    # du datacenter. Sans ce choix, toutes les VM tombent en vrac à la racine d'un
+    # vCenter par ailleurs rangé par clients. Sans effet sur Proxmox, qui n'a pas
+    # de dossiers (son équivalent est le pool, déjà géré ailleurs).
+    folder: str = ""
     vcpus: int = 2
     ram_mb: int = 2048               # RAM en Mo
     disk_gb: int = 20                # disque système en Go
