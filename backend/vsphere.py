@@ -77,11 +77,19 @@ def _connect(h: Hypervisor):
     """Ouvre (ou réutilise) une session vCenter. Bloquant — à appeler via _run()."""
     si = _sessions.get(h.id)
     if si is not None:
+        # Le ping doit regarder la REPONSE, pas seulement survivre a l'appel : sur
+        # une session expiree, vCenter rend `None` au lieu de lever une erreur. Le
+        # controle passait donc, on rendait une session morte, et l'echec tombait
+        # plus loin — en pleine creation de VM, sous la forme d'un 500 nu
+        # « NotAuthenticated » qu'aucun redemarrage automatique ne rattrapait.
+        # Constate trois fois les 20 et 21/08.
         try:
-            si.content.sessionManager.currentSession   # ping applicatif
-            return si
+            vivante = si.content.sessionManager.currentSession is not None
         except Exception:
-            _sessions.pop(h.id, None)                  # session expirée
+            vivante = False
+        if vivante:
+            return si
+        _sessions.pop(h.id, None)
 
     user = (h.token_id or "").strip()
     password = decrypt(h.token_secret or "")
