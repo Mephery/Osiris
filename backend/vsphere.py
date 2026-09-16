@@ -660,20 +660,29 @@ def guestinfo_reseau(body) -> list[tuple[str, str]]:
 
     Rendu vide hors du mode `template` : en `cloudinit`, c'est `_metadata` qui
     porte le réseau, et deux mécanismes concurrents finiraient par diverger.
+
+    En mode `template`, les TROIS clés sortent toujours — vides quand rien n'est
+    demandé. Ne rien renvoyer serait le piège : un clone vSphere HERITE de
+    l'`extraConfig` de son gabarit. Or un gabarit fabriqué à partir d'une VM
+    déployée par OSIRIS porte encore les `guestinfo.osiris.*` de CETTE VM-là —
+    c'est le mode de fabrication normal d'un gabarit, pas un accident. Se taire
+    laissait donc un clone sans adressage demandé lire celle d'une autre machine
+    et se l'attribuer : en silence, et sur une adresse déjà prise.
+
+    Le bug était jusqu'ici masqué par l'agent cassé, qui ne lisait aucune de ces
+    clés. Le réparer l'aurait réveillé : on écrase donc systématiquement, et une
+    valeur vide veut dire « pas d'adresse imposée », que l'agent traite en DHCP.
     """
     if getattr(body, "boot_mode", "") != "template":
         return []
     ip = (getattr(body, "ip_cidr", "") or "").strip()
-    if not ip:
-        return []                       # rien d'imposé : le clone fera du DHCP
-    paires = [("guestinfo.osiris.ip", ip)]
-    gw = (getattr(body, "gateway", "") or "").strip()
-    if gw:
-        paires.append(("guestinfo.osiris.gateway", gw))
-    dns = [d.strip() for d in (getattr(body, "dns_servers", "") or "").split(",") if d.strip()]
-    if dns:
-        paires.append(("guestinfo.osiris.dns", ",".join(dns)))
-    return paires
+    # Sans adresse, passerelle et DNS n'ont aucun sens : on les neutralise avec.
+    gw = (getattr(body, "gateway", "") or "").strip() if ip else ""
+    dns = ",".join(d.strip() for d in (getattr(body, "dns_servers", "") or "").split(",")
+                   if d.strip()) if ip else ""
+    return [("guestinfo.osiris.ip", ip),
+            ("guestinfo.osiris.gateway", gw),
+            ("guestinfo.osiris.dns", dns)]
 
 
 def _finish(vm, network, body, user_data: str, render_user_data) -> dict:

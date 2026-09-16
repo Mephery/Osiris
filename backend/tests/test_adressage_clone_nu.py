@@ -75,15 +75,40 @@ def test_rien_en_mode_cloudinit():
     assert vsphere.guestinfo_reseau(_body(boot_mode="cloudinit", os="ubuntu")) == []
 
 
-def test_rien_sans_adresse_demandee():
-    """Aucune adresse imposée = on laisse le clone faire du DHCP."""
-    assert vsphere.guestinfo_reseau(_body(ip_cidr="")) == []
+def test_sans_adresse_demandee_les_cles_sont_VIDEES_pas_omises():
+    """Ne pas écrire ne veut PAS dire ne rien imposer : ça veut dire hériter.
+
+    Un clone vSphere reprend l'`extraConfig` de son gabarit. Un gabarit fabriqué
+    depuis une VM déployée par OSIRIS porte encore les `guestinfo.osiris.*` de
+    cette VM-là — c'est le mode de fabrication normal, pas un accident. Omettre
+    les clés laissait donc un clone en DHCP se voir attribuer l'adresse fixe
+    d'une autre machine, sans un mot.
+
+    Le bug dormait derrière l'agent cassé, qui ne lisait jamais ces clés. Le
+    réparer le réveillait : on écrase donc toujours, et vide vaut « rien
+    d'imposé », que l'agent traite en DHCP.
+    """
+    c = _cles(ip_cidr="", gateway="", dns_servers="")
+    assert c == {"guestinfo.osiris.ip": "",
+                 "guestinfo.osiris.gateway": "",
+                 "guestinfo.osiris.dns": ""}
 
 
 def test_une_adresse_sans_passerelle_reste_utilisable():
     """Un VLAN sans route par défaut existe : ne pas tout refuser pour autant."""
     c = _cles(gateway="", dns_servers="")
-    assert c == {"guestinfo.osiris.ip": "10.0.5.20/24"}
+    assert c["guestinfo.osiris.ip"] == "10.0.5.20/24"
+    # Vidées, et non omises : sinon le clone hériterait de celles du gabarit.
+    assert c["guestinfo.osiris.gateway"] == ""
+    assert c["guestinfo.osiris.dns"] == ""
+
+
+def test_une_adresse_heritee_ne_peut_JAMAIS_survivre_au_clonage():
+    """Le garde-fou, exprimé sur ce qui compte : quoi qu'on demande, les trois
+    clés sont toujours réécrites, donc rien du gabarit ne passe au travers."""
+    for demande in ({}, {"ip_cidr": ""}, {"gateway": "", "dns_servers": ""},
+                    {"ip_cidr": "", "gateway": "", "dns_servers": ""}):
+        assert set(_cles(**demande)) == CLES_AUTORISEES, demande
 
 
 # ── L'agent gravé dans le gabarit ─────────────────────────────────────────────
