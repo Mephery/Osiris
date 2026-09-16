@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -107,5 +107,26 @@ describe('buildCreateVmPayload', () => {
     expect(payload.hostname).toBe('srv-test')
     expect(payload.os).toBe('ubuntu')
     expect(payload.boot_mode).toBe('pxe')
+  })
+})
+
+describe('imageDuProfilIgnoree', () => {
+  const profil2025 = { win_image: 'server2025.wim' }
+
+  it("signale l'image du profil quand on clone un gabarit", () => {
+    // Le cas du 25/08 : gabarit Windows Server 2022, profil nommé « 2025 ».
+    expect(imageDuProfilIgnoree('template', profil2025)).toBe(true)
+    expect(imageDuProfilIgnoree('cloudinit', profil2025)).toBe(true)
+  })
+
+  it('se tait en PXE, seul mode où le profil décide vraiment de l\'image', () => {
+    expect(imageDuProfilIgnoree('pxe', profil2025)).toBe(false)
+  })
+
+  it("se tait quand le profil ne déclare aucune image", () => {
+    // Rien à contredire : le gabarit est la seule source d'OS, et personne
+    // n'a prétendu le contraire. Avertir ici ne ferait qu'user l'avertissement.
+    expect(imageDuProfilIgnoree('template', { win_image: '' })).toBe(false)
+    expect(imageDuProfilIgnoree('template', undefined)).toBe(false)
   })
 })

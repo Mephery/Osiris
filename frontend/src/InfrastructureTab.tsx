@@ -5,7 +5,7 @@ import { toast } from 'sonner'
 import type { ClusterStorage, Hypervisor, NetworkDefaults, Organization, Profile, ProxmoxNetwork, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { IcoX } from './icons'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree } from './vmForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
@@ -620,6 +620,21 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                   </select>
                 )}
               </div>
+
+              {/* En mode gabarit, l'OS ne vient PAS du profil : il vient de l'image
+                  clonee. Le profil continue de decider tout le reste (jonction,
+                  applications, supervision), mais son image systeme est ignoree.
+                  Sans ce rappel, un profil nomme d'apres un OS laisse croire qu'on
+                  deploie cet OS-la — vecu le 2026-08-25, ou un gabarit 2022 a ete
+                  clone avec un profil nomme « Windows Server 2025 ». Rien n'echoue :
+                  on obtient juste un autre OS que celui qu'on croyait demander. */}
+              {vmForm.boot_mode !== 'pxe' && (
+                <p className="text-[9px] text-amber-400">
+                  ⚠ L'OS vient du gabarit cloné, pas du profil.
+                  {imageDuProfilIgnoree(vmForm.boot_mode, profiles.find(p => String(p.id) === String(vmForm.profile_id)))
+                    && ` L'image « ${profiles.find(p => String(p.id) === String(vmForm.profile_id))?.win_image} » déclarée par ce profil n'est pas utilisée dans ce mode.`}
+                </p>
+              )}
 
               <div className="text-[10px] text-slate-600 bg-slate-900/60 rounded p-2 font-mono">
                 {vmForm.boot_mode === 'pxe'

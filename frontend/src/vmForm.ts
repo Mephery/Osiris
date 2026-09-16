@@ -44,3 +44,18 @@ export const buildCreateVmPayload = <T extends { profile_id: unknown; template_i
   template_id: vmForm.template_id ? Number(vmForm.template_id) : null,
   organization_id: vmForm.organization_id === '' ? null : Number(vmForm.organization_id),
 })
+
+/** L'image système déclarée par le profil sera-t-elle ignorée par ce mode d'amorçage ?
+ *
+ *  `win_image` n'est lu que par le script de déploiement WinPE, donc uniquement en
+ *  mode `pxe`. Cloner un gabarit ne passe jamais par là : l'OS du clone est celui
+ *  de l'image clonée, quoi qu'annonce le profil.
+ *
+ *  Le 25/08, une VM a été créée depuis un gabarit Windows Server 2022 avec le
+ *  profil nommé « Windows Server 2025 ». Rien dans le formulaire ne disait que ce
+ *  nom ne s'appliquait pas à ce mode — et rien n'aurait échoué non plus : on
+ *  obtient simplement un OS différent de celui qu'on croit avoir demandé. */
+export const imageDuProfilIgnoree = (
+  bootMode: string,
+  profil: { win_image?: string } | undefined,
+): boolean => bootMode !== 'pxe' && Boolean(profil?.win_image)
