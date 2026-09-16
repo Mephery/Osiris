@@ -161,3 +161,84 @@ def test_template_sans_id_est_refuse(client, admin_headers, monkeypatch):
                     json=_corps(template_id=None))
     assert r.status_code == 400
     assert "template_id" in r.text
+
+
+# ── Le journal s'ouvre à la création ──────────────────────────────────────────
+# Une VM dont l'agent ne rappelle jamais laissait un journal totalement VIDE :
+# ni erreur, ni ligne, rien à montrer. C'est ce qu'on a lu le 25/08, et c'est ce
+# qui a fait conclure « OSIRIS n'a rien fait » alors qu'il avait tout fait.
+# Une seule ligne suffit à transformer « aucune trace » en « créée à telle heure,
+# puis plus rien » — qui, lui, se diagnostique.
+
+def _journal(mac: str) -> list[str]:
+    from sqlmodel import select
+    from models import DeployLogLine
+    with Session(engine) as session:
+        return [l.line for l in session.exec(
+            select(DeployLogLine).where(DeployLogLine.mac == mac)
+            .order_by(DeployLogLine.id)).all()]
+
+
+def test_la_creation_ouvre_le_journal(client, admin_headers, monkeypatch):
+    hv = _make_hypervisor()
+    _patch(monkeypatch, {})
+
+    r = client.post(f"/hypervisors/{hv}/create-vm", headers=admin_headers, json=_corps())
+    assert r.status_code == 201, r.text
+
+    lignes = _journal(r.json()["mac"])
+    assert len(lignes) == 1, "une VM créée doit laisser une trace, même si elle ne rappelle jamais"
+    assert "en attente du premier rappel" in lignes[0]
+
+
+def test_le_journal_nomme_l_hyperviseur_et_le_mode(client, admin_headers, monkeypatch):
+    """Sans ces deux repères, la ligne ne vaut pas mieux qu'un journal vide."""
+    hv = _make_hypervisor()
+    _patch(monkeypatch, {})
+
+    r = client.post(f"/hypervisors/{hv}/create-vm", headers=admin_headers, json=_corps())
+    ligne = _journal(r.json()["mac"])[0]
+    assert "pve-test" in ligne          # quel hyperviseur
+    assert "template" in ligne          # quel mode d'amorçage
+    assert "150" in ligne               # quel identifiant de VM
+
+
+def test_la_ligne_est_ecrite_sous_la_MAC_ATTRIBUEE_par_l_hyperviseur(
+        client, admin_headers, monkeypatch):
+    """Sur vSphere, la MAC du clone est décidée par la plateforme, pas par OSIRIS.
+
+    Le journal est indexé sur la MAC. Écrire la ligne avant la bascule la
+    rattacherait à la MAC provisoire — donc à une machine qui n'existe pas, et le
+    journal de la vraie VM resterait vide. C'est précisément le piège que cette
+    ligne est censée fermer.
+    """
+    hv = _make_hypervisor()
+    _patch(monkeypatch, {})
+    MAC_FINALE = "005056aa0042"
+
+    class ProviderQuiReattribueLaMac:
+        @staticmethod
+        async def next_vm_id(h):
+            return 0
+
+        @staticmethod
+        def generate_mac():
+            return "00505600beef"          # MAC provisoire, jetée par le clone
+
+        @staticmethod
+        async def provision_vm(h, body, vm_id, mac_colons, mac_plain, user_data, render):
+            return {"vm_id": 259107, "mac": MAC_FINALE,
+                    "vm_uuid": "42010000-0000-4000-8000-000000000001"}
+
+        @staticmethod
+        async def destroy_vm(h, node, vm_id, nom_attendu=""):
+            return None
+
+    monkeypatch.setattr(main, "_provider", lambda h: ProviderQuiReattribueLaMac)
+
+    r = client.post(f"/hypervisors/{hv}/create-vm", headers=admin_headers, json=_corps())
+    assert r.status_code == 201, r.text
+    assert r.json()["mac"] == MAC_FINALE
+
+    assert _journal("00505600beef") == [], "rien ne doit rester sous la MAC provisoire"
+    assert len(_journal(MAC_FINALE)) == 1, "le journal suit la MAC réellement attribuée"

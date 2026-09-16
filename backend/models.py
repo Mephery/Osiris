@@ -351,6 +351,15 @@ class Machine(SQLModel, table=True):
     # Sert a regrouper les lignes de DeployLogLine : relancer un deploiement ouvre un
     # nouveau journal sans effacer celui de la tentative precedente.
     deploy_log_run: int = Field(default=1)
+    # Date de creation de la FICHE (pas du deploiement : voir `deployed_at`).
+    #
+    # Sans elle, une fiche restee « pending » etait indetectable : rien ne disait
+    # depuis quand elle attendait. Un clone dont l'agent ne rappelle jamais ne
+    # produit aucun evenement, aucune ligne de journal et aucune erreur — la
+    # panne du 25/08 est restee invisible onze minutes cote operateur, puis deux
+    # semaines cote serveur. C'est ce repere qui permet a `/health` de nommer un
+    # deploiement muet au lieu de le laisser se confondre avec une fiche neuve.
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class OsImage(SQLModel, table=True):

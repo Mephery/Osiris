@@ -121,6 +121,44 @@ zabbix_export:
               expression: 'last(/OSIRIS server/osiris.health.winpe)<>"ok"'
               name: 'OSIRIS: ISO WinPE a reconstruire ({ITEM.VALUE})'
               priority: AVERAGE
+        - uuid: 9c41b7e05a8d42f6b3e7d18c6a2f05be
+          name: 'OSIRIS: deploiements de VM restes muets'
+          type: DEPENDENT
+          key: osiris.health.deploiements_muets
+          delay: '0'
+          history: 30d
+          trends: 90d
+          value_type: UNSIGNED
+          tags:
+            - tag: Application
+              value: OSIRIS
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.deploiements_muets
+          master_item:
+            key: osiris.health
+          description: |
+            Nombre de fiches de VM creees qui n'ont jamais rappele OSIRIS.
+
+            Mode de panne le plus desagreable de la chaine : la creation REUSSIT.
+            L'hyperviseur cree la VM, OSIRIS relit la MAC attribuee, l'API rend
+            201 — puis l'agent du gabarit n'arrive pas a lire son adresse, la VM
+            part en APIPA, et plus rien ne se produit. Aucun evenement, aucune
+            erreur, aucune ligne de journal.
+
+            Seules les VM sont comptees : une machine physique peut legitimement
+            attendre des jours qu'on l'allume, alors qu'une VM a ete demarree par
+            OSIRIS a l'instant meme de sa creation.
+
+            Une valeur non nulle ne veut pas dire que le service va mal : elle dit
+            qu'un deploiement a echoue sans le dire. Les fiches concernees se
+            lisent dans l'interface.
+          triggers:
+            - uuid: 5b8f3a2c7d1e496ab04c9f6e83d27a15
+              expression: 'last(/OSIRIS server/osiris.health.deploiements_muets)>0'
+              name: 'OSIRIS: {ITEM.VALUE} VM creee(s) sans jamais rappeler'
+              priority: AVERAGE
         - uuid: 3eeb27fd9f964ebbabba81caf251bd1b
           name: 'OSIRIS: version deployee'
           type: DEPENDENT

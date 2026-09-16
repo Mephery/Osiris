@@ -1445,7 +1445,12 @@ def health():
     # WinPE. C'est une alerte, pas une indisponibilité — et une sonde doit
     # pouvoir distinguer les deux.
     return {"status": "ok" if db == "ok" else "degraded", "db": db,
-            "version": "1.0.0", "winpe": etat_iso_winpe()}
+            "version": "1.0.0", "winpe": etat_iso_winpe(),
+            # Meme logique que `winpe`, et volontairement hors de `status` : des
+            # VM muettes n'empechent pas le service de fonctionner, elles disent
+            # qu'un deploiement a echoue sans le dire. C'est une alerte, pas une
+            # indisponibilite.
+            "deploiements_muets": deploiements_muets()}
 
 
 # ── Boot iPXE ──────────────────────────────────────────────────────────────────
@@ -3962,6 +3967,50 @@ def etat_iso_winpe() -> str:
         return "perimee"
     return "ok"
 
+
+# Au-dela de ce delai, une fiche encore « pending » n'attend plus : elle est muette.
+# Trente minutes couvrent tres largement un clone qui demarre, finit son OOBE et
+# rappelle — les deploiements observes rappellent en deux a quatre minutes.
+DEPLOIEMENT_MUET_MINUTES = 30
+
+
+def deploiements_muets(seuil_minutes: int = DEPLOIEMENT_MUET_MINUTES) -> int:
+    """Combien de fiches de VM ont ete creees sans jamais rappeler.
+
+    Le mode de panne que cette sonde rend visible est le plus desagreable de
+    tous : la creation REUSSIT. L'hyperviseur cree la VM, OSIRIS relit la MAC
+    attribuee, la fiche est correcte, l'API rend 201. Puis l'agent grave dans le
+    gabarit n'arrive pas a se lire son adresse, la VM part en APIPA, et plus rien
+    ne se produit — aucun evenement de deploiement, aucune erreur, aucune trace.
+    La fiche reste « pending » indefiniment, indistinguable d'une fiche creee a
+    l'instant. Le 25/08, personne n'a rien vu pendant deux semaines.
+
+    On ne compte que les fiches portant un `hypervisor_id` : une machine
+    PHYSIQUE peut legitimement attendre des jours qu'on la demarre, alors qu'une
+    VM, elle, a ete allumee par OSIRIS au moment meme de sa creation. Attendre
+    plus de quelques minutes n'y a aucun sens.
+
+    Renvoie un COMPTEUR, pas la liste des machines : `/health` n'est pas
+    authentifie (seul le reseau interne y accede), et une sonde a besoin d'un
+    nombre a surveiller, pas d'un inventaire. Les fiches concernees se lisent
+    dans l'interface, qui exige une session.
+    """
+    limite = datetime.now(timezone.utc) - timedelta(minutes=seuil_minutes)
+    try:
+        with Session(engine) as session:
+            return session.exec(
+                select(func.count()).select_from(Machine).where(
+                    Machine.status == "pending",
+                    Machine.hypervisor_id.is_not(None),
+                    Machine.created_at < limite,
+                )
+            ).one()
+    except Exception:
+        # Une sonde ne doit jamais faire tomber /health : le champ `db` dit deja
+        # que la base est inaccessible, et c'est lui qui porte cette cause-la.
+        return 0
+
+
 # Types de stockage Proxmox capables de porter un qcow2. Les autres (RBD, LVM-thin,
 # ZFS…) n'acceptent que du raw, et leur passer `format=qcow2` fait échouer la
 # création de la VM — Lab_CEPH sur le cluster FIT est précisément dans ce cas.
@@ -4934,6 +4983,28 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
             await provider.destroy_vm(h, body.node, vm_id, nom_attendu=body.hostname)
         _rollback_vm_machine(current_user, body, hv_id, vm_id, mac_plain, exc)
         raise
+
+    # Premiere ligne du journal, ecrite APRES la bascule de MAC : sur vSphere,
+    # c'est l'hyperviseur qui attribue l'adresse materielle au moment du clone,
+    # et le journal est indexe dessus. L'ecrire avant la rattacherait a la MAC
+    # provisoire, donc a personne.
+    #
+    # Sans elle, une VM qui ne rappelle jamais laisse un journal VIDE — c'est
+    # exactement ce qu'on a lu le 25/08 : ni erreur, ni ligne, rien a montrer a
+    # l'operateur. Une seule ligne suffit a transformer « aucune trace » en
+    # « creee a telle heure, puis plus rien », qui se diagnostique.
+    try:
+        with Session(engine) as session:
+            _append_log_line(
+                session, mac_plain, _current_run(session, mac_plain),
+                _stamp(f"VM {vm_id} creee sur « {h.name} » ({body.node}) en mode "
+                       f"{body.boot_mode} — en attente du premier rappel de la machine"))
+            session.commit()
+    except Exception:
+        # Le journal est un confort de diagnostic : son echec ne doit pas faire
+        # rendre une erreur pour une VM qui, elle, a bien ete creee.
+        _hv_log.warning("VM %s creee, mais la premiere ligne de journal n'a pas "
+                        "pu etre ecrite", vm_id)
 
     return {
         "mac": mac_plain,
