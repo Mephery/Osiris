@@ -747,6 +747,24 @@ def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
                 value=base64.b64encode(meta.encode()).decode()),
             vim.option.OptionValue(key="guestinfo.metadata.encoding", value="base64"),
         ])))
+    else:
+        # VIDER, pas omettre. Un gabarit fabrique a partir d'une VM deployee en
+        # cloud-init EMPORTE les metadonnees de cette VM — c'est la maniere
+        # normale d'en fabriquer un. Le clone en HERITE, cloud-init y trouve une
+        # source de donnees VMware parfaitement valide, et rejoue l'identite de
+        # la machine de construction : son nom d'hote, son adressage, et jusqu'a
+        # son script de premier demarrage.
+        #
+        # Pire, il le fait APRES notre agent : le 17/09, l'adresse demandee etait
+        # posee a 14:30:00 et cloud-init reposait le nom du gabarit a 14:30:18.
+        # Le clone nu n'a par definition aucune metadonnee a recevoir : on ecrase
+        # donc systematiquement, exactement comme pour `guestinfo.osiris.*`.
+        _wait(vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(extraConfig=[
+            vim.option.OptionValue(key=cle, value="") for cle in (
+                "guestinfo.userdata", "guestinfo.userdata.encoding",
+                "guestinfo.metadata", "guestinfo.metadata.encoding",
+            )
+        ])))
 
     # ── Adressage d'un clone nu ──
     # Lu par l'agent d'amorçage gravé dans le gabarit, avant toute tentative de
