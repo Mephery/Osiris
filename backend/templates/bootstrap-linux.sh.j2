@@ -64,6 +64,161 @@ macs() {
     done
 }
 
+# ── Adressage d'un clone nu ──────────────────────────────────────────────────
+# Un clone de gabarit demarre avec le reseau du gabarit, c'est-a-dire DHCP. Sur
+# un VLAN serveur qui n'en a pas, il n'obtient aucune adresse, ne joint personne,
+# et sa fiche reste « en attente » sans une ligne de journal : la machine qui
+# devrait signaler le probleme est justement celle qui ne peut pas parler.
+#
+# OSIRIS ecrit donc l'adressage dans la configuration de la VM (guestinfo), que
+# VMware Tools lit SANS passer par le reseau. Cote Windows ce chemin existe
+# depuis le 21/08 ; cote Linux il n'avait jamais ete ecrit — les cles etaient
+# posees et lues par PERSONNE. C'est ce trou-la que ce bloc ferme.
+#
+# Rien ici n'est propre a une machine : les valeurs viennent de la VM, le code
+# est le meme partout. Et c'est le SEUL reseau que l'agent configure — le
+# firstboot n'y touche pas, donc l'adresse doit etre posee pour de bon.
+
+# Une adresse ROUTABLE sur une carte physique. 169.254.x n'en est pas une : c'est
+# le symptome de l'echec DHCP qu'on vient corriger, et le prendre pour une
+# adresse valide ferait renoncer l'agent juste avant de servir a quelque chose.
+adresse_utilisable() {
+    local iface nom
+    for iface in /sys/class/net/*; do
+        [ -e "$iface/device" ] || continue
+        nom=${iface##*/}
+        ip -4 -o addr show dev "$nom" scope global 2>/dev/null \
+            | grep -v ' 169\.254\.' | grep -q . && return 0
+    done
+    return 1
+}
+
+premiere_carte() {
+    local iface
+    for iface in /sys/class/net/*; do
+        [ -e "$iface/device" ] || continue
+        echo "${iface##*/}"
+        return 0
+    done
+}
+
+# `$env:ProgramFiles` avait son equivalent ici : vmtoolsd n'est pas au meme
+# endroit selon la distribution et le mode d'installation (paquet distribution
+# ou open-vm-tools compile). Ne pas le trouver n'est PAS « pas de VMware ».
+chemin_vmtoolsd() {
+    local c
+    for c in /usr/bin/vmtoolsd /usr/sbin/vmtoolsd /usr/local/bin/vmtoolsd; do
+        [ -x "$c" ] && { echo "$c"; return 0; }
+    done
+    command -v vmtoolsd 2>/dev/null || true
+}
+
+# On juge sur la VALEUR, jamais sur le code de sortie. Meme lecon que cote
+# Windows le 21/08 : un code de sortie absent ou non nul faisait jeter une
+# valeur parfaitement bonne. Le code est un indice, la valeur est ce qu'on est
+# venu chercher — et l'appelant verifie de toute facon qu'elle ressemble a une
+# adresse.
+info_get() {
+    local exe="$1" cle="$2" sortie
+    sortie=$("$exe" --cmd "info-get $cle" 2>&1) || true
+    printf '%s' "$sortie" | tr -d '\r' | head -n1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# Ecrit l'adressage POUR DE BON. Le firstboot ne configure pas le reseau : une
+# adresse seulement posee en memoire disparaitrait au premier redemarrage, et la
+# machine retomberait muette apres avoir semble marcher — pire qu'un echec franc.
+appliquer_adressage() {
+    local ip="$1" gw="$2" dns="$3" carte="$4" fichier liste
+    if command -v netplan >/dev/null 2>&1; then
+        # Chemin surchargeable UNIQUEMENT pour que les tests puissent relire ce
+        # qui a ete ecrit sans avoir les droits sur /etc. En production la
+        # variable n'est jamais posee, et la valeur par defaut s'applique.
+        fichier=${OSIRIS_NETPLAN:-/etc/netplan/60-osiris.yaml}
+        {
+            echo "network:"
+            echo "  version: 2"
+            echo "  ethernets:"
+            echo "    $carte:"
+            echo "      dhcp4: false"
+            echo "      addresses: [$ip]"
+            if [ -n "$gw" ]; then
+                # `routes:` et non `gateway4:`, deprecie et ignore en silence par
+                # les netplan recents — le genre de reglage qui ne produit ni
+                # erreur ni route.
+                echo "      routes:"
+                echo "        - to: default"
+                echo "          via: $gw"
+            fi
+            if [ -n "$dns" ]; then
+                liste=$(printf '%s' "$dns" | sed 's/,/, /g')
+                echo "      nameservers:"
+                echo "        addresses: [$liste]"
+            fi
+        } > "$fichier"
+        # netplan refuse de lire un fichier lisible par tous et le dit dans un
+        # avertissement qu'on ne voit pas ici.
+        chmod 600 "$fichier"
+        if netplan apply >/dev/null 2>&1; then
+            echo "[$(ts)] Adressage : $ip applique et ECRIT dans $fichier (carte $carte)."
+            return 0
+        fi
+        echo "[$(ts)] Adressage : netplan a refuse $fichier - repli temporaire."
+    else
+        echo "[$(ts)] Adressage : netplan absent - repli temporaire."
+    fi
+    # Repli : la machine pourra finir son deploiement, mais l'adresse ne
+    # survivra pas au redemarrage. On le DIT, au lieu de laisser croire.
+    ip addr add "$ip" dev "$carte" 2>/dev/null || true
+    ip link set "$carte" up 2>/dev/null || true
+    [ -n "$gw" ] && ip route add default via "$gw" 2>/dev/null || true
+    if [ -n "$dns" ]; then
+        printf 'nameserver %s\n' $(printf '%s' "$dns" | tr ',' ' ') >> /etc/resolv.conf
+    fi
+    echo "[$(ts)] Adressage : $ip pose TEMPORAIREMENT sur $carte - ne survivra PAS au redemarrage."
+}
+
+if adresse_utilisable; then
+    echo "[$(ts)] Adressage : une adresse routable est deja en place, rien a imposer."
+else
+    VMTOOLSD=$(chemin_vmtoolsd)
+    if [ -z "$VMTOOLSD" ]; then
+        # Proxmox, KVM nu, materiel physique : pas de canal guestinfo, et c'est
+        # normal. Ne rien dire ici ferait chercher un bug la ou il n'y en a pas.
+        echo "[$(ts)] Adressage : vmtoolsd introuvable (hyperviseur non VMware) - on garde le reseau du gabarit."
+    else
+        # VMware Tools demarre APRES nous : la lecture rend du vide pendant les
+        # premieres minutes. Constate cote Windows le 21/08 — vide a 16:59, vide
+        # a 17:04, et la valeur a 17:14 en tapant la meme commande a la main.
+        ADR=""
+        for essai in $(seq 1 18); do
+            ADR=$(info_get "$VMTOOLSD" "guestinfo.osiris.ip")
+            case "$ADR" in
+                */*) break ;;
+                *)   ADR="" ;;
+            esac
+            echo "[$(ts)] Adressage : guestinfo pas encore lisible ($essai/18) - nouvel essai dans 10 s."
+            sleep 10
+        done
+        if [ -z "$ADR" ]; then
+            # Cas parfaitement legitime : aucune adresse imposee, la machine est
+            # censee faire du DHCP. On le distingue quand meme d'un echec de
+            # lecture, parce que les deux se ressemblaient et que c'est ce qui a
+            # coute une heure de console le 21/08.
+            echo "[$(ts)] Adressage : aucune adresse dans guestinfo - la machine reste en DHCP."
+        else
+            GW=$(info_get "$VMTOOLSD" "guestinfo.osiris.gateway")
+            DNS=$(info_get "$VMTOOLSD" "guestinfo.osiris.dns")
+            CARTE=$(premiere_carte)
+            if [ -z "$CARTE" ]; then
+                echo "[$(ts)] Adressage : aucune carte physique trouvee - $ADR non applique."
+            else
+                echo "[$(ts)] Adressage : guestinfo donne ip=$ADR gw=${GW:-aucune} dns=${DNS:-aucun}"
+                appliquer_adressage "$ADR" "$GW" "$DNS" "$CARTE"
+            fi
+        fi
+    fi
+fi
+
 SCRIPT=/run/osiris-firstboot.sh
 # 30 tentatives, de quoi laisser le bail DHCP s'etablir et couvrir le cas ou la
 # VM demarre avant que sa fiche existe cote OSIRIS.
