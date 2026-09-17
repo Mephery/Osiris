@@ -627,6 +627,15 @@ def change_password(body: PasswordChange, current_user: User = Depends(get_curre
         user = session.get(User, current_user.id)
         user.hashed_password = hash_password(body.new_password)
         session.add(user)
+        # Un changement de mot de passe ne laissait AUCUNE trace. C'est pourtant
+        # le geste qu'on veut pouvoir dater : c'est ce que fait un opérateur
+        # après une fuite — et aussi, exactement, ce que fait quelqu'un qui vient
+        # de prendre un compte et veut y rester. Sans cette ligne, l'audit ne
+        # montre que la connexion, identique dans les deux cas.
+        #
+        # Le mot de passe lui-même n'a évidemment rien à faire ici : la ligne dit
+        # QUI et QUAND, ce qui suffit à lever un doute ou à en confirmer un.
+        _log(session, user, "change_password")
         session.commit()
     return {"detail": "Mot de passe mis à jour"}
 
