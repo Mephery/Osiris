@@ -59,3 +59,20 @@ export const imageDuProfilIgnoree = (
   bootMode: string,
   profil: { win_image?: string } | undefined,
 ): boolean => bootMode !== 'pxe' && Boolean(profil?.win_image)
+
+/** Ce couple hyperviseur / mode d'amorçage sait-il porter une adresse fixe ?
+ *
+ *  Un clone NU ne reçoit aucune injection : c'est sa définition. Encore faut-il
+ *  que quelque chose, dans la VM, sache lire l'adresse qu'on veut lui donner.
+ *  Sur vSphere `guestinfo` sert de canal et l'agent gravé le lit ; sur Proxmox
+ *  il n'existe aucun équivalent, et l'adresse saisie était simplement PERDUE —
+ *  la VM démarrait en DHCP, ou sans rien du tout sur un VLAN qui n'en a pas,
+ *  puis restait muette sans qu'aucune erreur ne soit levée.
+ *
+ *  L'API refuse désormais ce couple, mais un champ qu'on ne peut pas remplir
+ *  vaut mieux qu'un formulaire rejeté après coup. */
+export const adressageFixeImpossible = (
+  typeHyperviseur: string | undefined,
+  bootMode: string,
+): boolean => (typeHyperviseur ?? 'proxmox').toLowerCase() === 'proxmox'
+  && bootMode === 'template'

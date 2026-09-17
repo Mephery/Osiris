@@ -5,7 +5,8 @@ import { toast } from 'sonner'
 import type { ClusterStorage, Hypervisor, NetworkDefaults, Organization, Profile, ProxmoxNetwork, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { IcoX } from './icons'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree,
+         adressageFixeImpossible } from './vmForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
@@ -199,6 +200,8 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   // Recalculés à chaque frappe : ils ne bloquent rien, ils avertissent. Un VLAN peut
   // légitimement porter plusieurs réseaux, et OSIRIS ne voit que ses propres fiches —
   // dans les deux cas c'est l'opérateur qui tranche, pas nous.
+  const typeHv        = hypervisors.find(h => h.id === Number(vmHvId))?.type
+  const sansAdressage = adressageFixeImpossible(typeHv, vmForm.boot_mode)
   const adresseSaisie = vmForm.ip_cidr.split('/')[0].trim()
   const horsReseau    = !!(vmNetDef?.reseau && vmForm.ip_cidr
                            && dansLeReseau(vmForm.ip_cidr, vmNetDef.reseau) === false)
@@ -547,23 +550,36 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                     Adressage IP <span className="normal-case text-slate-700">(vide = DHCP)</span>
                   </p>
                   <div className="grid grid-cols-3 gap-2">
-                    <input placeholder={vmNetDef?.reseau ? `adresse dans ${vmNetDef.reseau}` : '10.0.0.60/24'}
-                      value={vmForm.ip_cidr}
+                    <input placeholder={sansAdressage ? 'indisponible dans ce mode'
+                             : vmNetDef?.reseau ? `adresse dans ${vmNetDef.reseau}` : '10.0.0.60/24'}
+                      value={sansAdressage ? '' : vmForm.ip_cidr} disabled={sansAdressage}
                       onChange={e => setVmForm(f => ({...f, ip_cidr: e.target.value}))}
                       onBlur={completerPrefixe}
-                      className="osiris-input text-xs font-mono" />
-                    <input placeholder="Passerelle" value={vmForm.gateway}
+                      className="osiris-input text-xs font-mono disabled:opacity-40" />
+                    <input placeholder="Passerelle" value={sansAdressage ? '' : vmForm.gateway}
+                      disabled={sansAdressage}
                       onChange={e => setVmForm(f => ({...f, gateway: e.target.value}))}
-                      className="osiris-input text-xs font-mono" />
+                      className="osiris-input text-xs font-mono disabled:opacity-40" />
                     {/* Exigé dès qu'une adresse fixe est saisie : sans DHCP pour en
                         fournir un, la VM n'aurait AUCUN résolveur — et le dirait si peu
                         qu'elle se déclarerait déployée. L'API refuse aussi, mais autant
                         le dire avant d'envoyer le formulaire. */}
                     <input placeholder={vmForm.ip_cidr ? 'DNS — obligatoire' : 'DNS (séparés par ,)'}
-                      required={!!vmForm.ip_cidr} value={vmForm.dns_servers}
+                      required={!!vmForm.ip_cidr && !sansAdressage}
+                      value={sansAdressage ? '' : vmForm.dns_servers} disabled={sansAdressage}
                       onChange={e => setVmForm(f => ({...f, dns_servers: e.target.value}))}
-                      className="osiris-input text-xs font-mono" />
+                      className="osiris-input text-xs font-mono disabled:opacity-40" />
                   </div>
+                  {/* Un champ qu'on ne peut pas remplir vaut mieux qu'un formulaire
+                      rejeté après coup — et infiniment mieux qu'une adresse acceptée
+                      puis perdue en silence, qui laissait la VM muette. */}
+                  {sansAdressage && (
+                    <p className="text-[9px] text-amber-400">
+                      ⚠ Un clone nu sur cet hyperviseur n'injecte rien : rien dans la VM ne saurait
+                      lire une adresse fixe. Choisir « cloud-init », qui porte l'adressage, ou laisser
+                      la machine en DHCP.
+                    </p>
+                  )}
                   <p className="text-[9px] text-slate-600">
                     À renseigner sur un VLAN sans DHCP : sans adresse, la VM démarre et ne rappelle jamais OSIRIS. Adresse en notation CIDR (préfixe /24 obligatoire), passerelle sans préfixe. En adressage fixe, le DNS est obligatoire — aucun bail ne viendra en fournir un.
                   </p>

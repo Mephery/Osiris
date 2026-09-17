@@ -287,7 +287,12 @@ def test_le_bridge_choisi_est_enregistre_sur_la_fiche(client, admin_headers,
 
     resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
         "hostname": "srv-neuf", "client": "Acme", "os": "ubuntu", "node": "pve1",
-        "storage": "ceph", "bridge": "vmbr320", "boot_mode": "template",
+        # `cloudinit` et non `template` : sur Proxmox, un clone NU n'a aucun canal
+        # pour porter une adresse fixe (rien n'y est injecté, et rien dans la VM
+        # ne saurait la lire), et l'API refuse désormais ce couple. Ce test porte
+        # sur l'enregistrement du bridge, pas sur le mode d'amorçage — on prend
+        # donc celui qui sait réellement transporter l'adressage.
+        "storage": "ceph", "bridge": "vmbr320", "boot_mode": "cloudinit",
         "template_id": 9003, "ip_cidr": "10.10.5.30/24", "gateway": "10.10.5.1",
         "dns_servers": "10.10.5.9",
     })

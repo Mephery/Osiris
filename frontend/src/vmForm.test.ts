@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -128,5 +128,28 @@ describe('imageDuProfilIgnoree', () => {
     // n'a prétendu le contraire. Avertir ici ne ferait qu'user l'avertissement.
     expect(imageDuProfilIgnoree('template', { win_image: '' })).toBe(false)
     expect(imageDuProfilIgnoree('template', undefined)).toBe(false)
+  })
+})
+
+describe('adressageFixeImpossible', () => {
+  it('refuse le clone nu Proxmox : rien dans la VM ne lirait l\'adresse', () => {
+    expect(adressageFixeImpossible('proxmox', 'template')).toBe(true)
+  })
+
+  it('accepte le clone nu vSphere : guestinfo porte l\'adresse', () => {
+    expect(adressageFixeImpossible('vsphere', 'template')).toBe(false)
+  })
+
+  it('accepte cloud-init et PXE partout', () => {
+    for (const t of ['proxmox', 'vsphere']) {
+      expect(adressageFixeImpossible(t, 'cloudinit')).toBe(false)
+      expect(adressageFixeImpossible(t, 'pxe')).toBe(false)
+    }
+  })
+
+  it('traite un type inconnu comme du Proxmox', () => {
+    // Le défaut historique du champ `type` : mieux vaut refuser à tort et le
+    // dire que laisser passer une adresse qui sera perdue en silence.
+    expect(adressageFixeImpossible(undefined, 'template')).toBe(true)
   })
 })

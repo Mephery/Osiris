@@ -4850,6 +4850,23 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
         if not h:
             raise HTTPException(status_code=404, detail="Hyperviseur introuvable")
 
+    # Un clone NU ne reçoit aucune injection : c'est sa définition. Encore
+    # faut-il que quelque chose, dans la VM, sache lire l'adresse qu'on veut lui
+    # donner. Sur vSphere, `guestinfo` sert de canal et l'agent gravé le lit.
+    # Sur Proxmox il n'existe aucun équivalent : l'adresse saisie était
+    # simplement PERDUE — la VM démarrait en DHCP, ou sans rien du tout sur un
+    # VLAN qui n'en a pas, et restait muette sans qu'aucune erreur ne soit levée.
+    #
+    # Refuser ici plutôt que créer une VM qui ne rappellera jamais : le clone nu
+    # reste possible, il faut juste ne pas prétendre lui imposer une adresse.
+    if ((h.type or "proxmox").lower() == "proxmox"
+            and body.boot_mode == "template" and (body.ip_cidr or "").strip()):
+        raise HTTPException(status_code=400, detail=(
+            f"Un clone nu sur « {h.name} » ne peut pas recevoir d'adresse fixe : ce mode "
+            f"n'injecte rien, et rien dans la VM ne saurait lire « {body.ip_cidr.strip()} ». "
+            f"Choisir le mode « cloud-init », qui porte l'adressage, ou laisser l'adresse "
+            f"vide pour laisser la machine en DHCP."))
+
     provider = _provider(h)
 
     # ── Le gros téléchargement AVANT de réserver un identifiant ────────────────

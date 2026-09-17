@@ -242,3 +242,45 @@ def test_la_ligne_est_ecrite_sous_la_MAC_ATTRIBUEE_par_l_hyperviseur(
 
     assert _journal("00505600beef") == [], "rien ne doit rester sous la MAC provisoire"
     assert len(_journal(MAC_FINALE)) == 1, "le journal suit la MAC réellement attribuée"
+
+
+# ── Un clone nu ne peut pas recevoir d'adresse fixe sur Proxmox ──────────────
+# Sur vSphere, `guestinfo` sert de canal et l'agent gravé le lit. Sur Proxmox il
+# n'existe aucun équivalent : l'adresse saisie était simplement PERDUE. La VM
+# démarrait en DHCP — ou sans rien du tout sur un VLAN qui n'en a pas — et
+# restait muette, sans qu'aucune erreur ne soit jamais levée.
+
+def test_une_adresse_fixe_en_clone_nu_proxmox_est_REFUSEE(client, admin_headers, monkeypatch):
+    hv = _make_hypervisor()
+    cap: dict = {}
+    _patch(monkeypatch, cap)
+
+    r = client.post(f"/hypervisors/{hv}/create-vm", headers=admin_headers,
+                    json=_corps(ip_cidr="10.0.5.20/24", gateway="10.0.5.1",
+                                dns_servers="10.0.5.110"))
+    assert r.status_code == 400, r.text
+    assert "clone nu" in r.json()["detail"]
+    assert "cloud-init" in r.json()["detail"], "le refus doit dire QUOI faire à la place"
+    assert "clone" not in cap, "rien ne doit être créé sur l'hyperviseur"
+
+
+def test_le_refus_arrive_AVANT_le_moindre_appel_a_l_hyperviseur(client, admin_headers, monkeypatch):
+    """Un refus tardif coûterait un clone puis une destruction — et c'est
+    précisément la séquence qui a déjà purgé la VM d'un tiers."""
+    hv = _make_hypervisor()
+    cap: dict = {}
+    _patch(monkeypatch, cap)
+
+    client.post(f"/hypervisors/{hv}/create-vm", headers=admin_headers,
+                json=_corps(ip_cidr="10.0.5.20/24", gateway="10.0.5.1",
+                            dns_servers="10.0.5.110"))
+    assert cap == {}, f"aucun appel ne devait partir, or : {sorted(cap)}"
+
+
+def test_sans_adresse_le_clone_nu_proxmox_passe_toujours(client, admin_headers, monkeypatch):
+    """Le clone nu reste parfaitement légitime : on refuse la prétention à
+    imposer une adresse, pas le mode lui-même."""
+    hv = _make_hypervisor()
+    _patch(monkeypatch, {})
+    r = client.post(f"/hypervisors/{hv}/create-vm", headers=admin_headers, json=_corps())
+    assert r.status_code == 201, r.text
