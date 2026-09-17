@@ -95,7 +95,14 @@ export function SettingsModal({ token, onClose }: { token: string; onClose: () =
     e.preventDefault()
     setPwError(null)
     if (pwNew !== pwConfirm) { setPwError('Les deux nouveaux mots de passe ne correspondent pas.'); return }
-    if (pwNew.length < 8) { setPwError('Le nouveau mot de passe doit faire au moins 8 caractères.'); return }
+    // Aligné sur la règle du serveur (`valider_force_mot_de_passe`). Un seuil
+    // local plus bas ferait accepter ici puis refuser là-bas, et l'utilisateur
+    // conclurait que l'outil est cassé plutôt que son mot de passe trop court.
+    if (pwNew.length < 12) {
+      setPwError('Le nouveau mot de passe doit faire au moins 12 caractères — '
+        + 'la longueur protège bien mieux que les caractères spéciaux.')
+      return
+    }
     setPwLoading(true)
     fetch(`${API_URL}/auth/me/password`, {
       method: 'PATCH',

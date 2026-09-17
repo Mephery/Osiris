@@ -761,7 +761,14 @@ export default function App() {
       headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
       body: JSON.stringify({ email: newUserEmail, password: newUserPass, role: newUserRole }),
     })
-      .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
+      // Le `detail` de l'API, pas un « Erreur création » muet : c'est lui qui dit
+      // POURQUOI un mot de passe est refusé. Sans lui, on retente en boucle des
+      // variantes qui échouent toutes pour la même raison invisible — exactement
+      // le genre de mur que la politique de mot de passe est censée éviter.
+      .then(async (res) => {
+        if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Erreur création') }
+        return res.json()
+      })
       .then(() => { setNewUserEmail(''); setNewUserPass(''); fetchUsers(auth.token); toast.success('Utilisateur créé') })
       .catch((err) => toast.error(err.message))
   }

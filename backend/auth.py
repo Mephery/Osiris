@@ -43,6 +43,74 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 # ── Mots de passe ──────────────────────────────────────────────────────────────
 
+# ── Force des mots de passe ────────────────────────────────────────────────────
+# Il n'y avait AUCUNE contrainte : `password: str`, et un compte pouvait naître
+# avec « a ». Sur un outil qui détient les clés BitLocker, les mots de passe
+# LAPS, les comptes de jonction AD et les jetons d'hyperviseurs, c'est le
+# maillon qui décide de tout le reste.
+#
+# La règle est délibérément bâtie sur la LONGUEUR plutôt que sur des classes de
+# caractères imposées. Exiger « une majuscule, un chiffre, un symbole » produit
+# massivement des `P@ssw0rd1` : la contrainte est satisfaite, l'entropie réelle
+# est dérisoire, et c'est exactement ce qu'un attaquant essaie en premier. Douze
+# caractères quelconques valent mieux que huit tordus, et c'est aussi la
+# recommandation du NIST (SP 800-63B), qui déconseille explicitement les règles
+# de composition.
+LONGUEUR_MINIMALE = 12
+
+# bcrypt IGNORE tout ce qui dépasse 72 octets. Sans ce contrôle, deux mots de
+# passe partageant leurs 72 premiers octets ouvrent le même compte — et une
+# phrase de passe longue, choisie pour être forte, serait tronquée en silence.
+# Le piège est d'autant plus vicieux qu'il ne se voit qu'à la connexion suivante.
+LONGUEUR_MAXIMALE_OCTETS = 72
+
+# Les premiers essais de n'importe quelle attaque par dictionnaire. Liste courte
+# et assumée : elle n'a pas vocation à remplacer un vrai corpus, seulement à
+# écarter ce qu'on voit réellement passer.
+_TROP_COURANTS = {
+    "password", "motdepasse", "azertyuiop", "qwertyuiop", "administrateur",
+    "123456789012", "changemeplease", "passwordpassword", "letmeinplease",
+    "osirisosiris", "administrator", "bienvenue123", "welcome12345",
+}
+
+
+def valider_force_mot_de_passe(mdp: str, email: str = "") -> None:
+    """Lève une 400 nommant CE qui ne va pas, ou ne fait rien.
+
+    Chaque refus dit sa cause : « mot de passe trop faible » oblige à deviner,
+    et l'utilisateur retente en boucle des variantes qui échouent pour la même
+    raison invisible.
+    """
+    mdp = mdp or ""
+    if len(mdp) < LONGUEUR_MINIMALE:
+        raise HTTPException(status_code=400, detail=(
+            f"Mot de passe trop court : {len(mdp)} caractères, {LONGUEUR_MINIMALE} minimum. "
+            f"La longueur protège bien mieux que les caractères spéciaux — une phrase "
+            f"de quatre mots fait un excellent mot de passe."))
+    if len(mdp.encode("utf-8")) > LONGUEUR_MAXIMALE_OCTETS:
+        raise HTTPException(status_code=400, detail=(
+            f"Mot de passe trop long : l'algorithme de hachage ignore tout ce qui "
+            f"dépasse {LONGUEUR_MAXIMALE_OCTETS} octets, donc la fin ne protégerait rien."))
+    # Attrape « aaaaaaaaaaaa » et « 123123123123 », que la seule longueur laisse passer.
+    if len(set(mdp)) < 5:
+        raise HTTPException(status_code=400, detail=(
+            f"Mot de passe trop répétitif : seulement {len(set(mdp))} caractères "
+            f"différents. La longueur ne protège que si le contenu varie."))
+    if mdp.lower() in _TROP_COURANTS:
+        raise HTTPException(status_code=400, detail=(
+            "Ce mot de passe est dans les premiers essayés par toute attaque par "
+            "dictionnaire. En choisir un qui n'est pas devinable."))
+    # Le nom du compte est la première chose qu'un attaquant connaît.
+    local = (email or "").split("@")[0].strip().lower()
+    if len(local) >= 3 and local in mdp.lower():
+        raise HTTPException(status_code=400, detail=(
+            f"Le mot de passe contient « {local} », c'est-à-dire le nom du compte — "
+            f"la première chose que sait un attaquant."))
+    if "osiris" in mdp.lower():
+        raise HTTPException(status_code=400, detail=(
+            "Le mot de passe contient le nom de l'outil, deviné avant tout le reste."))
+
+
 def hash_password(plain: str) -> str:
     return pwd_context.hash(plain)
 

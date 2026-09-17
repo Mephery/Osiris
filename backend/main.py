@@ -38,7 +38,7 @@ from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent
 import vpn
 import vsphere
 from auth import (
-    hash_password, verify_password, create_token,
+    hash_password, verify_password, create_token, valider_force_mot_de_passe,
     get_current_user, get_current_user_optional, require_admin
 )
 from crypto import encrypt, decrypt
@@ -430,6 +430,15 @@ def _seed_admin():
         session.add(admin)
         session.commit()
         print(f"[OSIRIS] Admin créé : {ADMIN_EMAIL} — changez le mot de passe !")
+        # AVERTIR, pas refuser : ce code tourne au démarrage de l'API, et faire
+        # échouer le service parce qu'un `.env` existant porte un mot de passe
+        # court transformerait un durcissement en panne de production. Le compte
+        # est créé, la faiblesse est nommée, l'exploitant tranche.
+        try:
+            valider_force_mot_de_passe(ADMIN_PASSWORD, ADMIN_EMAIL)
+        except HTTPException as faible:
+            print(f"[OSIRIS] ATTENTION — le mot de passe administrateur initial est "
+                  f"faible : {faible.detail}")
 
 
 def _seed_default_profiles():
@@ -607,6 +616,13 @@ def me(current_user: User = Depends(get_current_user)):
 def change_password(body: PasswordChange, current_user: User = Depends(get_current_user)):
     if not verify_password(body.current_password, current_user.hashed_password):
         raise HTTPException(status_code=401, detail="Mot de passe actuel incorrect")
+    # Après la vérification de l'ancien : inutile de renseigner un attaquant sur
+    # la politique tant qu'il n'a pas prouvé qu'il est déjà dans la place.
+    valider_force_mot_de_passe(body.new_password, current_user.email)
+    if body.new_password == body.current_password:
+        raise HTTPException(status_code=400, detail=(
+            "Le nouveau mot de passe est identique à l'ancien — changer de mot de "
+            "passe après une fuite suppose qu'il change vraiment."))
     with Session(engine) as session:
         user = session.get(User, current_user.id)
         user.hashed_password = hash_password(body.new_password)
@@ -951,6 +967,7 @@ def get_users():
 def create_user(body: UserCreate, current_user: User = Depends(require_admin)):
     if body.role not in ("admin", "technician"):
         raise HTTPException(status_code=400, detail="Rôle invalide : admin ou technician")
+    valider_force_mot_de_passe(body.password, body.email)
     with Session(engine) as session:
         if session.exec(select(User).where(User.email == body.email)).first():
             raise HTTPException(status_code=400, detail="Cet email est déjà utilisé")
