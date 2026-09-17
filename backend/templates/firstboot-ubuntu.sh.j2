@@ -404,6 +404,18 @@ grep -q '^PermitRootLogin' /etc/ssh/sshd_config       || echo 'PermitRootLogin n
 # deja fait le travail, salvateur quand personne ne l'a fait.
 ssh-keygen -A >/dev/null 2>&1 || _log "AVERTISSEMENT : generation des cles d'hote SSH en echec"
 
+# Effacer le compteur d'echecs AVANT de relancer.
+#
+# Sans clefs d'hote, sshd a deja echoue cinq fois pendant le demarrage, et
+# systemd a ferme la porte : « start request repeated too quickly ». Le
+# `restart` ci-dessous est alors REFUSE — on a beau venir de reparer la cause,
+# le service reste mort et la machine injoignable. Constate le 17/09.
+systemctl reset-failed ssh sshd 2>/dev/null || true
+# Le repertoire de separation de privileges vit dans /run, donc il disparait a
+# chaque demarrage et n'est recree que par un lancement reussi. Apres cinq
+# echecs, il n'existe pas — et sshd refuse de demarrer sans lui.
+mkdir -p /run/sshd && chmod 0755 /run/sshd
+
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
     _log "SSH : auth par mot de passe desactivee, root interdit"

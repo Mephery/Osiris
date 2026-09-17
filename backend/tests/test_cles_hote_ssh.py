@@ -50,3 +50,24 @@ def test_un_sshd_qui_ne_demarre_pas_est_DIT(firstboot):
 
 def test_l_etat_est_VERIFIE_et_pas_suppose(firstboot):
     assert re.search(r"systemctl is-active --quiet ssh", _code(firstboot))
+
+
+# ── Le compteur d'échecs de systemd ───────────────────────────────────────────
+# Sans clés d'hôte, sshd échoue cinq fois pendant le démarrage et systemd ferme
+# la porte : « start request repeated too quickly ». Réparer la cause ne suffit
+# alors plus — le redémarrage est refusé, et la machine reste injoignable.
+
+def test_le_compteur_d_echecs_est_efface(firstboot):
+    assert "systemctl reset-failed ssh" in _code(firstboot)
+
+
+def test_l_effacement_precede_le_redemarrage(firstboot):
+    """Dans l'autre ordre il ne sert à rien : le redémarrage est déjà refusé."""
+    code = _code(firstboot)
+    assert code.index("reset-failed ssh") < code.index("systemctl restart ssh")
+
+
+def test_le_repertoire_de_privileges_est_cree(firstboot):
+    """Il vit dans /run, donc il disparaît à chaque démarrage et n'est recréé
+    que par un lancement réussi. Après cinq échecs, il n'existe pas."""
+    assert "mkdir -p /run/sshd" in _code(firstboot)
