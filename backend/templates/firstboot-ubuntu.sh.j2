@@ -456,8 +456,8 @@ if getent hosts www.google.com > /dev/null 2>&1; then _dns_ok=true; else _dns_ok
 #
 # On compare l'ADRESSE seule, pas le prefixe : c'est elle qui sert a joindre la
 # machine, et un /24 ecrit /25 par erreur ne justifie pas de crier au loup.
-{% if machine.ip_cidr %}
-_ip_attendue="{{ machine.ip_cidr.split('/')[0] }}"
+{% if ip_attendue %}
+_ip_attendue="{{ ip_attendue }}"
 _ip_reelles=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
 if printf '%s\n' $_ip_reelles | grep -qx "$_ip_attendue"; then
     _add_test "Adresse conforme a la fiche" true "$_ip_attendue"

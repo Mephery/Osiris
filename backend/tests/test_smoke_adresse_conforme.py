@@ -32,7 +32,7 @@ def _rendu(ip_cidr: str) -> str:
     debut = src.index("# L'adresse REELLE correspond-elle")
     fin = src.index("# Ping passerelle par defaut.")
     return env.from_string(src[debut:fin]).render(
-        machine=type("M", (), {"ip_cidr": ip_cidr})())
+        ip_attendue=(ip_cidr or "").split("/")[0])
 
 
 def _lancer(bloc: str, tmp_path, adresses: str) -> str:
@@ -107,3 +107,42 @@ def test_sans_adresse_sur_la_fiche_aucun_test_n_est_emis(tmp_path):
     sortie = _lancer(_rendu(""), tmp_path, "10.0.5.66/24")
     assert "Adresse conforme" not in sortie
     assert "_add_test" not in _rendu("")
+
+
+# ── Le câblage, et pas seulement le fragment ──────────────────────────────────
+
+def test_le_bloc_est_REELLEMENT_rendu_par_le_code_de_production():
+    """Le test qui manquait, et dont l'absence a coûté un déploiement.
+
+    Les tests ci-dessus rendent le fragment avec un contexte qu'ils fabriquent
+    eux-mêmes : ils prouvent que le shell est juste, jamais qu'il est atteint.
+    La première version lisait `machine.ip_cidr`, or le vrai rendu passe un
+    `machine` volontairement ÉTROIT — un dict de quatre clés, parce que la fiche
+    peut ne pas exister en base à cet instant. Jinja rend `Undefined` pour une
+    clé absente, `{% if %}` la juge fausse, et le bloc n'a jamais été rendu. Sans
+    erreur, sans trace : exactement la famille de défauts que ce bloc traque.
+
+    Celui-ci appelle la vraie fonction de rendu. C'est la seule façon d'attraper
+    un décalage de contexte.
+    """
+    import main
+    rendu = main._firstboot_linux_content(
+        hostname="srv-test", mac="005056aa0042", ou="",
+        profile_ctx={"default_user": "osiris", "vm_data_disk_gb": 0},
+        linux_apps=[], zabbix=None, osiris_url="http://osiris.test",
+        ip_attendue="10.0.5.20/24",
+    )
+    assert "Adresse conforme a la fiche" in rendu, \
+        "le bloc n'est pas rendu par le code de production"
+    assert '_ip_attendue="10.0.5.20"' in rendu, "le préfixe doit être retiré"
+
+
+def test_sans_adresse_le_code_de_production_n_emet_rien():
+    import main
+    rendu = main._firstboot_linux_content(
+        hostname="srv-test", mac="005056aa0042", ou="",
+        profile_ctx={"default_user": "osiris", "vm_data_disk_gb": 0},
+        linux_apps=[], zabbix=None, osiris_url="http://osiris.test",
+        ip_attendue="",
+    )
+    assert "_add_test \"Adresse conforme" not in rendu

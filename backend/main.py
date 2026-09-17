@@ -1750,7 +1750,8 @@ def _osiris_url_for(session: Session, machine: Machine) -> str:
 
 def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: dict,
                              linux_apps: list, zabbix: Optional[dict],
-                             osiris_url: str, post_script: str = "") -> str:
+                             osiris_url: str, post_script: str = "",
+                             ip_attendue: str = "") -> str:
     """Le script de premier démarrage Linux, rendu à partir d'un contexte explicite.
 
     Volontairement sans accès à la base : le script est aussi embarqué dans le
@@ -1770,6 +1771,11 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
         # Le disque de données est une décision de PROFIL (« ce type de serveur a
         # un volume de données séparé »), sa taille une décision de formulaire.
         data_disk_gb=profile_ctx.get("vm_data_disk_gb", 0),
+        # Variable propre, et NON `machine.ip_cidr` : `machine` est un dict
+        # volontairement etroit, et Jinja rend `Undefined` — donc faux — pour une
+        # cle absente, sans rien dire. Un `{% if machine.ip_cidr %}` ecrit ici ne
+        # leve aucune erreur : il ne s'execute simplement jamais.
+        ip_attendue=(ip_attendue or "").split("/")[0].strip(),
         osiris_url=osiris_url,
     )
 
@@ -1794,6 +1800,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         profile_ctx=profile_ctx, linux_apps=list(linux_apps),
         zabbix=zabbix, osiris_url=osiris_url,
         post_script=machine.post_script or "",
+        ip_attendue=machine.ip_cidr or "",
     )
     return Response(content=content, media_type="text/plain")
 
@@ -4767,6 +4774,7 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str) -> str:
         profile_ctx=profile_tpl, linux_apps=linux_apps,
         zabbix=zabbix, osiris_url=osiris_url,
         post_script=getattr(body, "post_script", "") or "",
+        ip_attendue=getattr(body, "ip_cidr", "") or "",
     )
 
     return jinja_env.get_template("cloud-init-user-data.j2").render(
