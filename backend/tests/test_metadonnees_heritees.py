@@ -115,3 +115,37 @@ def test_un_cloudinit_SANS_charge_vide_quand_meme(monkeypatch):
     dire pas d'héritage non plus."""
     ecrits = _capturer(monkeypatch, _body(boot_mode="cloudinit", os="ubuntu"), user_data="")
     assert ecrits["guestinfo.metadata"] == ""
+
+
+# ── Le motif d'interface ──────────────────────────────────────────────────────
+
+def test_le_motif_couvre_le_nommage_CLASSIQUE(monkeypatch):
+    """`en*` exclut `eth0`.
+
+    Le nommage « prévisible » donne `ens192` ou `enp11s0`, mais une image qui
+    démarre avec `net.ifnames=0` garde le `eth0` classique. Avec `en*`, le
+    netplan ne matchait AUCUNE interface : cloud-init se rabattait en DHCP, et
+    la machine tournait sur une adresse qui n'était pas celle de sa fiche —
+    sans qu'aucun appel n'échoue. Constaté le 17/09 sur une image Debian 12.
+    """
+    import fnmatch
+    meta = vsphere._metadata(_body(boot_mode="cloudinit", os="ubuntu"), "005056aa0042")
+    # `l.strip().startswith` et non `"name:" in l` : sinon on attrape
+    # `local-hostname:` qui apparait plus haut dans le document.
+    motif = next(l.split(":", 1)[1].strip() for l in meta.splitlines()
+                 if l.strip().startswith("name:"))
+    for carte in ("eth0", "ens192", "enp11s0", "eno1"):
+        assert fnmatch.fnmatch(carte, motif), f"« {motif} » ne couvre pas {carte}"
+
+
+def test_le_motif_n_attrape_PAS_le_reste(monkeypatch):
+    """Assez large pour l'Ethernet, pas au point de prendre la boucle locale
+    ou le sans-fil — netplan refuserait une carte qu'il ne sait pas configurer."""
+    import fnmatch
+    meta = vsphere._metadata(_body(boot_mode="cloudinit", os="ubuntu"), "005056aa0042")
+    # `l.strip().startswith` et non `"name:" in l` : sinon on attrape
+    # `local-hostname:` qui apparait plus haut dans le document.
+    motif = next(l.split(":", 1)[1].strip() for l in meta.splitlines()
+                 if l.strip().startswith("name:"))
+    for carte in ("lo", "wlan0", "wlp3s0", "docker0", "virbr0"):
+        assert not fnmatch.fnmatch(carte, motif), f"« {motif} » attrape {carte}"

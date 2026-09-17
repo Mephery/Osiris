@@ -611,7 +611,15 @@ def _metadata(body, mac_plain: str) -> str:
         "  ethernets:",
         "    osiris0:",
         "      match:",
-        "        name: en*",             # nom d'interface imprévisible selon le matériel virtuel
+        # `e*` et NON `en*` : le nommage « previsible » donne bien `ens192` ou
+        # `enp11s0`, mais une image qui demarre avec `net.ifnames=0` garde le
+        # `eth0` classique — que `en*` EXCLUT. Le netplan ne matchait alors
+        # aucune interface, cloud-init se rabattait en DHCP, et la machine
+        # tournait sur une adresse qui n'etait pas celle de sa fiche sans que
+        # rien n'echoue. Constate le 17/09 sur une image Debian 12 en `eth0`.
+        # Toutes les interfaces Ethernet commencent par `e` dans les deux
+        # schemas de nommage ; `lo` et le sans-fil (`wl*`) en sont exclus.
+        "        name: e*",
         "      dhcp4: false",
         f"      addresses: [{ip}]",
     ]
