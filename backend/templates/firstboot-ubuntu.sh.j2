@@ -135,7 +135,7 @@ fi
 _log "Post-installation : {{ app.name }}"
 (
 {{ app.linux_post_install }}
-) || echo "[$(ts)] AVERTISSEMENT : post-installation de {{ app.name }} terminee en erreur"
+) || _log "AVERTISSEMENT : post-installation de {{ app.name }} terminee en erreur"
 {% endif %}
 {% endfor %}
 {% endif %}
@@ -189,7 +189,7 @@ Hostname={{ zabbix.hostname }}
 HostMetadata={{ zabbix.metadata }}
 ZBXEOF
     systemctl enable "$_zbx_svc" > /dev/null 2>&1 || true
-    systemctl restart "$_zbx_svc" || echo "[$(ts)] AVERTISSEMENT : demarrage de $_zbx_svc en echec"
+    systemctl restart "$_zbx_svc" || _log "AVERTISSEMENT : demarrage de $_zbx_svc en echec"
     _log "Agent Zabbix configure ($_zbx_pkg) - hote : {{ zabbix.hostname }}"
 fi
 {% endif %}
@@ -377,7 +377,7 @@ _log "SSH : auth par mot de passe desactivee, root interdit"
 _log "Execution du script post-install du profil..."
 (
 {{ profile.post_script }}
-) || echo "[$(ts)] AVERTISSEMENT : Script post-install du profil termine avec une erreur"
+) || _log "AVERTISSEMENT : Script post-install du profil termine avec une erreur"
 _log "Script post-install du profil termine."
 {% endif %}
 
@@ -390,10 +390,14 @@ _log "Script post-install du profil termine."
 # personnalisation qui echoue ne doit pas emporter un deploiement par ailleurs
 # reussi — mais il se voit dans le journal, qui est le seul temoin sur une
 # machine distante.
+#
+# `_log` et NON `echo` : `echo` n'ecrit que le fichier local, sur une machine
+# que personne n'ira consulter. L'avertissement n'atteignait donc jamais OSIRIS,
+# et un script rate rendait un journal STRICTEMENT identique a un script reussi.
 _log "Execution du script post-install de la machine..."
 (
 {{ machine.post_script }}
-) || echo "[$(ts)] AVERTISSEMENT : Script post-install de la machine termine avec une erreur"
+) || _log "AVERTISSEMENT : Script post-install de la machine termine avec une erreur"
 _log "Script post-install de la machine termine."
 {% endif %}
 
