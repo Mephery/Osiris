@@ -40,11 +40,23 @@ def test_aucun_avertissement_ne_reste_LOCAL(firstboot):
     assert not locaux, f"avertissements qui n'atteignent jamais OSIRIS : {locaux}"
 
 
-def test_les_quatre_avertissements_passent_par_log(firstboot):
-    """Les quatre branches connues : application, supervision, script du profil,
-    script de la machine. Si l'une disparaît du script, ce test le dira."""
-    envoyes = re.findall(r'\|\|\s*_log\s+"AVERTISSEMENT[^"]*"', firstboot)
-    assert len(envoyes) == 4, f"attendu 4, trouvé {len(envoyes)} : {envoyes}"
+def test_TOUT_avertissement_passe_par_log(firstboot):
+    """L'invariant, et non un décompte.
+
+    Ce test comptait « exactement 4 » et a cassé dès qu'on a légitimement ajouté
+    deux branches — la faute même contre laquelle les autres tests du dépôt
+    mettent en garde : un chiffre figé dérive dès que le code grandit, et oblige
+    à le corriger pour de mauvaises raisons.
+
+    Ce qui compte n'est pas COMBIEN il y en a, mais qu'aucun n'échappe au
+    journal : chaque `AVERTISSEMENT` d'une ligne exécutable doit être émis par
+    `_log`, jamais par un `echo` qui resterait sur la machine.
+    """
+    lignes = [l for l in firstboot.splitlines()
+              if "AVERTISSEMENT" in l and not l.lstrip().startswith("#")]
+    assert lignes, "plus aucun avertissement dans le script — suspect"
+    hors_journal = [l.strip() for l in lignes if '_log "AVERTISSEMENT' not in l]
+    assert not hors_journal, f"avertissements hors journal : {hors_journal}"
 
 
 def _code(script: str) -> str:

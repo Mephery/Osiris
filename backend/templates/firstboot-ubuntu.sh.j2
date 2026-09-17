@@ -118,7 +118,12 @@ _log "TeamViewer configure - ID : $(teamviewer info 2>/dev/null | grep 'TeamView
 
 {% if linux_apps %}
 _log "Installation des applications via apt..."
-apt-get update -qq
+# Non fatal, et DIT. Un VLAN serveur qui ne sort pas est la norme, pas une panne :
+# les depots sont alors injoignables, et ce qui suit se debrouille avec ce qui est
+# deja present (souvent grave dans le gabarit, sinon servi par OSIRIS). Laisser
+# cette commande nue faisait declencher le piege ERR et marquait en echec un
+# deploiement par ailleurs parfaitement reussi — constate le 17/09.
+apt-get update -qq || _log "AVERTISSEMENT : depots injoignables - on poursuit avec le cache local"
 {% for app in linux_apps %}
 # Le compte rendu suit le RESULTAT. Annoncer « Installe » sans regarder faisait
 # dire a OSIRIS qu'un paquet etait pose sur une machine ou apt venait d'echouer,
@@ -145,7 +150,12 @@ _log "Post-installation : {{ app.name }}"
 # Agent en mode ACTIF : c'est lui qui sort vers le collecteur en TCP 10051.
 # Le VLAN est isole, rien n'entre — le collecteur ne joint jamais la machine.
 _log "Supervision Zabbix : agent actif vers {{ zabbix.server }}"
-apt-get update -qq
+# Non fatal, et DIT. Un VLAN serveur qui ne sort pas est la norme, pas une panne :
+# les depots sont alors injoignables, et ce qui suit se debrouille avec ce qui est
+# deja present (souvent grave dans le gabarit, sinon servi par OSIRIS). Laisser
+# cette commande nue faisait declencher le piege ERR et marquait en echec un
+# deploiement par ailleurs parfaitement reussi — constate le 17/09.
+apt-get update -qq || _log "AVERTISSEMENT : depots injoignables - on poursuit avec le cache local"
 # D'abord les depots de la distribution (Debian fournit encore l'agent), puis le
 # paquet servi par OSIRIS. Aucun depot tiers n'est ajoute a la machine.
 _zbx_pkg=""
@@ -355,8 +365,18 @@ else
     if ! grep -q "$_data_uuid" /etc/fstab; then
         printf 'UUID=%s /data ext4 defaults,nofail 0 2\n' "$_data_uuid" >> /etc/fstab
     fi
-    mount /data
-    _log "/data monte ({{ data_disk_gb }} Go)"
+    # `mountpoint` D'ABORD : le piege ERR marque la machine en echec des qu'une
+    # commande non testee renvoie non-zero, et `mount` sur un point deja monte
+    # renvoie non-zero. Or un gabarit bien fait porte deja l'entree fstab et son
+    # disque : /data y est monte par systemd AVANT que ce script ne tourne.
+    # Autrement dit, plus le gabarit est complet, plus surement le deploiement
+    # echouait — constate le 17/09 sur le premier clone d'un gabarit propre.
+    if mountpoint -q /data; then
+        _log "/data deja monte ({{ data_disk_gb }} Go) - monte au demarrage"
+    else
+        mount /data
+        _log "/data monte ({{ data_disk_gb }} Go)"
+    fi
 fi
 {% endif %}
 
