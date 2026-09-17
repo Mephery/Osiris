@@ -389,8 +389,27 @@ sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
 grep -q '^PasswordAuthentication' /etc/ssh/sshd_config || echo 'PasswordAuthentication no' >> /etc/ssh/sshd_config
 grep -q '^PermitRootLogin' /etc/ssh/sshd_config       || echo 'PermitRootLogin no'       >> /etc/ssh/sshd_config
+
+# Cles d'hote : le scellement les SUPPRIME, expres — sans quoi tous les clones
+# partageraient la meme identite SSH, et un vrai intercepteur passerait
+# inapercu. Encore faut-il que quelqu'un les regenere.
+#
+# Sur un clone en cloud-init, c'est cloud-init qui s'en charge. Sur un clone NU
+# il n'y a pas de source de donnees, le module ne tourne pas, aucune cle n'est
+# generee — et sshd refuse de demarrer. La machine se deploie, se declare
+# reussie, et personne ne peut s'y connecter. Constate le 17/09, juste apres
+# avoir (correctement) coupe l'heritage des metadonnees du gabarit.
+#
+# `ssh-keygen -A` ne genere que ce qui manque : sans effet quand cloud-init a
+# deja fait le travail, salvateur quand personne ne l'a fait.
+ssh-keygen -A >/dev/null 2>&1 || _log "AVERTISSEMENT : generation des cles d'hote SSH en echec"
+
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-_log "SSH : auth par mot de passe desactivee, root interdit"
+if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
+    _log "SSH : auth par mot de passe desactivee, root interdit"
+else
+    _log "AVERTISSEMENT : sshd ne demarre pas — la machine sera injoignable en SSH"
+fi
 {% endif %}
 
 {% if profile.post_script %}
