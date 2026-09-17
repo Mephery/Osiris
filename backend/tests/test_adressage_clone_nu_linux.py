@@ -53,12 +53,19 @@ def _bin_bidon(tmp_path, **scripts):
 def _lancer(fonctions, corps, tmp_path, **scripts):
     scripts.setdefault("ip", 'echo "ip $*" >> "$TRACE"; exit 0')
     scripts.setdefault("netplan", 'echo "netplan $*" >> "$TRACE"; exit 0')
+    scripts.setdefault("systemctl", 'echo "systemctl $*" >> "$TRACE"; exit 1')
     d = _bin_bidon(tmp_path, **scripts)
     trace = tmp_path / "trace.txt"
     script = tmp_path / "t.sh"
+    for sous in ("cloudcfg", "ifupdown"):
+        (tmp_path / sous).mkdir(exist_ok=True)
     script.write_text(
         f'export PATH="{d}:$PATH"\nexport TRACE="{trace}"\n'
         f'export OSIRIS_NETPLAN="{tmp_path}/60-osiris.yaml"\n'
+        f'export OSIRIS_NETWORKD="{tmp_path}/60-osiris.network"\n'
+        f'export OSIRIS_IFUPDOWN="{tmp_path}/ifupdown"\n'
+        f'export OSIRIS_CLOUDCFG="{tmp_path}/cloudcfg"\n'
+        f'export OSIRIS_RESOLV="{tmp_path}/resolv.conf"\n'
         f'ts() {{ echo T; }}\n{fonctions}\n{textwrap.dedent(corps)}\n')
     r = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=60)
     return r.stdout + r.stderr
@@ -125,16 +132,90 @@ def test_le_fichier_netplan_n_est_pas_lisible_par_tous(fonctions, tmp_path):
     assert oct((tmp_path / "60-osiris.yaml").stat().st_mode)[-3:] == "600"
 
 
-def test_sans_netplan_le_repli_DIT_qu_il_est_temporaire(fonctions, tmp_path):
+def test_sans_AUCUN_moteur_le_repli_DIT_qu_il_est_temporaire(fonctions, tmp_path):
     """Laisser croire qu'une adresse est posée alors qu'elle disparaîtra au
     redémarrage est pire que de ne rien faire."""
-    d = _bin_bidon(tmp_path, ip='exit 0')          # un PATH SANS netplan
-    script = tmp_path / "t2.sh"
-    script.write_text(
-        f'export PATH="{d}"\nts() {{ echo T; }}\n{fonctions}\n'
-        'appliquer_adressage "10.0.5.20/24" "10.0.5.1" "" ens192\n')
-    r = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=60)
-    assert "ne survivra PAS au redemarrage" in r.stdout + r.stderr
+    sortie = _lancer(fonctions,
+                     'appliquer_adressage "10.0.5.20/24" "10.0.5.1" "" ens192',
+                     tmp_path, netplan="exit 127", systemctl="exit 1")
+    assert "ne survivra PAS au redemarrage" in sortie
+
+
+# ── systemd-networkd : le moteur des Debian récentes ──────────────────────────
+
+def test_networkd_prend_le_relais_quand_netplan_est_absent(fonctions, tmp_path):
+    """Debian n'installe PAS netplan. Ne gérer que lui revenait à n'adresser
+    durablement que la moitié du parc."""
+    sortie = _lancer(fonctions,
+                     'appliquer_adressage "10.0.5.20/24" "10.0.5.1" "10.0.5.110,10.0.5.210" ens192',
+                     tmp_path,
+                     netplan="exit 127",                 # netplan absent
+                     systemctl='[ "$1" = "is-active" ] && exit 0; exit 0')
+    ecrit = (tmp_path / "60-osiris.network").read_text()
+    assert "Name=ens192" in ecrit
+    assert "Address=10.0.5.20/24" in ecrit
+    assert "Gateway=10.0.5.1" in ecrit
+    # Une directive par serveur : networkd ne lit pas une liste à virgules.
+    assert "DNS=10.0.5.110" in ecrit and "DNS=10.0.5.210" in ecrit
+    assert "10.0.5.110,10.0.5.210" not in ecrit
+    assert "networkd" in sortie
+
+
+def test_networkd_inactif_n_est_PAS_choisi(fonctions, tmp_path):
+    """Installé n'est pas « gère le réseau » : écrire pour un moteur endormi
+    produirait un fichier parfait et aucune adresse."""
+    _lancer(fonctions, 'appliquer_adressage "10.0.5.20/24" "" "" ens192',
+            tmp_path, netplan="exit 127", systemctl="exit 1")
+    assert not (tmp_path / "60-osiris.network").exists()
+
+
+# ── ifupdown : le moteur des Debian classiques ────────────────────────────────
+
+def test_ifupdown_prend_le_relais_en_dernier(fonctions, tmp_path):
+    sortie = _lancer(fonctions,
+                     'appliquer_adressage "10.0.5.20/24" "10.0.5.1" "10.0.5.110" ens192',
+                     tmp_path,
+                     netplan="exit 127", systemctl="exit 1",
+                     ifup='exit 0', ifdown='exit 0')
+    ecrit = (tmp_path / "ifupdown" / "60-osiris").read_text()
+    assert "auto ens192" in ecrit
+    assert "iface ens192 inet static" in ecrit
+    assert "address 10.0.5.20/24" in ecrit
+    assert "gateway 10.0.5.1" in ecrit
+    assert "ifupdown" in sortie
+
+
+# ── cloud-init ne doit pas reprendre la main ──────────────────────────────────
+
+def test_cloud_init_est_neutralise_quand_on_impose_une_adresse(fonctions, tmp_path):
+    """cloud-init réécrit le réseau à chaque démarrage et écraserait le nôtre."""
+    _lancer(fonctions, 'appliquer_adressage "10.0.5.20/24" "" "" ens192', tmp_path)
+    assert "config: disabled" in (tmp_path / "cloudcfg" / "99-osiris-network.cfg").read_text()
+
+
+# ── Le filet DNS ──────────────────────────────────────────────────────────────
+
+def test_resolv_conf_gere_par_systemd_n_est_PAS_ecrase(fonctions, tmp_path):
+    """C'est un lien symbolique : écrire dedans serait réécrit au redémarrage,
+    et on aurait cassé la résolution en croyant la réparer."""
+    vrai = tmp_path / "resolved.conf"
+    vrai.write_text("nameserver 127.0.0.53\n")
+    (tmp_path / "resolv.conf").symlink_to(vrai)
+    _lancer(fonctions, 'poser_resolv "10.0.5.110"', tmp_path)
+    assert vrai.read_text() == "nameserver 127.0.0.53\n"
+
+
+def test_resolv_conf_ordinaire_recoit_les_serveurs(fonctions, tmp_path):
+    (tmp_path / "resolv.conf").write_text("")
+    _lancer(fonctions, 'poser_resolv "10.0.5.110,10.0.5.210"', tmp_path)
+    ecrit = (tmp_path / "resolv.conf").read_text()
+    assert "nameserver 10.0.5.110" in ecrit and "nameserver 10.0.5.210" in ecrit
+
+
+def test_resolv_conf_ne_recoit_pas_deux_fois_le_meme(fonctions, tmp_path):
+    (tmp_path / "resolv.conf").write_text("nameserver 10.0.5.110\n")
+    _lancer(fonctions, 'poser_resolv "10.0.5.110"', tmp_path)
+    assert (tmp_path / "resolv.conf").read_text().count("10.0.5.110") == 1
 
 
 def _code(script: str) -> str:
@@ -190,3 +271,14 @@ def test_un_hyperviseur_non_VMware_ne_declenche_rien(agent):
     """Proxmox, KVM nu, matériel physique : pas de canal guestinfo, et c'est
     normal. Traiter ça comme une panne ferait chercher un bug inexistant."""
     assert "hyperviseur non VMware" in agent
+
+
+def test_un_moteur_qui_echoue_ne_laisse_AUCUN_fichier(fonctions, tmp_path):
+    """Un fichier de configuration orphelin serait relu au prochain démarrage,
+    et imposerait une adresse que plus personne n'a demandée — sur une machine
+    dont on croit, elle, qu'elle est en DHCP."""
+    _lancer(fonctions, 'appliquer_adressage "10.0.5.20/24" "10.0.5.1" "" ens192',
+            tmp_path, netplan="exit 127", systemctl="exit 1")
+    assert not (tmp_path / "60-osiris.yaml").exists()
+    assert not (tmp_path / "60-osiris.network").exists()
+    assert not (tmp_path / "ifupdown" / "60-osiris").exists()

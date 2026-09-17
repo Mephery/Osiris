@@ -127,54 +127,131 @@ info_get() {
 # Ecrit l'adressage POUR DE BON. Le firstboot ne configure pas le reseau : une
 # adresse seulement posee en memoire disparaitrait au premier redemarrage, et la
 # machine retomberait muette apres avoir semble marcher — pire qu'un echec franc.
+#
+# Trois moteurs, parce qu'il n'y en a pas un seul dans la nature : netplan est
+# l'outil d'Ubuntu et Debian ne l'installe PAS, alors qu'on y deploie autant.
+# Ne gerer que netplan revenait a n'adresser durablement que la moitie du parc.
+# On choisit celui qui gere REELLEMENT le reseau, pas celui qui est installe.
+
+# cloud-init reecrit la configuration reseau a chaque demarrage et ecraserait la
+# notre. Lui dire de ne plus s'en meler est la maniere prevue pour ca. Ecrit
+# seulement quand une adresse est IMPOSEE : un clone en DHCP doit garder le
+# comportement d'origine, et ce fichier n'existe donc pas dans le gabarit.
+neutraliser_cloud_init_reseau() {
+    local d=${OSIRIS_CLOUDCFG:-/etc/cloud/cloud.cfg.d}
+    [ -d "$d" ] || return 0
+    printf 'network: {config: disabled}\n' > "$d/99-osiris-network.cfg"
+}
+
+ecrire_netplan() {
+    local ip="$1" gw="$2" dns="$3" carte="$4" liste
+    command -v netplan >/dev/null 2>&1 || return 1
+    local fichier=${OSIRIS_NETPLAN:-/etc/netplan/60-osiris.yaml}
+    {
+        echo "network:"
+        echo "  version: 2"
+        echo "  ethernets:"
+        echo "    $carte:"
+        echo "      dhcp4: false"
+        echo "      addresses: [$ip]"
+        if [ -n "$gw" ]; then
+            # `routes:` et non `gateway4:`, deprecie et ignore EN SILENCE par les
+            # netplan recents — un reglage qui ne produit ni erreur, ni route.
+            echo "      routes:"
+            echo "        - to: default"
+            echo "          via: $gw"
+        fi
+        if [ -n "$dns" ]; then
+            liste=$(printf '%s' "$dns" | sed 's/,/, /g')
+            echo "      nameservers:"
+            echo "        addresses: [$liste]"
+        fi
+    } > "$fichier"
+    # netplan refuse un fichier lisible par tous, dans un avertissement qu'on ne
+    # voit jamais d'ici.
+    chmod 600 "$fichier"
+    # Un moteur qui echoue ne doit RIEN laisser derriere lui : un fichier de
+    # configuration orphelin serait relu au prochain `netplan apply` ou au
+    # prochain demarrage, et imposerait une adresse que personne n'a demandee.
+    netplan apply >/dev/null 2>&1 || { rm -f "$fichier"; return 1; }
+    echo "$fichier"
+}
+
+ecrire_networkd() {
+    local ip="$1" gw="$2" dns="$3" carte="$4" serveur
+    systemctl is-active systemd-networkd >/dev/null 2>&1 || return 1
+    local fichier=${OSIRIS_NETWORKD:-/etc/systemd/network/60-osiris.network}
+    {
+        echo "[Match]"
+        echo "Name=$carte"
+        echo ""
+        echo "[Network]"
+        echo "Address=$ip"
+        [ -n "$gw" ] && echo "Gateway=$gw"
+        # Une directive DNS par serveur : networkd ne lit pas une liste separee
+        # par des virgules, il prendrait le tout pour une seule adresse invalide.
+        for serveur in $(printf '%s' "$dns" | tr ',' ' '); do
+            echo "DNS=$serveur"
+        done
+    } > "$fichier"
+    chmod 644 "$fichier"
+    systemctl restart systemd-networkd >/dev/null 2>&1 || { rm -f "$fichier"; return 1; }
+    echo "$fichier"
+}
+
+ecrire_ifupdown() {
+    local ip="$1" gw="$2" dns="$3" carte="$4"
+    command -v ifup >/dev/null 2>&1 || return 1
+    local d=${OSIRIS_IFUPDOWN:-/etc/network/interfaces.d}
+    [ -d "$d" ] || return 1
+    local fichier="$d/60-osiris"
+    {
+        echo "auto $carte"
+        echo "iface $carte inet static"
+        echo "    address $ip"
+        [ -n "$gw" ] && echo "    gateway $gw"
+        # `dns-nameservers` n'a d'effet que si resolvconf est installe — ce qui
+        # n'est PAS acquis sur une Debian minimale. On l'ecrit quand meme pour
+        # les installations qui l'ont, et `poser_resolv` couvre les autres.
+        [ -n "$dns" ] && echo "    dns-nameservers $(printf '%s' "$dns" | tr ',' ' ')"
+    } > "$fichier"
+    chmod 644 "$fichier"
+    ifdown "$carte" >/dev/null 2>&1 || true
+    ifup "$carte" >/dev/null 2>&1 || { rm -f "$fichier"; return 1; }
+    echo "$fichier"
+}
+
+# Filet DNS. On n'ecrit PAS par-dessus un /etc/resolv.conf gere par
+# systemd-resolved (c'est un lien symbolique) : il serait reecrit, et on aurait
+# casse la resolution en croyant la reparer.
+poser_resolv() {
+    local dns="$1" serveur fichier=${OSIRIS_RESOLV:-/etc/resolv.conf}
+    [ -n "$dns" ] || return 0
+    [ -L "$fichier" ] && return 0
+    for serveur in $(printf '%s' "$dns" | tr ',' ' '); do
+        grep -q "^nameserver $serveur$" "$fichier" 2>/dev/null && continue
+        printf 'nameserver %s\n' "$serveur" >> "$fichier"
+    done
+}
+
 appliquer_adressage() {
-    local ip="$1" gw="$2" dns="$3" carte="$4" fichier liste
-    if command -v netplan >/dev/null 2>&1; then
-        # Chemin surchargeable UNIQUEMENT pour que les tests puissent relire ce
-        # qui a ete ecrit sans avoir les droits sur /etc. En production la
-        # variable n'est jamais posee, et la valeur par defaut s'applique.
-        fichier=${OSIRIS_NETPLAN:-/etc/netplan/60-osiris.yaml}
-        {
-            echo "network:"
-            echo "  version: 2"
-            echo "  ethernets:"
-            echo "    $carte:"
-            echo "      dhcp4: false"
-            echo "      addresses: [$ip]"
-            if [ -n "$gw" ]; then
-                # `routes:` et non `gateway4:`, deprecie et ignore en silence par
-                # les netplan recents — le genre de reglage qui ne produit ni
-                # erreur ni route.
-                echo "      routes:"
-                echo "        - to: default"
-                echo "          via: $gw"
-            fi
-            if [ -n "$dns" ]; then
-                liste=$(printf '%s' "$dns" | sed 's/,/, /g')
-                echo "      nameservers:"
-                echo "        addresses: [$liste]"
-            fi
-        } > "$fichier"
-        # netplan refuse de lire un fichier lisible par tous et le dit dans un
-        # avertissement qu'on ne voit pas ici.
-        chmod 600 "$fichier"
-        if netplan apply >/dev/null 2>&1; then
-            echo "[$(ts)] Adressage : $ip applique et ECRIT dans $fichier (carte $carte)."
+    local ip="$1" gw="$2" dns="$3" carte="$4" moteur ecrit
+    neutraliser_cloud_init_reseau
+    for moteur in ecrire_netplan ecrire_networkd ecrire_ifupdown; do
+        if ecrit=$("$moteur" "$ip" "$gw" "$dns" "$carte"); then
+            poser_resolv "$dns"
+            echo "[$(ts)] Adressage : $ip applique et ECRIT dans $ecrit (${moteur#ecrire_}, carte $carte)."
             return 0
         fi
-        echo "[$(ts)] Adressage : netplan a refuse $fichier - repli temporaire."
-    else
-        echo "[$(ts)] Adressage : netplan absent - repli temporaire."
-    fi
-    # Repli : la machine pourra finir son deploiement, mais l'adresse ne
-    # survivra pas au redemarrage. On le DIT, au lieu de laisser croire.
+        echo "[$(ts)] Adressage : ${moteur#ecrire_} indisponible ou en echec."
+    done
+    # Dernier recours : la machine pourra finir son deploiement, mais l'adresse
+    # ne survivra pas au redemarrage. On le DIT, au lieu de laisser croire.
     ip addr add "$ip" dev "$carte" 2>/dev/null || true
     ip link set "$carte" up 2>/dev/null || true
     [ -n "$gw" ] && ip route add default via "$gw" 2>/dev/null || true
-    if [ -n "$dns" ]; then
-        printf 'nameserver %s\n' $(printf '%s' "$dns" | tr ',' ' ') >> /etc/resolv.conf
-    fi
-    echo "[$(ts)] Adressage : $ip pose TEMPORAIREMENT sur $carte - ne survivra PAS au redemarrage."
+    poser_resolv "$dns"
+    echo "[$(ts)] Adressage : aucun moteur reseau persistant trouve - $ip pose TEMPORAIREMENT sur $carte, ne survivra PAS au redemarrage."
 }
 
 if adresse_utilisable; then
