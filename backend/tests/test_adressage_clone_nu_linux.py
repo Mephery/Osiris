@@ -50,8 +50,13 @@ def _bin_bidon(tmp_path, **scripts):
     return d
 
 
-def _lancer(fonctions, corps, tmp_path, **scripts):
-    scripts.setdefault("ip", 'echo "ip $*" >> "$TRACE"; exit 0')
+def _lancer(fonctions, corps, tmp_path, ip_obtenue="10.0.5.20/24", **scripts):
+    # Le faux `ip` rend l'adresse que la machine est censée porter APRÈS
+    # application. Les tests qui simulent « écrit mais sans effet » passent
+    # `ip_obtenue` différente de celle demandée.
+    scripts.setdefault("ip", 'echo "ip $*" >> "$TRACE"\n'
+                             '[ "$1" = "-4" ] && echo "2: eth0    inet $FAUSSE_IP brd x scope global eth0"\n'
+                             'exit 0')
     scripts.setdefault("netplan", 'echo "netplan $*" >> "$TRACE"; exit 0')
     scripts.setdefault("systemctl", 'echo "systemctl $*" >> "$TRACE"; exit 1')
     d = _bin_bidon(tmp_path, **scripts)
@@ -62,10 +67,12 @@ def _lancer(fonctions, corps, tmp_path, **scripts):
     script.write_text(
         f'export PATH="{d}:$PATH"\nexport TRACE="{trace}"\n'
         f'export OSIRIS_NETPLAN="{tmp_path}/60-osiris.yaml"\n'
-        f'export OSIRIS_NETWORKD="{tmp_path}/60-osiris.network"\n'
+        f'export OSIRIS_NETWORKD="{tmp_path}/00-osiris.network"\n'
         f'export OSIRIS_IFUPDOWN="{tmp_path}/ifupdown"\n'
         f'export OSIRIS_CLOUDCFG="{tmp_path}/cloudcfg"\n'
         f'export OSIRIS_RESOLV="{tmp_path}/resolv.conf"\n'
+        f'export FAUSSE_IP="{ip_obtenue}"\n'
+        'export OSIRIS_VERIF_ESSAIS=1\n'
         f'ts() {{ echo T; }}\n{fonctions}\n{textwrap.dedent(corps)}\n')
     r = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=60)
     return r.stdout + r.stderr
@@ -151,7 +158,7 @@ def test_networkd_prend_le_relais_quand_netplan_est_absent(fonctions, tmp_path):
                      tmp_path,
                      netplan="exit 127",                 # netplan absent
                      systemctl='[ "$1" = "is-active" ] && exit 0; exit 0')
-    ecrit = (tmp_path / "60-osiris.network").read_text()
+    ecrit = (tmp_path / "00-osiris.network").read_text()
     assert "Name=ens192" in ecrit
     assert "Address=10.0.5.20/24" in ecrit
     assert "Gateway=10.0.5.1" in ecrit
@@ -166,7 +173,7 @@ def test_networkd_inactif_n_est_PAS_choisi(fonctions, tmp_path):
     produirait un fichier parfait et aucune adresse."""
     _lancer(fonctions, 'appliquer_adressage "10.0.5.20/24" "" "" ens192',
             tmp_path, netplan="exit 127", systemctl="exit 1")
-    assert not (tmp_path / "60-osiris.network").exists()
+    assert not (tmp_path / "00-osiris.network").exists()
 
 
 # ── ifupdown : le moteur des Debian classiques ────────────────────────────────
@@ -288,7 +295,7 @@ def test_un_moteur_qui_echoue_ne_laisse_AUCUN_fichier(fonctions, tmp_path):
     _lancer(fonctions, 'appliquer_adressage "10.0.5.20/24" "10.0.5.1" "" ens192',
             tmp_path, netplan="exit 127", systemctl="exit 1")
     assert not (tmp_path / "60-osiris.yaml").exists()
-    assert not (tmp_path / "60-osiris.network").exists()
+    assert not (tmp_path / "00-osiris.network").exists()
     assert not (tmp_path / "ifupdown" / "60-osiris").exists()
 
 
@@ -325,7 +332,31 @@ def test_l_adresse_imposee_ECRASE_l_heritee(fonctions, tmp_path):
     impose une autre, c'est celle de guestinfo qui doit être écrite."""
     _lancer(fonctions,
             'appliquer_adressage "10.0.5.202/24" "10.0.5.1" "10.0.5.110" ens192',
-            tmp_path)
+            tmp_path, ip_obtenue="10.0.5.202/24")
     ecrit = (tmp_path / "60-osiris.yaml").read_text()
     assert "addresses: [10.0.5.202/24]" in ecrit
     assert "10.0.5.201" not in ecrit
+
+
+# ── Ne plus croire un code de retour ──────────────────────────────────────────
+
+def test_un_moteur_qui_ecrit_SANS_EFFET_passe_la_main(fonctions, tmp_path):
+    """Le 17/09 : netplan écrivait son fichier, `netplan apply` rendait 0, et
+    l'image embarquait un `01-eth0.network` qui gagnait au tri alphabétique.
+    La configuration était écrite, valide, appliquée — et battue.
+
+    On ne croit donc plus le code de retour : on regarde l'adresse portée.
+    """
+    sortie = _lancer(fonctions,
+                     'appliquer_adressage "10.0.5.203/24" "10.0.5.1" "" eth0',
+                     tmp_path, ip_obtenue="10.251.110.66/24")   # un autre gagne
+    assert "sans effet" in sortie, "l'échec silencieux doit être nommé"
+    assert not (tmp_path / "60-osiris.yaml").exists(), \
+        "un fichier sans effet ne doit pas rester derrière"
+
+
+def test_le_fichier_networkd_passe_AVANT_ceux_de_l_image(agent):
+    """systemd-networkd applique le PREMIER fichier qui correspond, par ordre
+    alphabétique. Une image embarquant un `01-eth0.network` battrait un `60-`."""
+    assert "00-osiris.network" in _code(agent)
+    assert "60-osiris.network" not in _code(agent)

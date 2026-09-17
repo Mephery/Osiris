@@ -186,7 +186,11 @@ ecrire_netplan() {
 ecrire_networkd() {
     local ip="$1" gw="$2" dns="$3" carte="$4" serveur
     systemctl is-active systemd-networkd >/dev/null 2>&1 || return 1
-    local fichier=${OSIRIS_NETWORKD:-/etc/systemd/network/60-osiris.network}
+    # `00-` et non `60-` : systemd-networkd applique le PREMIER fichier qui
+    # correspond, par ordre alphabetique. Les images embarquent souvent leur
+    # propre configuration — vu le 17/09 : un `01-eth0.network` date de 2024,
+    # qui imposait une adresse et un DNS publics et battait tout le reste.
+    local fichier=${OSIRIS_NETWORKD:-/etc/systemd/network/00-osiris.network}
     {
         echo "[Match]"
         echo "Name=$carte"
@@ -240,16 +244,45 @@ poser_resolv() {
     done
 }
 
+# L'adresse est-elle REELLEMENT portee par la machine ?
+#
+# Un moteur peut ecrire un fichier valide, rendre 0, et ne rien changer : le
+# 17/09, netplan generait bien son `/run/systemd/network/10-netplan-eth0.network`
+# et `netplan apply` rendait 0 — mais l'image embarquait un `01-eth0.network`,
+# et systemd-networkd applique le PREMIER fichier qui correspond. Notre
+# configuration etait ecrite, valide, appliquee, et battue.
+#
+# On ne croit donc plus un code de retour : on regarde l'adresse.
+adresse_posee() {
+    local attendue=${1%%/*} essai
+    # Les moteurs reconfigurent de maniere asynchrone : on laisse le temps.
+    # Nombre d'essais surchargeable UNIQUEMENT pour les tests, qui n'ont pas a
+    # attendre douze secondes par moteur. Jamais pose en production.
+    for essai in $(seq 1 "${OSIRIS_VERIF_ESSAIS:-6}"); do
+        ip -4 -o addr show scope global 2>/dev/null \
+            | awk '{print $4}' | cut -d/ -f1 | grep -qx "$attendue" && return 0
+        sleep 2
+    done
+    return 1
+}
+
 appliquer_adressage() {
     local ip="$1" gw="$2" dns="$3" carte="$4" moteur ecrit
     neutraliser_cloud_init_reseau
     for moteur in ecrire_netplan ecrire_networkd ecrire_ifupdown; do
         if ecrit=$("$moteur" "$ip" "$gw" "$dns" "$carte"); then
-            poser_resolv "$dns"
-            echo "[$(ts)] Adressage : $ip applique et ECRIT dans $ecrit (${moteur#ecrire_}, carte $carte)."
-            return 0
+            if adresse_posee "$ip"; then
+                poser_resolv "$dns"
+                echo "[$(ts)] Adressage : $ip applique et VERIFIE via $ecrit (${moteur#ecrire_}, carte $carte)."
+                return 0
+            fi
+            # Ecrit mais sans effet : un autre fichier gagne. On retire le notre
+            # pour ne pas laisser deux configurations concurrentes derriere nous.
+            echo "[$(ts)] Adressage : ${moteur#ecrire_} a ecrit $ecrit sans effet - un autre fichier a priorite."
+            rm -f "$ecrit"
+        else
+            echo "[$(ts)] Adressage : ${moteur#ecrire_} indisponible ou en echec."
         fi
-        echo "[$(ts)] Adressage : ${moteur#ecrire_} indisponible ou en echec."
     done
     # Dernier recours : la machine pourra finir son deploiement, mais l'adresse
     # ne survivra pas au redemarrage. On le DIT, au lieu de laisser croire.
