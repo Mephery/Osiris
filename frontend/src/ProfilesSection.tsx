@@ -345,6 +345,31 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
               <button onClick={() => setEditingProfile(null)} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1"><IcoX cls="w-4 h-4" /></button>
             </div>
             <div className="p-5 space-y-3">
+              {/* Nom et OS, absents jusqu'ici. Sans eux, une copie de profil
+                  restait nommee « (copie) » POUR TOUJOURS et enfermee dans l'OS
+                  de sa source — ce qui rendait la duplication inutilisable des
+                  qu'on voulait le meme profil pour une autre distribution.
+                  L'OS decide aussi de la liste ou le profil apparait au moment
+                  de creer une VM : s'y tromper rend le profil introuvable. */}
+              <div className="grid grid-cols-2 gap-2">
+                <label className="text-xs text-slate-400 self-center">Nom du profil</label>
+                <input className="osiris-input text-xs" defaultValue={editingProfile.name}
+                  onChange={e => setEditingProfile({ ...editingProfile, name: e.target.value })} />
+                <label className="text-xs text-slate-400 self-center">
+                  Systeme
+                  <span className="block text-[9px] text-slate-600 normal-case">
+                    decide ou ce profil apparait
+                  </span>
+                </label>
+                <select value={editingProfile.os}
+                  onChange={e => setEditingProfile({ ...editingProfile, os: e.target.value })}
+                  className="osiris-input text-xs">
+                  <option value="ubuntu">Ubuntu</option>
+                  <option value="debian">Debian</option>
+                  <option value="windows">Windows</option>
+                </select>
+              </div>
+
               <div className="grid grid-cols-2 gap-2">
                 <label className="text-xs text-slate-400 self-center col-span-2">
                   <label className="flex items-center gap-2 cursor-pointer">

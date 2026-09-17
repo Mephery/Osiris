@@ -356,7 +356,16 @@ class ProfileCreate(SQLModel):
     set_root_password: bool = False
 
 class ProfilePatch(SQLModel):
+    # Tout champ du modele doit figurer ici. Pydantic IGNORE en silence ce qu'il
+    # ne connait pas : un champ absent de cette classe se laisse modifier dans
+    # l'interface, part dans la requete, et disparait sans le moindre message.
+    # C'est ce qui arrivait a `laps_rotation_days` — affiche, modifiable, et
+    # jamais enregistre — et a `os`, qui enfermait toute copie de profil dans
+    # l'OS de sa source. Un test verifie desormais la couverture complete.
     name: Optional[str] = None
+    os: Optional[str] = None
+    laps_rotation_days: Optional[int] = None
+    domain_config_id: Optional[int] = None
     locale: Optional[str] = None
     keyboard: Optional[str] = None
     timezone: Optional[str] = None
@@ -1280,6 +1289,12 @@ def update_profile(profile_id: int, patch: ProfilePatch, current_user: User = De
         if not profile:
             raise HTTPException(status_code=404, detail="Profil introuvable")
         changes = patch.model_dump(exclude_none=True)
+        # Meme controle qu'a la creation : un OS fantaisiste ne casse rien tout
+        # de suite, il fait rendre le mauvais gabarit de premier demarrage des
+        # semaines plus tard, sur chaque machine du profil.
+        if "os" in changes and changes["os"] not in ("ubuntu", "windows", "debian"):
+            raise HTTPException(status_code=400, detail=(
+                f"OS « {changes['os']} » inconnu — attendu : ubuntu, debian ou windows."))
         if "tv_suffix" in changes:
             changes["tv_suffix"] = encrypt(changes["tv_suffix"])
         if "domain_join_password" in changes:
@@ -1306,22 +1321,23 @@ def delete_profile(profile_id: int, current_user: User = Depends(require_admin))
 
 @app.post("/profiles/{profile_id}/clone", status_code=201)
 def clone_profile(profile_id: int, current_user: User = Depends(require_admin)):
-    """Duplique un profil existant (tous les champs sauf l'id)."""
+    """Duplique un profil existant : TOUS les champs sauf l'identifiant.
+
+    Construit depuis le profil source plutôt qu'en recopiant les champs un à un.
+    L'énumération manuelle disait déjà « tous les champs » et en avait perdu
+    DOUZE au fil des ajouts — dont `ssh_authorized_keys`, c'est-à-dire l'accès à
+    la machine. Dupliquer un profil qui marche donnait un profil qui déploie des
+    machines où personne ne peut entrer, sans le moindre avertissement.
+
+    Écrit ainsi, un champ ajouté au modèle demain suivra tout seul.
+    """
     with Session(engine) as session:
         src = session.get(Profile, profile_id)
         if not src:
             raise HTTPException(status_code=404, detail="Profil introuvable")
-        clone = Profile(
-            name=f"{src.name} (copie)",
-            os=src.os, locale=src.locale, keyboard=src.keyboard, timezone=src.timezone,
-            default_user=src.default_user, extra_packages=src.extra_packages,
-            join_domain=src.join_domain, domain=src.domain,
-            domain_join_user=src.domain_join_user, domain_join_password=src.domain_join_password,
-            win_image=src.win_image, win_index=src.win_index,
-            enable_bitlocker=src.enable_bitlocker, bitlocker_pin=src.bitlocker_pin,
-            network_drives=src.network_drives, printers=src.printers, post_script=src.post_script,
-            tv_suffix=src.tv_suffix, app_ids=src.app_ids,
-        )
+        champs = {k: v for k, v in src.model_dump().items() if k != "id"}
+        champs["name"] = f"{src.name} (copie)"
+        clone = Profile(**champs)
         session.add(clone)
         _log(session, current_user, "clone_profile", details={"source": src.name})
         session.commit()
