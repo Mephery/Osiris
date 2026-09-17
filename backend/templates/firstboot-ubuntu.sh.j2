@@ -422,6 +422,31 @@ _add_test() {
 # aboutit sort du reseau, donc elle prouve le routage a elle seule.
 if getent hosts www.google.com > /dev/null 2>&1; then _dns_ok=true; else _dns_ok=false; fi
 
+# L'adresse REELLE correspond-elle a celle de la fiche ?
+#
+# Test ajoute le 17/09 apres une VM deployee, verte partout, qui tournait sur une
+# adresse DHCP alors que sa fiche en annoncait une fixe : l'image livrait
+# `network: {config: disabled}`, donc le nom d'hote injecte a ete applique et le
+# reseau ignore. Rien ne l'a signale.
+#
+# C'est le pire cas de tous : la machine marche. Elle repond, elle se supervise,
+# elle passe tous les autres tests — et l'inventaire ment. La prochaine personne
+# qui cherchera ce serveur a l'adresse ecrite dans OSIRIS ne trouvera personne,
+# ou pire, trouvera quelqu'un d'autre.
+#
+# On compare l'ADRESSE seule, pas le prefixe : c'est elle qui sert a joindre la
+# machine, et un /24 ecrit /25 par erreur ne justifie pas de crier au loup.
+{% if machine.ip_cidr %}
+_ip_attendue="{{ machine.ip_cidr.split('/')[0] }}"
+_ip_reelles=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+if printf '%s\n' $_ip_reelles | grep -qx "$_ip_attendue"; then
+    _add_test "Adresse conforme a la fiche" true "$_ip_attendue"
+else
+    _add_test "Adresse conforme a la fiche" false \
+        "fiche : $_ip_attendue - reel : $(printf '%s' $_ip_reelles | tr '\n' ' ')"
+fi
+{% endif %}
+
 # Ping passerelle par defaut.
 #
 # Une passerelle qui ne repond pas a l'ICMP est la NORME des qu'elle est portee par
