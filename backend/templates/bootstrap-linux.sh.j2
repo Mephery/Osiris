@@ -146,6 +146,12 @@ neutraliser_cloud_init_reseau() {
 ecrire_netplan() {
     local ip="$1" gw="$2" dns="$3" carte="$4" liste
     command -v netplan >/dev/null 2>&1 || return 1
+    # Le fichier laisse par cloud-init dans le gabarit porte une AUTRE cle
+    # d'interface que la notre (il matche « en* », nous nommons la carte).
+    # Netplan appliquerait donc les DEUX, et la machine porterait l'adresse
+    # imposee ET celle heritee du gabarit. On vient de dire a cloud-init de ne
+    # plus s'occuper du reseau : son fichier n'a plus lieu d'etre.
+    rm -f /etc/netplan/50-cloud-init.yaml
     local fichier=${OSIRIS_NETPLAN:-/etc/netplan/60-osiris.yaml}
     {
         echo "network:"
@@ -254,9 +260,27 @@ appliquer_adressage() {
     echo "[$(ts)] Adressage : aucun moteur reseau persistant trouve - $ip pose TEMPORAIREMENT sur $carte, ne survivra PAS au redemarrage."
 }
 
+# Avoir DEJA une adresse ne veut pas dire qu'il n'y a rien a imposer.
+#
+# Un gabarit fabrique a partir d'une VM deployee emporte le reseau de cette VM —
+# c'est meme la methode recommandee pour en fabriquer un. Chacun de ses clones
+# demarre donc sur l'adresse de la machine d'origine, et renoncer la donnerait a
+# TOUS la MEME adresse. Constate le 17/09 : un clone demande en .202 tournait en
+# .201, celle de la VM qui avait servi a batir le gabarit.
+#
+# Ce qu'une adresse deja presente change, c'est seulement la PATIENCE : une
+# machine qui ne peut rien faire sans adresse a interet a attendre les Tools
+# trois minutes ; une machine qui a deja de quoi travailler ne doit pas etre
+# retardee d'autant pour un canal qui, le plus souvent, ne dira rien.
 if adresse_utilisable; then
-    echo "[$(ts)] Adressage : une adresse routable est deja en place, rien a imposer."
+    ESSAIS_TOOLS=2
+    echo "[$(ts)] Adressage : une adresse est deja en place - lecture de guestinfo sans attendre."
 else
+    ESSAIS_TOOLS=18
+    echo "[$(ts)] Adressage : aucune adresse routable - attente des VMware Tools."
+fi
+
+if true; then
     VMTOOLSD=$(chemin_vmtoolsd)
     if [ -z "$VMTOOLSD" ]; then
         # Proxmox, KVM nu, materiel physique : pas de canal guestinfo, et c'est
@@ -267,14 +291,14 @@ else
         # premieres minutes. Constate cote Windows le 21/08 — vide a 16:59, vide
         # a 17:04, et la valeur a 17:14 en tapant la meme commande a la main.
         ADR=""
-        for essai in $(seq 1 18); do
+        for essai in $(seq 1 "$ESSAIS_TOOLS"); do
             ADR=$(info_get "$VMTOOLSD" "guestinfo.osiris.ip")
             case "$ADR" in
                 */*) break ;;
                 *)   ADR="" ;;
             esac
-            echo "[$(ts)] Adressage : guestinfo pas encore lisible ($essai/18) - nouvel essai dans 10 s."
-            sleep 10
+            echo "[$(ts)] Adressage : guestinfo pas encore lisible ($essai/$ESSAIS_TOOLS) - nouvel essai dans 10 s."
+            [ "$essai" -lt "$ESSAIS_TOOLS" ] && sleep 10
         done
         if [ -z "$ADR" ]; then
             # Cas parfaitement legitime : aucune adresse imposee, la machine est

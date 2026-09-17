@@ -247,12 +247,20 @@ def test_chaque_issue_DIT_laquelle(agent):
 def test_l_agent_attend_que_vmware_tools_soit_pret(agent):
     """Les Tools démarrent APRÈS l'agent : lire une seule fois rend du vide.
     Constaté côté Windows le 21/08 — vide à 16:59, vide à 17:04, la valeur à
-    17:14 en tapant la même commande à la main."""
-    assert "seq 1 18" in agent
+    17:14 en tapant la même commande à la main.
+
+    L'attente longue vaut quand la machine n'a AUCUNE adresse : elle ne peut de
+    toute façon rien faire d'autre.
+    """
+    assert "ESSAIS_TOOLS=18" in _code(agent)
 
 
-def test_l_agent_ne_touche_a_rien_s_il_a_deja_une_adresse(agent):
-    assert "adresse routable est deja en place" in agent
+def test_l_agent_n_impose_RIEN_quand_guestinfo_est_vide(agent):
+    """La seule raison légitime de ne pas toucher au réseau : personne n'a rien
+    demandé. Ce test remplace un « ne touche à rien s'il a déjà une adresse »
+    qui encodait le bug du 17/09 — une adresse héritée du gabarit y faisait
+    renoncer, et tous les clones sortaient sur la même."""
+    assert "aucune adresse dans guestinfo" in _code(agent)
 
 
 def test_169_254_n_est_PAS_prise_pour_une_adresse(agent):
@@ -282,3 +290,42 @@ def test_un_moteur_qui_echoue_ne_laisse_AUCUN_fichier(fonctions, tmp_path):
     assert not (tmp_path / "60-osiris.yaml").exists()
     assert not (tmp_path / "60-osiris.network").exists()
     assert not (tmp_path / "ifupdown" / "60-osiris").exists()
+
+
+# ── Une adresse héritée du gabarit ne fait PAS renoncer ───────────────────────
+# Un gabarit fabriqué à partir d'une VM déployée emporte le réseau de cette VM —
+# c'est la méthode recommandée pour en fabriquer un. Chacun de ses clones démarre
+# donc avec l'adresse de la machine d'origine. Renoncer là donnerait à TOUS les
+# clones la MÊME adresse : le 17/09, un clone demandé en .202 tournait en .201,
+# celle de la VM qui avait servi à bâtir le gabarit.
+
+def test_une_adresse_deja_presente_ne_fait_pas_renoncer(agent):
+    """`adresse_utilisable` décide de la PATIENCE, pas de l'action."""
+    code = _code(agent)
+    assert "rien a imposer" not in code, \
+        "avoir une adresse ne doit plus court-circuiter la lecture de guestinfo"
+    assert "ESSAIS_TOOLS" in code, "la patience doit être la seule variable"
+
+
+def test_on_attend_moins_longtemps_quand_on_a_deja_une_adresse(agent):
+    """Une machine qui peut déjà travailler ne doit pas être retardée de trois
+    minutes pour un canal qui, le plus souvent, ne dira rien."""
+    code = _code(agent)
+    assert "ESSAIS_TOOLS=2" in code and "ESSAIS_TOOLS=18" in code
+
+
+def test_le_netplan_du_gabarit_est_retire(agent):
+    """Il porte une AUTRE clé d'interface que la nôtre : netplan appliquerait
+    les deux, et la machine porterait l'adresse imposée ET l'héritée."""
+    assert "rm -f /etc/netplan/50-cloud-init.yaml" in _code(agent)
+
+
+def test_l_adresse_imposee_ECRASE_l_heritee(fonctions, tmp_path):
+    """Le cas réel, exécuté : la machine porte déjà une adresse, guestinfo en
+    impose une autre, c'est celle de guestinfo qui doit être écrite."""
+    _lancer(fonctions,
+            'appliquer_adressage "10.0.5.202/24" "10.0.5.1" "10.0.5.110" ens192',
+            tmp_path)
+    ecrit = (tmp_path / "60-osiris.yaml").read_text()
+    assert "addresses: [10.0.5.202/24]" in ecrit
+    assert "10.0.5.201" not in ecrit
