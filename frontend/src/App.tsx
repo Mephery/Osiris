@@ -26,6 +26,7 @@ import { SkeletonRows } from './Skeleton'
 import { MachineDetailPanel } from './MachineDetailPanel'
 import { ResumeProfil } from './ResumeProfil'
 import { CreationVm } from './CreationVm'
+import { correspondDate, correspondProfil, correspondType, raisonATraiter } from './filtresMachines'
 import { profilParDefaut } from './vmForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
@@ -114,16 +115,21 @@ export default function App() {
   const [oneTimePassword, setOneTimePassword] = useState<{ hostname: string; password: string } | null>(null)
 
   // ── Navigation par onglets ─────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<'machines' | 'admin' | 'drivers' | 'journal' | 'capture' | 'dashboard' | 'infrastructure'>('machines')
+  const [activeTab, setActiveTab] = useState<'machines' | 'admin' | 'journal' | 'dashboard' | 'infrastructure'>('machines')
 
   // Sous-onglets de la section Administration (une seule section affichée à la fois → page moins longue + chargement paresseux)
-  type AdminSubTab = 'orgs' | 'users' | 'apps' | 'profiles' | 'images' | 'domains' | 'vpn'
+  type AdminSubTab = 'orgs' | 'users' | 'apps' | 'profiles' | 'images' | 'capture' | 'drivers' | 'domains' | 'vpn'
   const ADMIN_SUBTABS: { id: AdminSubTab; label: string }[] = [
     { id: 'orgs',     label: 'Organisations' },
     { id: 'users',    label: 'Utilisateurs' },
     { id: 'apps',     label: 'Applications' },
     { id: 'profiles', label: 'Profils' },
     { id: 'images',   label: 'Images OS' },
+    // Capture et Drivers étaient des onglets principaux, pour des opérations
+    // ponctuelles : ils encombraient la barre du haut. Rangés ici, à côté des
+    // images qu'ils servent à préparer.
+    { id: 'capture',  label: 'Capture' },
+    { id: 'drivers',  label: 'Drivers' },
     { id: 'domains',  label: 'Domaines AD' },
     { id: 'vpn',      label: 'Tunnels VPN' },
   ]
@@ -248,7 +254,19 @@ export default function App() {
   const [search, setSearch]             = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [osFilter, setOsFilter]         = useState('')
-  const [smokeFilter, setSmokeFilter]   = useState(false)
+  const [typeFilter, setTypeFilter]     = useState('')
+  const [profilFilter, setProfilFilter] = useState('')
+  const [dateFilter, setDateFilter]     = useState('')
+  // « À traiter » remplace l'ancien filtre « Alertes smoke » : il l'englobe, et
+  // celui-ci ne trouvait de toute façon rien (le champ n'était pas renvoyé).
+  const [aTraiterFilter, setATraiterFilter] = useState(false)
+  // Horloge des filtres « bloquée depuis… » et « déployée cette semaine » : lire
+  // l'heure pendant le rendu le rendrait imprévisible. Mise à jour chaque minute.
+  const [maintenant, setMaintenant] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setMaintenant(Date.now()), 60_000)
+    return () => clearInterval(t)
+  }, [])
   const [sortKey, setSortKey]           = useState<'hostname' | 'mac' | 'client' | 'os' | 'status' | null>(null)
   const [sortDir, setSortDir]           = useState<'asc' | 'desc'>('asc')
 
@@ -258,8 +276,11 @@ export default function App() {
     else { setSortKey(key); setSortDir('asc') }
   }
 
-  const resetFilters = () => { setSearch(''); setStatusFilter(''); setOsFilter(''); setSmokeFilter(false) }
-  const hasActiveFilter = !!(search || statusFilter || osFilter || smokeFilter)
+  const resetFilters = () => {
+    setSearch(''); setStatusFilter(''); setOsFilter('')
+    setTypeFilter(''); setProfilFilter(''); setDateFilter(''); setATraiterFilter(false)
+  }
+  const hasActiveFilter = !!(search || statusFilter || osFilter || typeFilter || profilFilter || dateFilter || aTraiterFilter)
 
   // ── Modale paramètres du compte (mot de passe, 2FA, clés API) ──────────────
   const [showSettingsModal, setShowSettingsModal] = useState(false)
@@ -896,8 +917,10 @@ export default function App() {
     const matchSearch = !q || m.hostname.toLowerCase().includes(q) || m.client.toLowerCase().includes(q) || m.mac.includes(q) || (m.user_name ?? '').toLowerCase().includes(q)
     const matchStatus = !statusFilter || m.status === statusFilter
     const matchOs     = !osFilter     || m.os === osFilter
-    const matchSmoke  = !smokeFilter  || m.smoke_status === 'warnings'
-    return matchSearch && matchStatus && matchOs && matchSmoke
+    return matchSearch && matchStatus && matchOs
+      && correspondType(m, typeFilter) && correspondProfil(m, profilFilter)
+      && correspondDate(m, dateFilter, maintenant)
+      && (!aTraiterFilter || raisonATraiter(m, maintenant) !== null)
   })
 
   // Tri d'affichage (ne touche ni aux compteurs ni à la sélection, qui restent sur filteredMachines).
@@ -915,7 +938,7 @@ export default function App() {
     deploying: machines.filter(m => m.status === 'deploying').length,
     failed:    machines.filter(m => m.status === 'failed').length,
     pending:   machines.filter(m => m.status === 'pending').length,
-    smokeWarn: machines.filter(m => m.smoke_status === 'warnings').length,
+    aTraiter:  machines.filter(m => raisonATraiter(m, maintenant) !== null).length,
   }
 
   // ── Rendu ───────────────────────────────────────────────────────────────────
@@ -957,9 +980,7 @@ export default function App() {
             { id: 'dashboard'      as const, label: 'Tableau de bord',  adminOnly: false },
             { id: 'admin'          as const, label: 'Administration',   adminOnly: true  },
             { id: 'infrastructure' as const, label: 'Infrastructure',   adminOnly: true  },
-            { id: 'drivers'        as const, label: 'Drivers',          adminOnly: true  },
             { id: 'journal'        as const, label: 'Journal',          adminOnly: true  },
-            { id: 'capture'        as const, label: 'Capture',          adminOnly: true  },
           ]).filter(t => !t.adminOnly || auth.role === 'admin').map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)}
               className={`flex-shrink-0 whitespace-nowrap px-5 py-2.5 text-xs font-semibold tracking-wide border-b-2 transition-colors cursor-pointer ${
@@ -1360,12 +1381,12 @@ export default function App() {
         )}
 
         {/* ── Onglet Capture ───────────────────────────────────────────────── */}
-        {activeTab === 'capture' && auth.role === 'admin' && (
+        {activeTab === 'admin' && auth.role === 'admin' && adminSubTab === 'capture' && (
           <CaptureTab token={auth.token} machines={machines} refreshSignal={captureRefresh} />
         )}
 
         {/* ── Onglet Drivers ───────────────────────────────────────────────── */}
-        {activeTab === 'drivers' && auth.role === 'admin' && (
+        {activeTab === 'admin' && auth.role === 'admin' && adminSubTab === 'drivers' && (
           <DriversTab token={auth.token} />
         )}
 
@@ -1384,44 +1405,6 @@ export default function App() {
               )}
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <div className="relative">
-                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-600 pointer-events-none"><IcoSearch cls="w-3 h-3" /></span>
-                <input type="text" placeholder="Rechercher…" value={search}
-                  onChange={e => setSearch(e.target.value)}
-                  className="osiris-input text-xs pl-7 w-44" />
-              </div>
-              <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="osiris-input text-xs w-36">
-                <option value="">Tous les statuts</option>
-                <option value="pending">En attente</option>
-                <option value="deploying">En cours</option>
-                <option value="deployed">Déployés</option>
-                <option value="failed">Échec</option>
-              </select>
-              <select value={osFilter} onChange={e => setOsFilter(e.target.value)} className="osiris-input text-xs w-32">
-                <option value="">Tous les OS</option>
-                <option value="windows">Windows</option>
-                <option value="ubuntu">Ubuntu</option>
-                <option value="debian">Debian</option>
-              </select>
-              {machines.some(m => m.smoke_status === 'warnings') && (
-                <button
-                  onClick={() => setSmokeFilter(f => !f)}
-                  className={`osiris-btn text-xs ${smokeFilter ? 'border-amber-600 text-amber-400' : 'text-slate-500'}`}
-                  title="Afficher uniquement les machines avec des alertes smoke"
-                >
-                  Alertes smoke{smokeFilter ? ` (${filteredMachines.length})` : ` (${machines.filter(m => m.smoke_status === 'warnings').length})`}
-                </button>
-              )}
-              {hasActiveFilter && (
-                <button onClick={resetFilters} className="osiris-btn-ghost text-xs text-slate-500">
-                  Réinitialiser
-                </button>
-              )}
-              <span className="text-[10px] uppercase tracking-widest text-slate-600 font-semibold">Client</span>
-              <select value={selectedOrg ?? ''} onChange={(e) => setSelectedOrg(e.target.value ? Number(e.target.value) : null)} className="osiris-input text-xs w-44">
-                <option value="">Tous les clients</option>
-                {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
-              </select>
               <button
                 className={`osiris-btn text-xs ${csvImporting ? 'opacity-50' : ''}`}
                 disabled={csvImporting}
@@ -1446,13 +1429,68 @@ export default function App() {
               )}
             </div>
           </div>
+          {/* Filtres : une ligne à part, sous les actions */}
+          <div className="flex items-center gap-2 flex-wrap">
+              <div className="relative">
+                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-600 pointer-events-none"><IcoSearch cls="w-3 h-3" /></span>
+                <input type="text" placeholder="Rechercher…" value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  className="osiris-input text-xs pl-7 w-44" />
+              </div>
+              <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="osiris-input text-xs w-36">
+                <option value="">Tous les statuts</option>
+                <option value="pending">En attente</option>
+                <option value="deploying">En cours</option>
+                <option value="deployed">Déployés</option>
+                <option value="failed">Échec</option>
+              </select>
+              <select value={osFilter} onChange={e => setOsFilter(e.target.value)} className="osiris-input text-xs w-32">
+                <option value="">Tous les OS</option>
+                <option value="windows">Windows</option>
+                <option value="ubuntu">Ubuntu</option>
+                <option value="debian">Debian</option>
+              </select>
+              <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} className="osiris-input text-xs w-40">
+                <option value="">Physiques et VM</option>
+                <option value="physique">Physiques</option>
+                <option value="vm">VM</option>
+                {hypervisors.map(h => <option key={h.id} value={`hv:${h.id}`}>VM · {h.name}</option>)}
+              </select>
+              <select value={profilFilter} onChange={e => setProfilFilter(e.target.value)} className="osiris-input text-xs w-44">
+                <option value="">Tous les profils</option>
+                <option value="aucun">Sans profil</option>
+                {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <select value={dateFilter} onChange={e => setDateFilter(e.target.value)} className="osiris-input text-xs w-40">
+                <option value="">Déployées : toutes</option>
+                <option value="jour">Aujourd'hui</option>
+                <option value="semaine">Cette semaine</option>
+                <option value="mois">Ce mois-ci</option>
+                <option value="ancien">Il y a plus d'un mois</option>
+                <option value="jamais">Jamais déployées</option>
+              </select>
+              <select value={selectedOrg ?? ''} onChange={(e) => setSelectedOrg(e.target.value ? Number(e.target.value) : null)} className="osiris-input text-xs w-44">
+                <option value="">Tous les clients</option>
+                {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+              </select>
+              <button onClick={() => setATraiterFilter(f => !f)}
+                className={`osiris-btn text-xs ${aTraiterFilter ? 'border-amber-600 text-amber-400' : statCounts.aTraiter ? 'text-amber-500' : 'text-slate-500'}`}
+                title="En échec, VM sans nouvelles depuis 30 min, déploiement bloqué depuis 2 h, ou tests en échec (hors accès internet)">
+                À traiter ({statCounts.aTraiter})
+              </button>
+              {hasActiveFilter && (
+                <button onClick={resetFilters} className="osiris-btn-ghost text-xs text-slate-500">
+                  Réinitialiser
+                </button>
+              )}
+          </div>
           {!loading && !error && machines.length > 0 && (
             <div className="flex items-center gap-4">
               {statCounts.deployed  > 0 && <button onClick={() => setStatusFilter(s => s === 'deployed'  ? '' : 'deployed')}  className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${statusFilter === 'deployed'  ? 'text-emerald-400' : 'text-emerald-700 hover:text-emerald-500'}`}><span className="w-1.5 h-1.5 rounded-full bg-emerald-600 inline-block" />{statCounts.deployed}  déployé{statCounts.deployed  !== 1 ? 's' : ''}</button>}
               {statCounts.deploying > 0 && <button onClick={() => setStatusFilter(s => s === 'deploying' ? '' : 'deploying')} className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${statusFilter === 'deploying' ? 'text-blue-400'    : 'text-blue-700    hover:text-blue-500'}`}  ><span className="w-1.5 h-1.5 rounded-full bg-blue-500  inline-block animate-pulse" />{statCounts.deploying} en cours</button>}
               {statCounts.failed    > 0 && <button onClick={() => setStatusFilter(s => s === 'failed'    ? '' : 'failed')}    className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${statusFilter === 'failed'    ? 'text-red-400'     : 'text-red-800     hover:text-red-500'}`}    ><span className="w-1.5 h-1.5 rounded-full bg-red-500   inline-block" />{statCounts.failed}    échec{statCounts.failed    !== 1 ? 's' : ''}</button>}
               {statCounts.pending   > 0 && <button onClick={() => setStatusFilter(s => s === 'pending'   ? '' : 'pending')}   className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${statusFilter === 'pending'   ? 'text-slate-300'   : 'text-slate-700   hover:text-slate-400'}`}  ><span className="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block" />{statCounts.pending}   en attente</button>}
-              {statCounts.smokeWarn > 0 && <button onClick={() => setSmokeFilter(f => !f)} className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${smokeFilter ? 'text-amber-400' : 'text-amber-800 hover:text-amber-500'}`}><span className="w-1.5 h-1.5 rounded-full bg-amber-500 inline-block" />{statCounts.smokeWarn} alerte{statCounts.smokeWarn !== 1 ? 's' : ''} smoke</button>}
+              {statCounts.aTraiter > 0 && <button onClick={() => setATraiterFilter(f => !f)} className={`inline-flex items-center gap-1.5 text-[10px] font-mono transition-colors ${aTraiterFilter ? 'text-amber-400' : 'text-amber-700 hover:text-amber-500'}`}><span className="w-1.5 h-1.5 rounded-full bg-amber-500 inline-block" />{statCounts.aTraiter} à traiter</button>}
             </div>
           )}
         </div>
@@ -1560,6 +1598,9 @@ export default function App() {
                       )}
                       {machine.status === 'deploying' && (machine.dism_progress ?? 0) > 0 && (
                         <span className="block text-[10px] font-mono text-blue-600 mt-0.5">{machine.dism_progress}%</span>
+                      )}
+                      {raisonATraiter(machine, maintenant) && (
+                        <span className="block text-[10px] text-amber-500 mt-0.5">{raisonATraiter(machine, maintenant)}</span>
                       )}
                       {machine.deployed_at && machine.status === 'deployed' && (
                         <span className="block text-[10px] font-mono text-slate-700 mt-0.5">

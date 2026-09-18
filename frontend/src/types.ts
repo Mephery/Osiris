@@ -115,6 +115,10 @@ export interface Machine {
   smoke_results?: string;
   laps_rotated_at?: string | null;
   hypervisor_id?: number | null;
+  /** Noms des smoke tests en échec au dernier déploiement. */
+  tests_en_echec?: string[];
+  /** Depuis quand la machine est dans son statut (ISO) : dernier évènement, ou création. */
+  statut_depuis?: string | null;
   proxmox_vm_id?: number;
   proxmox_node?: string;
 }

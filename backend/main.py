@@ -2397,6 +2397,24 @@ def get_all_machines(org_id: Optional[int] = None):
         if org_id is not None:
             query = query.where(Machine.organization_id == org_id)
         machines = session.exec(query).all()
+        # Depuis quand chaque machine est dans son statut : dernier évènement de
+        # déploiement, ou sa création s'il n'y en a pas. Sert à repérer, côté
+        # liste, une machine BLOQUÉE — « en attente » depuis dix minutes ou depuis
+        # trois semaines, rien ne les distinguait.
+        derniers = dict(session.exec(
+            select(DeploymentEvent.mac, func.max(DeploymentEvent.timestamp))
+            .group_by(DeploymentEvent.mac)).all())
+        utc = lambda d: d if d is None or d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+        def statut_depuis(m: Machine) -> Optional[str]:
+            dates = [d for d in (utc(derniers.get(m.mac)), utc(m.created_at)) if d]
+            return max(dates).isoformat() if dates else None
+
+        def tests_en_echec(m: Machine) -> list[str]:
+            try:
+                return [t.get("name", "") for t in json.loads(m.smoke_results or "[]") if not t.get("ok")]
+            except (ValueError, AttributeError):
+                return []
         return [
             {
                 "id": m.id, "mac": m.mac, "deploy_mac": m.deploy_mac, "client": m.client,
@@ -2415,6 +2433,11 @@ def get_all_machines(org_id: Optional[int] = None):
                 "hypervisor_id": m.hypervisor_id,
                 "proxmox_vm_id": m.proxmox_vm_id,
                 "proxmox_node": m.proxmox_node,
+                # Absent jusqu'au 18/09 : le filtre « Alertes smoke » et son compteur
+                # de la liste ne trouvaient donc jamais rien.
+                "smoke_status": m.smoke_status,
+                "tests_en_echec": tests_en_echec(m),
+                "statut_depuis": statut_depuis(m),
             }
             for m in machines
         ]
@@ -2832,6 +2855,7 @@ def redeploy_now(mac: str, background_tasks: BackgroundTasks):
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
         _open_new_deploy_run(machine)
+        _record_deploy_event(session, machine, "pending")
         session.add(machine)
         session.commit()
     # Une VM n'a pas de WoL : ce qui la fait redeployer, c'est de la renvoyer sur son
