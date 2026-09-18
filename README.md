@@ -42,7 +42,7 @@ Il remplace les outils comme MDT/WDS avec une interface web moderne, une API RES
 | Notes libres sur les machines | oui | oui | oui |
 | Utilisateur affecté à une machine | oui | oui | oui |
 | Tableau de bord par organisation | oui | oui | oui |
-| Filtres avancés (OS, smoke, recherche) | oui | oui | oui |
+| Filtres (type physique/VM, profil, date, « à traiter ») | oui | oui | oui |
 | Clonage de profil | oui | oui | oui |
 | 2FA TOTP (optionnel par compte) | - | - | - |
 | Clés API personnelles | - | - | - |
@@ -217,9 +217,13 @@ ALLOWED_ORIGINS=https://osiris.local,https://192.168.1.x
 # Redis (ARQ)
 REDIS_URL=redis://localhost:6379   # "redis://redis:6379" en Docker Compose
 
-# Frontend (build Vite)
-VITE_API_URL=https://osiris.local
+# Frontend (build Vite) - VIDE = l'API est appelée à la même adresse que la page
+VITE_API_URL=
 ```
+
+> **`VITE_API_URL` vide est le bon réglage.** Une adresse fixe casse l'accès par l'autre
+> nom : ouverte par le nom de domaine, une interface compilée avec l'IP envoie toutes ses
+> requêtes vers l'IP, dont le certificat n'est pas reconnu — « Failed to fetch » partout.
 
 > **Note réseau :** `OSIRIS_BASE_URL` doit être l'IP du réseau PXE (celle que voient les machines qui bootent). Ne pas confondre avec l'URL d'accès à l'UI.
 
@@ -303,11 +307,18 @@ L'onglet **Tableau de bord** affiche en temps réel :
 
 ## Filtres avancés
 
-La barre de recherche de l'onglet **Machines** combine plusieurs filtres simultanément :
-- **Recherche texte** - hostname, client, MAC, modèle, utilisateur affecté, notes
-- **OS** - filtre par Windows / Ubuntu / Debian
-- **Smoke tests** - afficher uniquement les machines avec des alertes post-déploiement
-- **Réinitialiser** - bouton visible dès qu'un filtre est actif
+Sous les boutons d'action de l'onglet **Machines**, une ligne de filtres qui se combinent :
+- **Recherche texte** - hostname, client, MAC, utilisateur affecté
+- **Statut** et **OS**
+- **Type** - physiques, VM, ou les VM d'un hyperviseur précis
+- **Profil** - dont « sans profil » (les machines qui tombent sur le profil de repli)
+- **Déployées** - aujourd'hui, cette semaine, ce mois-ci, il y a plus d'un mois, jamais
+- **Client**
+- **À traiter** - un clic pour ce qui demande une action : déploiement en échec, VM en
+  attente depuis plus de 30 min, déploiement « en cours » depuis plus de 2 h, smoke tests
+  en échec. Le test « Accès internet » n'y compte pas : il échoue par construction sur un
+  VLAN serveur fermé, et noierait le reste. La raison s'affiche sous le statut.
+- **Réinitialiser** - visible dès qu'un filtre est actif
 
 ---
 
@@ -329,7 +340,7 @@ A la fin du premier démarrage, chaque machine exécute automatiquement une sér
 
 - Badge vert "Tests OK" ou badge orange "N alerte(s)" sur chaque ligne machine
 - Cliquer sur le badge développe le détail : chaque test avec un point vert/rouge et le message d'erreur si applicable
-- Compteur "alertes smoke" dans la barre de stats rapides
+- Compteur « à traiter » dans la barre de stats rapides (voir Filtres)
 - Bouton dans la barre de filtres pour isoler les machines en alerte
 
 **Endpoint de réception**
@@ -364,6 +375,13 @@ La clé et le PIN ne sont visibles dans l'interface que par les administrateurs,
 Au premier démarrage Windows, OSIRIS génère un mot de passe aléatoire de 16 caractères (lettres, chiffres, symboles), l'applique au compte `Administrator` local et le stocke chiffré (Fernet) dans OSIRIS. Chaque machine obtient un mot de passe unique.
 
 Le mot de passe est visible uniquement par les administrateurs, via le bouton "Afficher le mot de passe" dans le panneau de la machine. La date de la dernière rotation est affichée en dessous.
+
+**Avant LAPS, le mot de passe d'installation.** Le compte d'installation `osiris-admin`
+(qui ouvre la session du premier démarrage, puis est supprimé) reçoit lui aussi un mot
+de passe aléatoire **propre à la machine**, conservé au même endroit. Si LAPS échoue, le
+compte est gardé pour ne pas enfermer dehors, et ce mot de passe reste lisible dans
+OSIRIS. Un gabarit Windows scellé reçoit le sien, remplacé au premier démarrage de
+chaque clone. Il n'existe plus de mot de passe partagé entre machines.
 
 ### Rotation automatique
 
@@ -603,7 +621,7 @@ Gestion depuis **Paramètres > Clés API** :
 
 ## Golden image (capture WIM)
 
-Depuis l'onglet **Capture** :
+Depuis **Administration → Capture** :
 1. Préparer le poste de référence (installer les logiciels, configurer Windows)
 2. Dans OSIRIS, sélectionner la machine et nommer le fichier WIM
 3. Cliquer "Lancer la capture" - la machine redémarre en PXE en mode capture
@@ -842,6 +860,44 @@ le nom de la VM avant d'agir (`destroy_vm`), un `Destroy_Task` ne se rattrapant 
 
 ---
 
+## Créer une VM
+
+Bouton **+ Créer une VM** de l'onglet **Machines** (admins). Le formulaire suit l'ordre des
+décisions :
+
+1. **La machine** - nom, client, organisation (supervision), système, profil. Le profil
+   présélectionné est le premier *utilisable* ; son résumé s'affiche dessous.
+2. **Où la créer** - hyperviseur, gabarit, stockage, réseau. Un nœud ou un stockage
+   unique est choisi d'office.
+3. **Adresse réseau** - vide = DHCP ; passerelle et DNS se déduisent du réseau choisi.
+
+Tout le reste (mode de création, CPU/RAM/disques repris du profil, dossier, OU, script
+propre à la VM) est replié sous **Options avancées**, avec son résumé visible. Le mode
+proposé par défaut est celui qui fonctionne sur l'hyperviseur choisi : clone du gabarit
+sur vSphere, cloud-init pour Linux sur Proxmox, WinPE pour Windows sur Proxmox.
+
+Le bouton de création dit ce qui manque encore (« À compléter : réseau, stockage »).
+
+### Ce qu'un profil donne
+
+Sous chaque profil (liste des profils, formulaires de création), OSIRIS affiche ce qu'il
+fera vraiment : compte local, accès SSH par clé, domaine, mot de passe root de secours.
+Le résumé est calculé par le serveur sur les **mêmes** conditions que les scripts de
+premier démarrage — une configuration de domaine liée compte.
+
+**Une VM ne peut pas être créée avec un profil qui ne laisse aucune porte d'entrée**
+(ni clé SSH, ni domaine, ni root de secours) : une VM ne reçoit aucun mot de passe
+d'installation, elle serait hermétique. Ces profils sont grisés dans le formulaire VM, et
+le serveur refuse. Un PC physique n'est pas concerné : son installeur pose un mot de
+passe, affiché une fois à l'enregistrement.
+
+Après le déploiement, le smoke test **Accès à la machine** compte les portes qui existent
+réellement (clé SSH avec le service actif, mot de passe utilisable, domaine joint) ; s'il
+n'y en a aucune, la machine passe **en échec**. Une clé de root ne compte pas quand root
+est interdit en SSH, ni une clé restreinte par `command=`.
+
+---
+
 ## Gabarit matériel des serveurs
 
 Un profil porte les caractéristiques des VM créées avec lui : vCPU, RAM, disque
@@ -917,6 +973,25 @@ curl -sf http://osiris.local:8000/bootstrap/linux | bash -s -- --seal
 tous les clones partagent le même `machine-id`, donc le même DUID DHCP, et se volent
 leurs baux.**
 
+### Gabarits reconnus
+
+Au scellement, le gabarit **s'annonce à OSIRIS** (`POST /bootstrap/sealed`) avec son UUID
+SMBIOS — qui survit à la conversion en modèle — et l'**empreinte** de l'agent qu'on vient
+d'y graver. La ligne « Gabarit enregistré auprès d'OSIRIS » le confirme dans la sortie.
+Même chose pour Windows (`-Seal`).
+
+- En **clone nu**, le formulaire ne propose que les gabarits OSIRIS du bon système ; les
+  autres modèles de l'hyperviseur sont grisés — un clone sans agent ne rappellerait jamais.
+  En cloud-init, qui n'a pas besoin de l'agent, tout reste choisissable.
+- **Infrastructure → Gabarits** liste les modèles de chaque hyperviseur avec l'état de
+  leur agent : *à jour*, *ancien — à resceller*, ou *inconnu*.
+- Un gabarit scellé avant cette fonction se marque à la main (**Marquer comme gabarit
+  OSIRIS**) ; son agent reste « inconnu » jusqu'au prochain scellement.
+
+⚠️ L'empreinte suit le **script d'amorçage** : toute modification de celui-ci fait passer
+les gabarits existants en « ancien ». C'est le rappel qu'une correction de l'agent gravé
+n'atteint les clones qu'après un rescellement.
+
 Au démarrage de chaque clone, l'unité `osiris-firstboot.service` :
 
 1. énumère les MAC des cartes **physiques** (`/sys/class/net/*/device`) ;
@@ -929,7 +1004,8 @@ Au démarrage de chaque clone, l'unité `osiris-firstboot.service` :
 
 Ce script d'amorçage ne contient **aucune logique métier** : tout vient d'OSIRIS au
 démarrage. Un changement de profil, d'application ou de script de premier démarrage
-**ne nécessite pas de refabriquer le template**.
+**ne nécessite pas de refabriquer le template** — seule une correction de l'agent
+lui-même l'exige (voir « Gabarits reconnus »).
 
 ### Quand une VM ne rappelle jamais
 
@@ -1273,6 +1349,10 @@ En Docker Compose, le `Caddyfile.docker` inclus utilise `backend:8000` comme ups
 | 2FA TOTP | Secret chiffré Fernet en base, token temporaire 5 min entre mot de passe et code |
 | Secrets chiffrés | Mots de passe AD, BitLocker, LAPS, PIN, suffixe TV : Fernet (AES-128-CBC) |
 | Validation MAC | Regex stricte `^[0-9a-f]{12}$` - injection iPXE impossible |
+| Validation des noms | RFC 1123 (15 caractères pour Windows) à toutes les entrées, et re-contrôle avant tout rendu de script : un nom de machine ne peut pas injecter de commande dans un script exécuté en root |
+| Fenêtre de déploiement | Les scripts qui portent des secrets (jonction AD, BIOS, Wi-Fi) ne sont servis que pendant le déploiement : en attente / en cours, 7 jours après un échec, 24 h après une installation PXE tant que ses smoke tests ne sont pas arrivés. Ensuite : **410**, redéployer pour rejouer |
+| Données de secours | Une clé BitLocker conservée ne se remplace que pendant un déploiement ; un mot de passe LAPS, pendant un déploiement ou à l'échéance de rotation. Un appel anonyme ne peut pas rouvrir la fenêtre par le statut |
+| Flux en direct | Le WebSocket exige un jeton, envoyé en premier message |
 | Echappement XML | `xml.sax.saxutils.escape` sur tous les champs injectés dans unattend.xml |
 | Hachage mots de passe | bcrypt pour les users - sha512_crypt 100k rounds pour les machines |
 | CORS restreint | Origines explicitement listées dans `.env` |
@@ -1281,7 +1361,7 @@ En Docker Compose, le `Caddyfile.docker` inclus utilise `backend:8000` comme ups
 **Risques résiduels documentés :**
 - **Spoofing MAC** - iPXE identifie les machines uniquement par MAC. Mitigation : VLAN PXE dédié.
 - **Scripts en HTTP clair** - les scripts de boot transitent sans chiffrement sur le réseau PXE. Acceptable sur réseau interne isolé.
-- **Endpoints firstboot sans auth** - `/machines/{mac}/status`, `/hardware`, `/laps-password`, `/laps-due`, `/bitlocker-key`, `/smoke-tests` sont appelés par la machine elle-même. La MAC est le seul identifiant. Acceptable sur réseau PXE interne isolé.
+- **Endpoints firstboot sans auth** - `/machines/{mac}/status`, `/hardware`, `/laps-password`, `/laps-due`, `/bitlocker-key`, `/smoke-tests` et les scripts de premier démarrage sont appelés par la machine elle-même, et la MAC est le seul identifiant. La fenêtre de déploiement borne l'exposition dans le temps ; **pendant** cette fenêtre, connaître la MAC suffit encore. Correctif prévu : un jeton par machine, remis par un canal de l'hyperviseur (ou une seule fois en PXE), et les rappels en HTTPS.
 
 ---
 
