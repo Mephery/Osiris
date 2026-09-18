@@ -6,7 +6,7 @@ import { ACTION_META, authHeader, formatMac, formatDetails } from './types'
 import { IcoSearch, IcoRefresh } from './icons'
 import { SkeletonRows } from './Skeleton'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 export function JournalTab({ token, onUnauthorized }: { token: string; onUnauthorized: () => void }) {
   const [auditLogs, setAuditLogs]         = useState<AuditLogEntry[]>([])

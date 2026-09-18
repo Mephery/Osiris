@@ -9,7 +9,7 @@ import { buildCreateVmPayload, champsManquants, completerPrefixeCidr, dansLeRese
 import { ResumeProfil } from './ResumeProfil'
 import { ChampEnCours } from './Skeleton'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
 

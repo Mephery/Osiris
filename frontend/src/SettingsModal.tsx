@@ -8,7 +8,7 @@ import type { ApiKey } from './types'
 import { IcoX } from './icons'
 import { IntegrationsTab } from './IntegrationsTab'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 export function SettingsModal({ token, onClose }: { token: string; onClose: () => void }) {
   const [settingsTab, setSettingsTab] = useState<'password' | 'totp' | 'apikeys' | 'integrations'>('password')

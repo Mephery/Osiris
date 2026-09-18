@@ -7,7 +7,7 @@ import { authHeader } from './types'
 import { IcoRefresh, IcoSearch, IcoDownload, IcoCheck, IcoChevDown, IcoChevRight } from './icons'
 import { SkeletonRows } from './Skeleton'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 export function DriversTab({ token }: { token: string }) {
   const [drivers, setDrivers]           = useState<DriverPack[]>([])

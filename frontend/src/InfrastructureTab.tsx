@@ -7,7 +7,7 @@ import { authHeader } from './types'
 import { IcoX } from './icons'
 import { Spinner } from './Skeleton'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 interface InfrastructureTabProps {
   token: string

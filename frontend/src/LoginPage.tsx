@@ -4,7 +4,7 @@ import { useState } from 'react'
 import type { AuthState } from './types'
 import { IcoOsiris } from './icons'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 export function LoginPage({ onLogin, onTotpRequired }: { onLogin: (auth: AuthState) => void, onTotpRequired: (temp_token: string) => void }) {
   const [email, setEmail]       = useState('')

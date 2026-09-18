@@ -8,7 +8,7 @@ import { IcoX, IcoPencil } from './icons'
 import { APP_LOGOS } from './appIconMap'
 import { ResumeProfil } from './ResumeProfil'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 const EMPTY_PROFILE: Partial<Profile> = { os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '', ntp_servers: '', apt_mirror: '', apt_proxy: '' }
 

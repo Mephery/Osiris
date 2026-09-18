@@ -28,7 +28,7 @@ import { ResumeProfil } from './ResumeProfil'
 import { CreationVm } from './CreationVm'
 import { profilParDefaut } from './vmForm'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 // ── Composant principal ────────────────────────────────────────────────────────
 
 const AUTH_KEY = 'osiris_auth'

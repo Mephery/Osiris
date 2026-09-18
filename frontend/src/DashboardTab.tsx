@@ -6,7 +6,7 @@ import type { LiveEvent } from './types'
 import { IcoRefresh } from './icons'
 import { SkeletonStatCards } from './Skeleton'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 type StatusCounts = { deployed: number; pending: number; deploying: number; failed: number }
 type OrgStats = StatusCounts & { org_id: number; org_name: string; total: number }

@@ -6,7 +6,7 @@ import type { Machine } from './types'
 import { authHeader } from './types'
 import { IcoRefresh, IcoCheck, IcoX } from './icons'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 interface CaptureJob { mac: string; wim_name: string; status: string; registered_at: string; finished_at?: string }
 
