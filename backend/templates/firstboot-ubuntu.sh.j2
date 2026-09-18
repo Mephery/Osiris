@@ -638,12 +638,21 @@ _portes_d_entree() {
     if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
         _ssh_actif=true
     fi
+    # Root interdit en SSH (durcissement serveur) : sa cle n'ouvre rien
+    local _root_ssh=true
+    grep -qiE '^[[:space:]]*PermitRootLogin[[:space:]]+no' "${OSIRIS_SSHD_CONFIG:-/etc/ssh/sshd_config}" 2>/dev/null \
+        && _root_ssh=false
     while IFS=: read -r _u _x _uid _gid _gecos _home _shell; do
         case "$_shell" in */nologin|*/false|"") continue ;; esac
         _home="${OSIRIS_HOME_RACINE:-}$_home"
-        # Une cle sans serveur SSH ne sert a rien
-        if [ "$_ssh_actif" = true ] && [ -f "$_home/.ssh/authorized_keys" ] \
-                && grep -qvE '^[[:space:]]*(#|$)' "$_home/.ssh/authorized_keys" 2>/dev/null; then
+        # Une cle ne compte que si elle ouvre un shell : serveur SSH actif, root
+        # autorise s'il s'agit de root, et pas d'option `command=`. Les images
+        # cloud posent chez root une cle reduite a « connectez-vous avec
+        # l'utilisateur… » : elle se voit, elle n'ouvre rien. Vu le 18/09.
+        if [ "$_ssh_actif" = true ] && { [ "$_uid" != 0 ] || [ "$_root_ssh" = true ]; } \
+                && [ -f "$_home/.ssh/authorized_keys" ] \
+                && grep -vE '^[[:space:]]*(#|$)' "$_home/.ssh/authorized_keys" 2>/dev/null \
+                   | grep -qvE '(^|,)command="'; then
             _portes="$_portes cle SSH ($_u),"
         fi
         # P = mot de passe utilisable ; L (verrouille) et NP (vide) ne sont pas des portes

@@ -121,8 +121,13 @@ def _fonction(script: str) -> str:
     return m.group(0)
 
 
-def _portes(tmp_path, script, *, cles="", mdp="humans L\nroot L", ssh_actif=True, domaine=""):
+def _portes(tmp_path, script, *, cles="", mdp="humans L\nroot L", ssh_actif=True, domaine="",
+            cles_root="", sshd="PermitRootLogin no\n"):
     """Exécute le contrôle contre de faux comptes : humans et root, rien d'autre."""
+    (tmp_path / "sshd_config").write_text(sshd)
+    racine = tmp_path / "root/.ssh"
+    racine.mkdir(parents=True, exist_ok=True)
+    (racine / "authorized_keys").write_text(cles_root)
     (tmp_path / "passwd").write_text(
         "root:x:0:0:root:/root:/bin/bash\n"
         "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
@@ -142,7 +147,7 @@ def _portes(tmp_path, script, *, cles="", mdp="humans L\nroot L", ssh_actif=True
         ["bash", "-c", faux + _fonction(script) + "_portes_d_entree"],
         capture_output=True, text=True, timeout=30,
         env={"PATH": "/usr/bin:/bin", "OSIRIS_PASSWD": str(tmp_path / "passwd"),
-             "OSIRIS_HOME_RACINE": str(tmp_path)})
+             "OSIRIS_HOME_RACINE": str(tmp_path), "OSIRIS_SSHD_CONFIG": str(tmp_path / "sshd_config")})
     assert r.returncode == 0, r.stderr
     return r.stdout
 
@@ -195,3 +200,21 @@ def test_zero_porte_passe_la_machine_en_ECHEC(script):
     assert "TEST Acces a la machine false" in r.stdout
     assert "status=failed" in r.stderr
     assert "ECHEC=1" in r.stdout
+
+
+def test_la_cle_de_root_n_ouvre_rien_quand_root_est_interdit_en_SSH(tmp_path, script):
+    """Vu sur la première vraie VM du 18/09 : « cle SSH (root) » comptée comme
+    une porte, alors que le durcissement interdit root en SSH."""
+    assert _portes(tmp_path, script, cles_root=CLE) == ""
+
+
+def test_la_cle_de_root_compte_si_root_est_autorise(tmp_path, script):
+    assert _portes(tmp_path, script, cles_root=CLE, sshd="") == " cle SSH (root)"
+
+
+def test_la_cle_de_courtoisie_des_images_cloud_n_ouvre_rien(tmp_path, script):
+    """Les images cloud posent une clé réduite à un message : elle se voit, elle n'ouvre rien."""
+    courtoisie = ('no-port-forwarding,no-agent-forwarding,command="echo \'Please login as the user '
+                  'debian rather than root.\';sleep 10" ' + CLE)
+    assert _portes(tmp_path, script, cles=courtoisie) == ""
+    assert _portes(tmp_path, script, cles=courtoisie + "\n" + CLE) == " cle SSH (humans)"
