@@ -17,7 +17,10 @@ Sans effet sur Windows 11, qui se passe très bien de cet élément.
 """
 import xml.etree.ElementTree as ET
 
+import re
+
 import main
+from crypto import decrypt
 from models import Machine, engine
 from sqlmodel import Session, select
 
@@ -42,7 +45,11 @@ def test_lunattend_par_machine_fournit_le_mot_de_passe_administrateur(client, te
 
     valeur = comptes.find("u:AdministratorPassword/u:Value", NS)
     assert valeur is not None, "sans lui, l'OOBE de Windows Server ne se termine jamais"
-    assert valeur.text == main.WINDOWS_TEMPLATE_ADMIN_PASSWORD
+    # Propre à la machine et lisible dans OSIRIS : si LAPS échoue, c'est le seul
+    # mot de passe administrateur local qu'elle aura.
+    with Session(engine) as s:
+        m = s.exec(select(Machine).where(Machine.mac == MAC)).one()
+    assert valeur.text == decrypt(m.laps_password)
 
 
 def test_lunattend_de_sysprep_fournit_le_mot_de_passe_administrateur(client):
@@ -50,7 +57,7 @@ def test_lunattend_de_sysprep_fournit_le_mot_de_passe_administrateur(client):
 
     valeur = comptes.find("u:AdministratorPassword/u:Value", NS)
     assert valeur is not None
-    assert valeur.text == main.WINDOWS_TEMPLATE_ADMIN_PASSWORD
+    assert len(valeur.text) >= 20
 
 
 def test_lordre_des_elements_respecte_le_schema(client, test_machine):
@@ -65,13 +72,43 @@ def test_lordre_des_elements_respecte_le_schema(client, test_machine):
         assert enfants.index("AdministratorPassword") < enfants.index("LocalAccounts")
 
 
-def test_aucun_mot_de_passe_nest_code_en_dur_dans_le_gabarit():
+def test_aucun_mot_de_passe_nest_code_en_dur():
     """
-    Il vivait en clair à trois endroits du gabarit. Le rassembler sur une constante
-    permet d'en changer sans en oublier un — et de le faire depuis l'environnement.
+    Il a vécu en clair dans le gabarit, puis en valeur par défaut dans main.py —
+    donc publié avec le dépôt, et c'est lui qui servait en production faute de
+    variable d'environnement. Plus aucune valeur fixe nulle part.
     """
-    gabarit = (main.jinja_env.get_template("unattend.xml.j2")
-               .filename)
-    with open(gabarit, encoding="utf-8") as f:
-        contenu = f.read()
-    assert main.WINDOWS_TEMPLATE_ADMIN_PASSWORD not in contenu
+    for fichier in ("main.py", "templates/unattend.xml.j2", "templates/unattend-sysprep.xml.j2"):
+        with open(fichier, encoding="utf-8") as f:
+            assert "OsirisAdmin" not in f.read(), fichier
+
+
+def test_le_mot_de_passe_reste_le_meme_pendant_une_installation(client, test_machine):
+    """WinPE peut relire le fichier de réponses : un mot de passe qui changerait
+    entre deux lectures ne serait plus celui qu'OSIRIS a conservé."""
+    lire = lambda: _comptes(client.get(f"/unattend.xml?mac={MAC}").text).find(
+        "u:AdministratorPassword/u:Value", NS).text
+    assert lire() == lire()
+
+
+def test_deux_machines_n_ont_jamais_le_meme(client, test_machine):
+    with Session(engine) as s:
+        s.add(Machine(mac="aabbccddee00", hostname="PC-DEUX", client="c", os="windows"))
+        s.commit()
+    val = lambda mac: _comptes(client.get(f"/unattend.xml?mac={mac}").text).find(
+        "u:AdministratorPassword/u:Value", NS).text
+    assert val(MAC) != val("aabbccddee00")
+
+
+def test_deux_gabarits_n_ont_jamais_le_meme(client):
+    val = lambda: _comptes(client.get("/bootstrap/windows/unattend.xml").text).find(
+        "u:AdministratorPassword/u:Value", NS).text
+    assert val() != val()
+
+
+def test_le_mot_de_passe_passe_la_complexite_windows():
+    """Moins de trois classes de caractères : l'OOBE refuse le compte."""
+    for _ in range(50):
+        m = main._mot_de_passe_installation()
+        assert re.search(r"[A-Z]", m) and re.search(r"[a-z]", m) and re.search(r"\d", m) \
+            and re.search(r"[^A-Za-z0-9]", m)

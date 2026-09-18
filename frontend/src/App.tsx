@@ -488,6 +488,9 @@ export default function App() {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const wsUrl = `${proto}//${window.location.host}/ws/machines`
       ws = new WebSocket(wsUrl)
+      // Le jeton en premier message : le serveur ne diffuse rien avant de l'avoir
+      // vérifié (un WebSocket ne porte pas d'en-tête, et l'URL finit dans les journaux).
+      ws.onopen = () => ws.send(auth.token)
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data)
@@ -510,6 +513,11 @@ export default function App() {
           setCaptureRefresh(n => n + 1)
           const hostname = machinesRef.current.find(m => m.mac === mac)?.hostname ?? mac
           setLiveEvents(prev => [{ id: `${Date.now()}-${mac}`, timestamp: Date.now(), mac, hostname, kind: 'capture' as const, success: msg.success }, ...prev].slice(0, 30))
+        } else if (msg.type === 'smoke') {
+          // Résultats des tests post-déploiement : ils ne touchent PAS au statut
+          setMachines((prev) =>
+            prev.map((m: Machine) => m.mac === mac ? { ...m, smoke_status: msg.smoke_status, smoke_results: JSON.stringify(msg.tests) } : m)
+          )
         } else {
           const { status, deployed_at } = msg
           if (status === 'pending') setDeployLogs((prev) => { const n = { ...prev }; delete n[mac]; return n })

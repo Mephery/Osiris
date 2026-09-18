@@ -44,7 +44,7 @@ def test_lamorcage_ne_contient_aucun_secret(client):
     assert main.OSIRIS_BASE_URL in script          # l'adresse d'OSIRIS, et elle seule
     # On vise les VALEURS, pas les mots : le script parle de « secret » dans les
     # commentaires qui expliquent précisément qu'il n'en contient aucun.
-    assert main.WINDOWS_TEMPLATE_ADMIN_PASSWORD not in script
+    assert "OsirisAdmin" not in script
     assert "gAAAAA" not in script                  # préfixe d'un jeton Fernet chiffré
     assert "PVEAPIToken" not in script
 

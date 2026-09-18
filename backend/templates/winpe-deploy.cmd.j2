@@ -6,7 +6,7 @@ set OSIRIS={{ osiris_url }}
 set OSIRIS_IP={{ osiris_ip }}
 
 echo [OSIRIS] ===== Deploiement Windows =====
-echo [OSIRIS] Machine : {{ machine.hostname }} ({{ machine.client }})
+echo [OSIRIS] Machine : {{ machine.hostname }} ({{ machine.client | cmd_texte }})
 echo [OSIRIS] MAC     : %MAC%
 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Demarrage+deploiement+{{ machine.hostname }}" >nul 2>&1
 

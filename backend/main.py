@@ -11,6 +11,7 @@ import os
 import re
 import ssl
 import secrets
+import string
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
@@ -140,13 +141,41 @@ ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL", "admin@osiris.local")
 ADMIN_PASSWORD  = os.environ.get("ADMIN_PASSWORD", "changeme")
 WIN_SHARE_PATH  = os.environ.get("WIN_SHARE_PATH", "/srv/data/windows")
 
-# Mot de passe du compte `osiris-admin` posé par les fichiers de réponses. Ce
-# compte est un ÉCHAFAUDAGE : il ouvre la session du premier démarrage, puis le
-# firstboot planifie sa suppression dès que LAPS a pris le relais. La valeur est
-# donc identique sur toutes les machines et vit quelques minutes — la changer
-# reste possible, mais ce n'est pas elle qui protège la machine déployée.
-WINDOWS_TEMPLATE_ADMIN_PASSWORD = os.environ.get(
-    "WINDOWS_TEMPLATE_ADMIN_PASSWORD", "OsirisAdmin2026!")
+
+def _mot_de_passe_installation() -> str:
+    """Mot de passe aléatoire du compte d'installation `osiris-admin`.
+
+    Il y avait UNE valeur pour toutes les machines, avec un défaut écrit dans ce
+    fichier — donc publié avec le dépôt — et servie sans authentification. Elle
+    était censée ne vivre que quelques minutes, jusqu'à ce que LAPS prenne le
+    relais ; mais quand LAPS échoue, `osiris-admin` est gardé exprès pour ne pas
+    enfermer dehors, et il restait avec ce mot de passe connu de tous. Un gabarit
+    scellé, lui, le porte pendant des mois.
+
+    Complexité Windows : au moins trois classes de caractères, sinon l'OOBE
+    refuse le compte. On en garantit quatre.
+    """
+    alphabet = string.ascii_letters + string.digits
+    corps = "".join(secrets.choice(alphabet) for _ in range(20))
+    return corps + secrets.choice(string.ascii_uppercase) + secrets.choice(string.ascii_lowercase) \
+        + secrets.choice(string.digits) + secrets.choice("!#%+-=")
+
+
+def _mot_de_passe_installation_machine(session: Session, machine: Machine) -> str:
+    """Celui d'UNE machine, conservé chiffré à la place du mot de passe LAPS.
+
+    Le même pour toute l'installation (WinPE peut relire le fichier de réponses)
+    et lisible par un admin dans OSIRIS : si LAPS échoue, c'est le seul mot de
+    passe administrateur local de la machine. LAPS le remplace ensuite.
+    """
+    if machine.laps_password:
+        return decrypt(machine.laps_password)
+    mdp = _mot_de_passe_installation()
+    machine.laps_password = encrypt(mdp)
+    session.add(machine)
+    session.commit()
+    session.refresh(machine)   # l'appelant relit la fiche une fois la session fermée
+    return mdp
 
 # Mapping IANA → noms Windows (subset courant MSP France)
 _LINUX_TO_WIN_TZ: dict[str, str] = {
@@ -193,9 +222,24 @@ class ConnectionManager:
     def __init__(self):
         self.active: list[WebSocket] = []
 
-    async def connect(self, ws: WebSocket):
+    async def connect(self, ws: WebSocket) -> bool:
+        """N'abonne la connexion qu'une fois son jeton vérifié.
+
+        Le flux diffuse les MAC et les journaux de déploiement : il était ouvert à
+        quiconque atteignait OSIRIS, et une MAC suffit à réclamer les scripts d'une
+        machine en cours d'installation. Un navigateur ne sait pas poser d'en-tête
+        sur un WebSocket, et un jeton dans l'URL finirait dans les journaux
+        d'accès : il arrive donc en PREMIER MESSAGE, dans les cinq secondes.
+        """
         await ws.accept()
+        try:
+            jeton = (await asyncio.wait_for(ws.receive_text(), timeout=5)).strip()
+            get_current_user(jeton)
+        except Exception:
+            await ws.close(code=4401)
+            return False
         self.active.append(ws)
+        return True
 
     def disconnect(self, ws: WebSocket):
         if ws in self.active:
@@ -238,6 +282,28 @@ def _bash_squote(s: str) -> str:
 jinja_env.filters["bash_squote"] = _bash_squote
 
 
+def _cmd_texte(s: str) -> str:
+    """Texte libre inséré dans un script batch (WinPE) : on retire ce que cmd.exe
+    interprète. `&`, `|`, `<`, `>` y enchaînent ou redirigent des commandes, `%`
+    et `!` développent des variables, `^` échappe, les parenthèses ferment un bloc.
+    Un libellé de client n'a besoin d'aucun d'eux."""
+    return re.sub(r'[&|<>^%!"()\r\n]', "", str(s or ""))
+
+
+jinja_env.filters["cmd_texte"] = _cmd_texte
+
+
+def valider_texte_libre(valeur: str, champ: str) -> str:
+    """Refuse les caractères de contrôle dans un champ libre (client, OU).
+
+    Ces champs finissent dans des scripts : un retour à la ligne suffit à sortir
+    d'une chaîne PowerShell `@' … '@` et à écrire la ligne suivante soi-même."""
+    valeur = (valeur or "").strip()
+    if re.search(r"[\x00-\x1f\x7f]", valeur):
+        raise HTTPException(status_code=400, detail=f"{champ} : caractères de contrôle interdits (retour à la ligne, tabulation…).")
+    return valeur
+
+
 # ── Validation MAC ─────────────────────────────────────────────────────────────
 
 MAC_REGEX = re.compile(r'^[0-9a-f]{12}$')
@@ -274,6 +340,38 @@ def _validate_mac_prefix(raw: str) -> str:
 
 # Les 3 derniers chiffres du hostname portent le numéro de poste.
 HOSTNAME_SEQ_REGEX = re.compile(r"(\d{3})$")
+
+
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def valider_hostname(nom: str, os_: str = "") -> str:
+    """Un nom de machine utilisable — et inoffensif.
+
+    Le nom est écrit tel quel dans les scripts de premier démarrage, qui tournent
+    en root (ou SYSTEM). Sans contrôle, `srv$(commande)` faisait exécuter la
+    commande sur la machine déployée : n'importe quel compte capable de créer une
+    fiche — technicien, clé d'API, import CSV — obtenait ainsi un accès root.
+
+    La règle est celle du DNS (RFC 1123), qui est aussi ce que Windows et Linux
+    acceptent : lettres, chiffres, tirets, sans tiret aux bords. Windows limite
+    en plus le nom NetBIOS à 15 caractères — au-delà, il le tronque en silence,
+    et la jonction AD enregistre un autre nom que celui de la fiche.
+    """
+    nom = (nom or "").strip()
+    apercu = nom[:40]
+    if not _HOSTNAME_RE.match(nom):
+        raise HTTPException(status_code=400, detail=(
+            f"Nom de machine « {apercu} » invalide : lettres, chiffres et tirets uniquement, "
+            f"sans tiret au début ni à la fin, 63 caractères au plus."))
+    if nom.isdigit():
+        raise HTTPException(status_code=400, detail=(
+            f"Nom de machine « {apercu} » invalide : il ne peut pas être uniquement numérique."))
+    if os_ == "windows" and len(nom) > 15:
+        raise HTTPException(status_code=400, detail=(
+            f"Nom de machine « {apercu} » trop long pour Windows : 15 caractères au plus "
+            f"(il en a {len(nom)})."))
+    return nom
 
 
 def mac_from_hostname(hostname: str, mac_prefix: str) -> str:
@@ -1769,8 +1867,10 @@ def get_unattend_xml(mac: str):
                 content="<?xml version='1.0' encoding='utf-8'?><error>Machine inconnue</error>",
                 media_type="application/xml", status_code=404,
             )
+        _exiger_fenetre_de_deploiement(session, machine)
         profile = _resolve_profile(session, machine)
         profile_ctx = _profile_for_template(profile, session)
+        admin_password = _mot_de_passe_installation_machine(session, machine)
 
     content = jinja_env.get_template("unattend.xml.j2").render(
         hostname=escape(machine.hostname),
@@ -1778,7 +1878,7 @@ def get_unattend_xml(mac: str):
         ou=escape(machine.ou or ""),
         profile=profile_ctx,
         win_timezone=escape(_win_timezone(profile_ctx["timezone"])),
-        admin_password=WINDOWS_TEMPLATE_ADMIN_PASSWORD,
+        admin_password=admin_password,
     )
     return Response(content=content, media_type="application/xml")
 
@@ -1805,8 +1905,10 @@ def get_user_data(mac: str):
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine or not machine.password_hash:
             raise HTTPException(status_code=404, detail="Machine inconnue ou non configurée")
+        _exiger_fenetre_de_deploiement(session, machine)
         profile = _resolve_profile(session, machine)
 
+    valider_hostname(machine.hostname)
     packages = [p.strip() for p in profile.extra_packages.split(",") if p.strip()]
     content = jinja_env.get_template("user-data.j2").render(
         machine=machine,
@@ -1847,6 +1949,7 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
     provisoire à cet instant. Passer par une recherche en base rendrait donc le
     rendu impossible précisément là où on en a besoin.
     """
+    valider_hostname(hostname)   # jamais un nom non contrôlé dans un script root
     tv_suffix = profile_ctx.get("tv_suffix", "")
     return jinja_env.get_template("firstboot-ubuntu.sh.j2").render(
         machine={"hostname": hostname, "mac": mac, "ou": ou,
@@ -1874,6 +1977,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
             raise HTTPException(status_code=404, detail="Machine inconnue")
+        _exiger_fenetre_de_deploiement(session, machine)
         profile = _resolve_profile(session, machine)
         app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
         linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
@@ -2112,7 +2216,9 @@ def get_windows_sysprep_unattend(locale: str = "fr-FR",
     content = jinja_env.get_template("unattend-sysprep.xml.j2").render(
         locale=locale.replace("_", "-")[:5],
         win_timezone=timezone,
-        admin_password=WINDOWS_TEMPLATE_ADMIN_PASSWORD,
+        # Propre à CE gabarit, jamais conservé : chaque clone le remplace par son
+        # mot de passe LAPS au premier démarrage.
+        admin_password=_mot_de_passe_installation(),
         product_key=valider_cle_produit(product_key),
     )
     return Response(content=content, media_type="application/xml")
@@ -2141,7 +2247,9 @@ def get_preseed(mac: str):
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine or not machine.password_hash:
             raise HTTPException(status_code=404, detail="Machine inconnue ou non configurée")
+        _exiger_fenetre_de_deploiement(session, machine)
         profile = _resolve_profile(session, machine)
+    valider_hostname(machine.hostname)
     packages = [p.strip() for p in (profile.extra_packages or "").split(",") if p.strip()]
     content = jinja_env.get_template("preseed.cfg.j2").render(
         machine=machine,
@@ -2168,6 +2276,7 @@ def get_windows_firstboot(mac: str):
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
             raise HTTPException(status_code=404, detail="Machine inconnue")
+        _exiger_fenetre_de_deploiement(session, machine)
         profile = _resolve_profile(session, machine)
         app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
         # Apps Windows : winget OU installeur custom (MSI/EXE heberge, ex: WithSecure)
@@ -2182,6 +2291,7 @@ def get_windows_firstboot(mac: str):
         forced_mac = mac_from_hostname(machine.hostname, org.mac_prefix) if org else ""
     profile_ctx = _profile_for_template(profile, session)
     tv_suffix = profile_ctx.get("tv_suffix", "")
+    valider_hostname(machine.hostname)
     tv_password = f"{machine.hostname.upper()}{tv_suffix}" if tv_suffix else ""
     content = jinja_env.get_template("firstboot-windows.ps1.j2").render(
         machine=machine,
@@ -2202,6 +2312,9 @@ def get_windows_firstboot(mac: str):
 def create_machine(machine: Machine, current_user: User = Depends(get_current_user)):
     clean_mac = validate_mac(machine.mac)
     machine.mac = clean_mac
+    machine.hostname = valider_hostname(machine.hostname, machine.os)
+    machine.client = valider_texte_libre(machine.client, "Client")
+    machine.ou = valider_texte_libre(machine.ou or "", "OU")
     # MAC de l'adaptateur : facultative. Une chaîne vide vaut "pas de dongle" (None),
     # sinon on normalise comme la MAC du PC.
     raw_deploy_mac = (machine.deploy_mac or "").strip()
@@ -2258,8 +2371,8 @@ def webhook_new_machine(data: WebhookNewMachine, current_user: User = Depends(ge
                     "client": existing.client, "os": existing.os, "status": existing.status}
         machine = Machine(
             mac=clean_mac,
-            hostname=data.hostname or clean_mac,
-            client=data.client,
+            hostname=valider_hostname(data.hostname or clean_mac, data.os),
+            client=valider_texte_libre(data.client, "Client"),
             os=data.os,
             status="pending",
             organization_id=data.organization_id,
@@ -2331,6 +2444,16 @@ def update_machine(mac: str, patch: MachinePatch, current_user: User = Depends(g
         for field in [f for f, v in changes.items() if v is None]:
             if field not in _MACHINE_NULLABLE_FIELDS:
                 changes.pop(field)
+        # Le couple final (nom, OS) : passer une machine en Windows peut rendre
+        # trop long un nom qui était valide sous Linux.
+        for champ, libelle in (("client", "Client"), ("ou", "OU")):
+            if isinstance(changes.get(champ), str):
+                changes[champ] = valider_texte_libre(changes[champ], libelle)
+        if "hostname" in changes or "os" in changes:
+            nom = valider_hostname(changes.get("hostname", machine.hostname),
+                                   changes.get("os", machine.os))
+            if "hostname" in changes:
+                changes["hostname"] = nom
         # `deploy_mac` accepte en plus la chaîne vide comme demande de libération
         # (libérer le dongle à la main, sans attendre la fin d'un déploiement).
         audit_extra = {}
@@ -2548,6 +2671,13 @@ def post_bitlocker_key(mac: str, data: dict):
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
+        # Cette route est anonyme : hors déploiement, écraser la clé conservée
+        # suffirait à rendre un disque irrécupérable le jour où on en aurait besoin.
+        # Une PREMIÈRE clé reste acceptée à tout moment (chiffrement activé plus tard).
+        if (machine.bitlocker_key or machine.bitlocker_pin) and not _fenetre_ouverte(session, machine):
+            raise HTTPException(status_code=409, detail=(
+                "Une clé BitLocker est déjà conservée pour cette machine : elle ne "
+                "se remplace que pendant un déploiement."))
         if key:
             machine.bitlocker_key = encrypt(key)
         if pin:
@@ -2585,11 +2715,36 @@ def post_laps_password(mac: str, data: dict):
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
+        # Anonyme lui aussi : hors déploiement et hors échéance de rotation,
+        # écraser le mot de passe conservé priverait les admins du seul accès
+        # administrateur local connu.
+        if machine.laps_password and not _fenetre_ouverte(session, machine) \
+                and not _rotation_laps_due(session, machine)[0]:
+            raise HTTPException(status_code=409, detail=(
+                "Rotation non due : le mot de passe conservé ne se remplace que "
+                "pendant un déploiement ou à l'échéance de rotation."))
         machine.laps_password = encrypt(password)
         machine.laps_rotated_at = datetime.now(timezone.utc)
         session.add(machine)
         session.commit()
     return {"detail": "ok"}
+
+
+def _rotation_laps_due(session: Session, machine: Machine) -> tuple[bool, Optional[datetime]]:
+    """La rotation LAPS est-elle due ? (due, échéance). Partagé par la route qui le
+    dit au script de rotation et par celle qui accepte le nouveau mot de passe."""
+    if not machine.profile_id:
+        return False, None
+    profile = session.get(Profile, machine.profile_id)
+    if not profile or profile.laps_rotation_days == 0:
+        return False, None
+    # Partir de la date de derniere rotation, ou du deploiement, ou de l'epoque
+    last = machine.laps_rotated_at or machine.deployed_at
+    if not last:
+        return True, None
+    last_utc = last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last
+    due_at = last_utc + timedelta(days=profile.laps_rotation_days)
+    return datetime.now(timezone.utc) >= due_at, due_at
 
 
 @app.get("/machines/{mac}/laps-due")
@@ -2603,18 +2758,10 @@ def laps_due(mac: str):
     clean_mac = validate_mac(mac)
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
-        if not machine or not machine.profile_id:
+        if not machine:
             return {"due": False}
-        profile = session.get(Profile, machine.profile_id)
-        if not profile or profile.laps_rotation_days == 0:
-            return {"due": False}
-        # Partir de la date de derniere rotation, ou du deploiement, ou de l'epoque
-        last = machine.laps_rotated_at or machine.deployed_at
-        if not last:
-            return {"due": True}
-        last_utc = last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last
-        due_at = last_utc + timedelta(days=profile.laps_rotation_days)
-        return {"due": datetime.now(timezone.utc) >= due_at, "due_at": due_at.isoformat()}
+        due, due_at = _rotation_laps_due(session, machine)
+        return {"due": due, **({"due_at": due_at.isoformat()} if due_at else {})}
 
 
 @app.get("/machines/{mac}/laps-password")
@@ -2658,7 +2805,9 @@ def post_smoke_tests(mac: str, data: dict):
         try:
             loop = asyncio.new_event_loop()
             loop.run_until_complete(
-                manager.broadcast(clean_mac, {"type": "smoke", "status": overall, "tests": tests})
+                # Appel à deux arguments jusqu'au 18/09 : TypeError avalé par le
+                # `except` ci-dessous, les résultats n'arrivaient jamais en direct.
+                manager.broadcast({"mac": clean_mac, "type": "smoke", "smoke_status": overall, "tests": tests})
             )
             loop.close()
         except Exception:
@@ -2922,6 +3071,14 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
         # juste avant le reboot PUIS par le firstboot apres l'OOBE). On ne journalise
         # l'evenement et n'envoie le webhook que sur un VRAI changement de statut,
         # pour eviter les doublons dans "Deploiements recents" / les notifications.
+        # Anonyme = la machine elle-même : elle ne parle que PENDANT son
+        # déploiement. Sans ce verrou, poster « deploying » ou « failed » sur une
+        # machine déployée rouvrait la fenêtre où ses scripts — et leurs
+        # identifiants — redeviennent servis.
+        if operateur is None and not _fenetre_ouverte(session, machine):
+            raise HTTPException(status_code=409, detail=(
+                "Cette machine n'est pas en cours de déploiement : son statut ne se "
+                "change plus que depuis OSIRIS."))
         status_changed = (machine.status != status)
         machine.status = status
         if status == "deployed":
@@ -3040,7 +3197,55 @@ def _open_new_deploy_run(machine: Machine) -> None:
     """
     machine.status = "pending"
     machine.deploy_log_run += 1
+    # Les résultats de l'installation précédente ne décrivent pas celle-ci — et
+    # leur absence marque la fenêtre où le premier démarrage peut encore venir
+    # chercher son script (cf. _exiger_fenetre_de_deploiement).
+    machine.smoke_status = ""
     _deploy_progress.pop(machine.mac, None)
+
+
+FENETRE_APRES_INSTALLATION = timedelta(hours=24)
+FENETRE_APRES_ECHEC = timedelta(days=7)
+
+
+def _fenetre_ouverte(session: Session, machine: Machine) -> bool:
+    try:
+        _exiger_fenetre_de_deploiement(session, machine)
+        return True
+    except HTTPException:
+        return False
+
+
+def _exiger_fenetre_de_deploiement(session: Session, machine: Machine) -> None:
+    """Refuse de servir un script de déploiement hors du déploiement lui-même.
+
+    Ces scripts portent en clair le compte de jonction au domaine, le mot de
+    passe BIOS, le Wi-Fi… et sont servis sans authentification, à qui connaît une
+    MAC — qui n'a rien de secret : elle circule sur le réseau local et figure sur
+    l'étiquette du poste. Ils restaient servis À VIE : le 18/09, le script d'un PC
+    déployé le 07/07 sortait encore, identifiants compris.
+
+    Ouverte tant que la fiche attend ou se déploie ; après un échec, le temps de
+    relancer à la main ; et juste après une installation PXE, dont l'installeur
+    se déclare « deployed » AVANT que le premier démarrage ne vienne chercher son
+    script — la vraie fin, ce sont les résultats des smoke tests, postés en
+    dernier. Au-delà, un redéploiement rouvre la fenêtre.
+    """
+    maintenant = datetime.now(timezone.utc)
+    utc = lambda d: d if d is None or d.tzinfo else d.replace(tzinfo=timezone.utc)
+    if machine.status in ("pending", "deploying"):
+        return
+    if machine.status == "failed":
+        derniere = session.exec(select(func.max(DeploymentEvent.timestamp))
+                                .where(DeploymentEvent.mac == machine.mac)).one()
+        if derniere and maintenant - utc(derniere) < FENETRE_APRES_ECHEC:
+            return
+    if (machine.status == "deployed" and not machine.smoke_status and machine.deployed_at
+            and maintenant - utc(machine.deployed_at) < FENETRE_APRES_INSTALLATION):
+        return
+    raise HTTPException(status_code=410, detail=(
+        "Déploiement terminé : ce script n'est plus servi. Redéployer la machine "
+        "depuis OSIRIS pour le rejouer."))
 
 
 def _stamp(msg: str) -> str:
@@ -3287,6 +3492,7 @@ def _build_winpe_script(mac: str) -> Response:
     driver_dir = _resolve_driver_dir(machine)
 
     profile_ctx = _profile_for_template(profile, session)
+    valider_hostname(machine.hostname)
     locale = profile_ctx["locale"].replace("_", "-")[:5]
     content = jinja_env.get_template("winpe-deploy.cmd.j2").render(
         machine=machine,
@@ -3492,6 +3698,12 @@ async def import_machines(request: Request, current_user: User = Depends(require
                     continue
                 if os_name not in ("ubuntu", "windows", "debian"):
                     os_name = "ubuntu"
+                try:
+                    hostname = valider_hostname(hostname, os_name)
+                    client = valider_texte_libre(client, "Client")
+                except HTTPException as e:
+                    errors.append(f"Ligne {i} : {e.detail}")
+                    continue
                 profile = profiles.get(profile_name.lower()) if profile_name else None
                 machine = Machine(
                     mac=clean_mac, hostname=hostname, client=client, os=os_name,
@@ -5149,6 +5361,9 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
 
     # Avant le moindre appel à l'hyperviseur : un adressage mal formé ne doit pas
     # coûter un clone puis une destruction.
+    body.hostname = valider_hostname(body.hostname, body.os)
+    body.client = valider_texte_libre(body.client, "Client")
+    body.ou = valider_texte_libre(body.ou, "OU")
     _valider_adressage(body)
     _refuser_vm_sans_acces(body)
 
@@ -5714,7 +5929,8 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
 
 @app.websocket("/ws/machines")
 async def ws_machines(websocket: WebSocket):
-    await manager.connect(websocket)
+    if not await manager.connect(websocket):
+        return
     try:
         while True:
             await websocket.receive_text()  # maintient la connexion ouverte
