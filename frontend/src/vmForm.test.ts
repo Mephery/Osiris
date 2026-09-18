@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -213,5 +213,72 @@ describe('avecProfil', () => {
 
   it("sans profil, vide la sélection plutôt que d'en garder une d'un autre OS", () => {
     expect(avecProfil({ ...form, profile_id: '13' }, undefined).profile_id).toBe('')
+  })
+})
+
+describe('modeParDefaut', () => {
+  it('clone le gabarit sur vSphere, Linux comme Windows', () => {
+    expect(modeParDefaut('vsphere', 'ubuntu')).toBe('template')
+    expect(modeParDefaut('vsphere', 'windows')).toBe('template')
+  })
+
+  it("passe par cloud-init pour Linux sur Proxmox : c'est le seul canal qui y porte une adresse", () => {
+    expect(modeParDefaut('proxmox', 'debian')).toBe('cloudinit')
+  })
+
+  it('garde WinPE pour Windows sur Proxmox, et ne propose jamais cloud-init à Windows', () => {
+    expect(modeParDefaut('proxmox', 'windows')).toBe('pxe')
+    for (const hv of ['proxmox', 'vsphere', undefined]) expect(modeParDefaut(hv, 'windows')).not.toBe('cloudinit')
+  })
+})
+
+describe('champsManquants', () => {
+  const complet = { hostname: 'srv', client: 'Acme', boot_mode: 'template', template_id: '9003', storage: 'ds1', bridge: 'vlan' }
+
+  it('ne réclame rien quand tout est rempli', () => {
+    expect(champsManquants(complet, true, 'Clus01')).toEqual([])
+  })
+
+  it("nomme ce qui manque, dans l'ordre de l'écran", () => {
+    expect(champsManquants({ ...complet, bridge: '', storage: '' }, true, 'Clus01')).toEqual(['stockage', 'réseau'])
+  })
+
+  it("ne réclame pas de nœud tant qu'aucun hyperviseur n'est choisi", () => {
+    expect(champsManquants(complet, false, '')).toEqual(['hyperviseur'])
+  })
+
+  it("ne réclame pas de gabarit en PXE, qui n'en clone aucun", () => {
+    expect(champsManquants({ ...complet, boot_mode: 'pxe', template_id: '' }, true, 'n')).toEqual([])
+  })
+})
+
+describe('gabaritsPourMode', () => {
+  const modeles = [
+    { vmid: 1, osiris: { os: 'linux' } },
+    { vmid: 2, osiris: null },                 // modèle d'un collègue, sans agent
+    { vmid: 3, osiris: { os: 'windows' } },
+    { vmid: 4, osiris: { os: '' } },           // marqué à la main, système inconnu
+    { vmid: 5 },                               // réponse d'un ancien serveur
+  ]
+
+  it("en clone nu, ne propose que les gabarits OSIRIS du bon système — le reste est grisé", () => {
+    const g = gabaritsPourMode(modeles, 'template', 'debian')
+    expect(g.proposes.map(m => m.vmid)).toEqual([1, 4])
+    expect(g.autres.map(m => m.vmid)).toEqual([2, 3, 5])
+    expect(g.autresChoisissables).toBe(false)
+  })
+
+  it("un gabarit marqué à la main se trie sur le système déclaré à l'hyperviseur", () => {
+    // Vu le 18/09 : un gabarit Windows marqué à la main se proposait sous Debian
+    const marques = [{ vmid: 7, famille: 'windows', osiris: { os: '' } }, { vmid: 8, famille: 'linux', osiris: { os: '' } }]
+    expect(gabaritsPourMode(marques, 'template', 'debian').proposes.map(m => m.vmid)).toEqual([8])
+  })
+
+  it('un gabarit Windows ne se propose pas sous un profil Linux, et inversement', () => {
+    expect(gabaritsPourMode(modeles, 'template', 'windows').proposes.map(m => m.vmid)).toEqual([3, 4])
+  })
+
+  it("en cloud-init, qui n'a pas besoin de l'agent, tout reste choisissable", () => {
+    expect(gabaritsPourMode(modeles, 'cloudinit', 'ubuntu').autresChoisissables).toBe(true)
   })
 })

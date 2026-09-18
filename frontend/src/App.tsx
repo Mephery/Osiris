@@ -25,6 +25,7 @@ import { ProfilesSection } from './ProfilesSection'
 import { SkeletonRows } from './Skeleton'
 import { MachineDetailPanel } from './MachineDetailPanel'
 import { ResumeProfil } from './ResumeProfil'
+import { CreationVm } from './CreationVm'
 import { profilParDefaut } from './vmForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
@@ -87,6 +88,7 @@ export default function App() {
 
   // Modale formulaire (création ET édition)
   const [isModalOpen, setIsModalOpen]   = useState(false)
+  const [showVmCreate, setShowVmCreate] = useState(false)
   const [editingMac, setEditingMac]     = useState<string | null>(null)
   const [formData, setFormData]         = useState<Machine>(EMPTY_FORM)
   // Fiche telle qu'elle était à l'ouverture de la modale (cf. openEdit).
@@ -453,8 +455,8 @@ export default function App() {
     fetchAll(auth.token, selectedOrg)
     fetchOrgs(auth.token)
     fetchProfiles(auth.token)
-    if (auth.role === 'admin') { fetchUsers(auth.token); fetchImages(auth.token); fetchApps(auth.token); fetchDriverPacks(auth.token) }
-  }, [auth, selectedOrg, fetchAll, fetchOrgs, fetchProfiles, fetchUsers, fetchImages, fetchApps, fetchDriverPacks])
+    if (auth.role === 'admin') { fetchUsers(auth.token); fetchImages(auth.token); fetchApps(auth.token); fetchDriverPacks(auth.token); fetchHypervisors(auth.token) }
+  }, [auth, selectedOrg, fetchAll, fetchOrgs, fetchProfiles, fetchUsers, fetchImages, fetchApps, fetchDriverPacks, fetchHypervisors])
 
   useEffect(() => {
     if (!auth) return
@@ -1194,11 +1196,7 @@ export default function App() {
           <InfrastructureTab
             token={auth.token}
             hypervisors={hypervisors}
-            profiles={profiles}
-            organizations={orgs}
-            selectedOrg={selectedOrg}
             onRefreshHypervisors={() => fetchHypervisors(auth.token)}
-            onVmCreated={() => fetchAll(auth.token, selectedOrg)}
           />
         )}
 
@@ -1410,6 +1408,12 @@ export default function App() {
               <input ref={csvFileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={handleCsvImport} disabled={csvImporting} />
               <a href={`${API_URL}/machines/export`} download="osiris-machines.csv" className="osiris-btn text-xs">Exporter CSV</a>
               <button onClick={openCreate} className="osiris-btn text-xs">+ Enregistrer un PC</button>
+              {/* Créer une VM est une action du quotidien, pas un réglage : elle vivait
+                  sous la liste des hyperviseurs, dans la page d'infrastructure, où
+                  personne ne la cherche. Réservée aux admins, comme côté serveur. */}
+              {auth.role === 'admin' && hypervisors.length > 0 && (
+                <button onClick={() => setShowVmCreate(true)} className="osiris-btn text-xs">+ Créer une VM</button>
+              )}
             </div>
           </div>
           {!loading && !error && machines.length > 0 && (
@@ -1690,6 +1694,24 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
         </div>
       )}
 
+
+      {/* ── Modale : création de VM ──────────────────────────────────────── */}
+      {/* Pas de fermeture au clic à côté : le formulaire est long, un clic égaré
+          ne doit pas coûter toute la saisie. On ferme par la croix ou Annuler. */}
+      {showVmCreate && auth && (
+        <div className="osiris-overlay">
+          <div className="osiris-modal" style={{ maxWidth: '760px' }}>
+            <div className="osiris-modal-header">
+              <h2 className="text-xs font-bold uppercase tracking-widest text-white">Nouvelle VM</h2>
+              <button onClick={() => setShowVmCreate(false)} className="text-slate-600 hover:text-slate-300 cursor-pointer transition-colors p-1"><IcoX cls="w-4 h-4" /></button>
+            </div>
+            <CreationVm token={auth.token} hypervisors={hypervisors} profiles={profiles}
+              organizations={orgs} selectedOrg={selectedOrg}
+              onVmCreated={() => fetchAll(auth.token, selectedOrg)}
+              onClose={() => setShowVmCreate(false)} />
+          </div>
+        </div>
+      )}
 
       {/* ── Modale : enregistrement / édition ─────────────────────────────── */}
       {isModalOpen && (

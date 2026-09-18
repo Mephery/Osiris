@@ -246,6 +246,21 @@ export interface ProxmoxTemplate {
   status: string;
   cores: number;
   maxmem_gb: number;
+  /** UUID SMBIOS : l'identité qui relie le modèle à son scellement. */
+  uuid?: string;
+  /** « windows » | « linux », d'après le type d'invité déclaré à l'hyperviseur ; « » = inconnu. */
+  famille?: string;
+  /** Ce qu'OSIRIS sait de ce modèle. `null` = il ne porte pas l'agent (ou n'a
+   *  jamais été annoncé) ; un clone NU n'en rappellerait jamais. */
+  osiris?: GabaritOsiris | null;
+}
+
+export interface GabaritOsiris {
+  /** a_jour : scellé avec l'agent actuel · perime : avec un autre ·
+   *  inconnu : marqué à la main, sans empreinte. */
+  etat: 'a_jour' | 'perime' | 'inconnu';
+  os: string;
+  scelle_le: string | null;
 }
 
 export interface ProxmoxNode {

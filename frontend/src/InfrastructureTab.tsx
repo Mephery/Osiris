@@ -2,27 +2,21 @@
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { useState } from 'react'
 import { toast } from 'sonner'
-import type { ClusterStorage, Hypervisor, NetworkDefaults, Organization, Profile, ProxmoxNetwork, ProxmoxNode, ProxmoxTemplate } from './types'
+import type { ClusterStorage, Hypervisor, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { IcoX } from './icons'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree,
-         adressageFixeImpossible, avecProfil, profilsPourVm } from './vmForm'
-import { ResumeProfil } from './ResumeProfil'
+import { Spinner } from './Skeleton'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
 interface InfrastructureTabProps {
   token: string
   hypervisors: Hypervisor[]
-  profiles: Profile[]
-  organizations: Organization[]
-  selectedOrg: number | null
   onRefreshHypervisors: () => void
-  onVmCreated: () => void
 }
 
 
-export function InfrastructureTab({ token, hypervisors, profiles, organizations, selectedOrg, onRefreshHypervisors, onVmCreated }: InfrastructureTabProps) {
+export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: InfrastructureTabProps) {
   const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '' })
   const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; storages?: ClusterStorage[]; error?: string } | null>>({})
   // Fiche en cours d'édition. Il n'existait AUCUN moyen de modifier un hyperviseur
@@ -32,19 +26,9 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
   const [editHvId, setEditHvId] = useState<number | null>(null)
   const [editHv, setEditHv] = useState<Partial<Hypervisor> & { token_secret?: string; ca_cert?: string }>({})
   const [hvTesting, setHvTesting]       = useState<Record<number, boolean>>({})
-  const [showVmForm, setShowVmForm]     = useState(false)
-  const [vmHvId, setVmHvId]             = useState<number | ''>('')
-  const [vmNode, setVmNode]             = useState('')
-  const [vmStorages, setVmStorages]     = useState<{storage:string;type:string;avail_gb:number;total_gb:number}[]>([])
-  const [vmNetworks, setVmNetworks]     = useState<ProxmoxNetwork[]>([])
-  // Dossiers vSphere. Liste vide sur Proxmox, qui n'en a pas : le champ
-  // disparaît alors du formulaire au lieu d'y proposer un choix inexistant.
-  const [vmFolders, setVmFolders]       = useState<{ path: string }[]>([])
-  const [vmNetDef, setVmNetDef]         = useState<NetworkDefaults | null>(null)
-  const [vmNodes, setVmNodes]           = useState<ProxmoxNode[]>([])
-  const [vmForm, setVmForm]             = useState({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '', post_script: '' })
-  const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
-  const [vmCreating, setVmCreating]     = useState(false)
+  // Modèles de chaque hyperviseur, affichés à la demande : leur liste coûte un
+  // appel à l'hyperviseur (et une lecture de config par modèle sur Proxmox).
+  const [gabarits, setGabarits]         = useState<Record<number, ProxmoxTemplate[] | 'chargement' | undefined>>({})
 
   const handleCreateHv = (e: React.FormEvent) => {
     e.preventDefault()
@@ -89,6 +73,26 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
       .then(r => { if (r.ok) { onRefreshHypervisors(); toast.success('Hyperviseur supprimé') } })
   }
 
+  const chargerGabarits = (id: number) => {
+    setGabarits(g => ({ ...g, [id]: 'chargement' }))
+    fetch(`${API_URL}/hypervisors/${id}/templates`, { headers: authHeader(token) })
+      .then(r => r.ok ? r.json() : [])
+      .then((t: ProxmoxTemplate[]) => setGabarits(g => ({ ...g, [id]: Array.isArray(t) ? t : [] })))
+      .catch(() => setGabarits(g => ({ ...g, [id]: [] })))
+  }
+
+  // Pour les gabarits scellés avant que le scellement ne s'annonce lui-même :
+  // sans marque, le formulaire les griserait alors qu'ils fonctionnent.
+  const basculerMarque = (hvId: number, t: ProxmoxTemplate) => {
+    fetch(`${API_URL}/hypervisors/${hvId}/templates/${t.vmid}/osiris`, {
+      method: t.osiris ? 'DELETE' : 'POST', headers: authHeader(token),
+    }).then(async r => {
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail ?? 'Erreur') }
+      toast.success(t.osiris ? `${t.name} n'est plus un gabarit OSIRIS` : `${t.name} marqué comme gabarit OSIRIS`)
+      chargerGabarits(hvId)
+    }).catch(err => toast.error(err.message))
+  }
+
   const handleTestHv = (id: number) => {
     setHvTesting(prev => ({ ...prev, [id]: true }))
     setHvTestResult(prev => ({ ...prev, [id]: null }))
@@ -101,124 +105,6 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
       .catch(() => setHvTestResult(prev => ({ ...prev, [id]: { ok: false, error: 'Impossible de joindre OSIRIS' } })))
       .finally(() => setHvTesting(prev => ({ ...prev, [id]: false })))
   }
-
-  const loadVmResources = (hvId: number, node: string) => {
-    setVmStorages([]); setVmNetworks([]); setVmNetDef(null)
-    const h = authHeader(token)
-    fetch(`${API_URL}/hypervisors/${hvId}/nodes/${node}/storages`, { headers: h })
-      .then(r => r.json()).then(setVmStorages).catch(() => {})
-    fetch(`${API_URL}/hypervisors/${hvId}/nodes/${node}/networks`, { headers: h })
-      .then(r => r.json()).then(setVmNetworks).catch(() => {})
-  }
-
-  const handleVmHvChange = (hvId: number) => {
-    setVmHvId(hvId); setVmNode(''); setVmStorages([]); setVmNetworks([]); setVmNodes([]); setVmNetDef(null)
-    setVmFolders([])
-    setVmForm(f => ({ ...f, storage: '', bridge: '', folder: '', template_id: '' }))
-    fetch(`${API_URL}/hypervisors/${hvId}/folders`, { headers: authHeader(token) })
-      .then(r => r.json()).then(setVmFolders).catch(() => {})
-    // Les templates sont ceux de TOUT l'hyperviseur, indépendamment du nœud : sur un
-    // stockage partagé, le disque d'un template est lisible par tous les nœuds, et
-    // OSIRIS sait cloner vers celui qu'on choisit. Les lier au nœud enfermait le
-    // formulaire — un template posé sur un nœud condamnait ses VM à ce nœud.
-    fetch(`${API_URL}/hypervisors/${hvId}/templates`, { headers: authHeader(token) })
-      .then(r => r.json()).then(setVmTemplates).catch(() => {})
-    fetch(`${API_URL}/hypervisors/${hvId}/nodes`, { headers: authHeader(token) })
-      .then(r => r.json()).then((nodes: ProxmoxNode[]) => {
-        setVmNodes(nodes)
-        if (nodes.length === 1) {
-          setVmNode(nodes[0].node)
-          loadVmResources(hvId, nodes[0].node)
-        }
-      }).catch(() => {})
-  }
-
-  const handleVmNodeChange = (node: string) => {
-    setVmNode(node)
-    setVmStorages([]); setVmNetworks([]); setVmNetDef(null)
-    setVmForm(f => ({ ...f, storage: '', bridge: '' }))
-    if (vmHvId) loadVmResources(Number(vmHvId), node)
-  }
-
-  // Choisir un réseau, c'est aussi choisir une passerelle et un DNS : ces deux
-  // valeurs appartiennent au réseau, pas à la machine. On ne remplit que les champs
-  // encore vides — une saisie de l'opérateur n'est jamais écrasée par une
-  // proposition, même mieux informée.
-  const handleVmBridgeChange = (bridge: string) => {
-    setVmForm(f => ({ ...f, bridge }))
-    setVmNetDef(null)
-    if (!vmHvId || !vmNode || !bridge) return
-    fetch(`${API_URL}/hypervisors/${vmHvId}/nodes/${vmNode}/network-defaults?bridge=${encodeURIComponent(bridge)}`,
-          { headers: authHeader(token) })
-      .then(r => r.ok ? r.json() : null)
-      .then((d: NetworkDefaults | null) => {
-        if (!d) return
-        setVmNetDef(d)
-        setVmForm(f => ({
-          ...f,
-          gateway:     f.gateway     || d.gateway,
-          dns_servers: f.dns_servers || d.dns_servers,
-        }))
-      })
-      .catch(() => {})
-  }
-
-  // L'adresse est saisie par l'opérateur — OSIRIS n'en propose jamais. Mais quand le
-  // préfixe du réseau est connu, l'oubli du « /24 » n'a pas à coûter un aller-retour
-  // avec le serveur : on complète ce qui manque, sans toucher au reste.
-  const completerPrefixe = () => {
-    if (!vmNetDef?.prefixe) return
-    setVmForm(f => ({ ...f, ip_cidr: completerPrefixeCidr(f.ip_cidr, vmNetDef.prefixe) }))
-  }
-
-  const handleCreateVm = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!vmHvId || !vmNode) return
-    setVmCreating(true)
-    fetch(`${API_URL}/hypervisors/${vmHvId}/create-vm`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeader(token) },
-      body: JSON.stringify(buildCreateVmPayload(vmForm, vmNode)),
-    }).then(async r => {
-      if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Erreur') }
-      return r.json()
-    }).then(data => {
-      // Une VM cloud-init démarre seule et rappelle OSIRIS : annoncer « en attente de
-      // boot PXE » laissait croire qu'il restait une action à faire.
-      toast.success(
-        vmForm.boot_mode === 'cloudinit'
-          ? `VM "${data.hostname}" créée (VMID ${data.vm_id}) - démarrage en cours`
-          : `VM "${data.hostname}" créée (VMID ${data.vm_id}) - en attente de boot PXE`
-      )
-      setShowVmForm(false)
-      setVmNetDef(null)
-      setVmForm({ organization_id: selectedOrg ?? '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'pxe', template_id: '', post_script: '' })
-      onVmCreated()
-    }).catch(err => toast.error(err.message))
-      .finally(() => setVmCreating(false))
-  }
-
-  // Recalculés à chaque frappe : ils ne bloquent rien, ils avertissent. Un VLAN peut
-  // légitimement porter plusieurs réseaux, et OSIRIS ne voit que ses propres fiches —
-  // dans les deux cas c'est l'opérateur qui tranche, pas nous.
-  const typeHv        = hypervisors.find(h => h.id === Number(vmHvId))?.type
-  const sansAdressage = adressageFixeImpossible(typeHv, vmForm.boot_mode)
-  const adresseSaisie = vmForm.ip_cidr.split('/')[0].trim()
-  const horsReseau    = !!(vmNetDef?.reseau && vmForm.ip_cidr
-                           && dansLeReseau(vmForm.ip_cidr, vmNetDef.reseau) === false)
-  const dejaPrise     = !!(adresseSaisie && vmNetDef?.occupees.includes(adresseSaisie))
-  const provenance    = vmNetDef
-    ? [...new Set(Object.values(vmNetDef.origines))]
-        .map(o => o === 'bridge' ? "lu sur l'hyperviseur" : 'repris des déploiements précédents')
-        .join(' · ')
-    : ''
-
-  const profilsVm = profilsPourVm(profiles, vmForm.os)
-  const profilEffectif = profiles.find(p => String(p.id) === String(vmForm.profile_id))
-  // Sans profil, le serveur retomberait sur le plus ancien de l'OS ; sans accès,
-  // il refuserait. Dans les deux cas, autant le dire ici, bouton grisé.
-  const vmSansProfil = !profilEffectif
-  const vmInaccessible = vmSansProfil || Boolean(profilEffectif?.resume?.alerte)
 
   return (
     <div className="osiris-table-wrap p-5 space-y-6 max-w-4xl">
@@ -253,7 +139,11 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                 <div className="flex gap-1.5 flex-shrink-0">
                   <button onClick={() => handleTestHv(h.id)} disabled={hvTesting[h.id]}
                     className="osiris-btn text-xs px-3 disabled:opacity-50">
-                    {hvTesting[h.id] ? '...' : 'Tester'}
+                    {hvTesting[h.id] ? <span className="flex items-center gap-1.5"><Spinner cls="w-3 h-3" label="Test en cours" /> Test…</span> : 'Tester'}
+                  </button>
+                  <button onClick={() => gabarits[h.id] ? setGabarits(g => ({ ...g, [h.id]: undefined })) : chargerGabarits(h.id)}
+                    className="osiris-btn text-xs px-3">
+                    {gabarits[h.id] ? 'Masquer les gabarits' : 'Gabarits'}
                   </button>
                   <button onClick={() => editHvId === h.id ? setEditHvId(null) : startEditHv(h)}
                     className="osiris-btn text-xs px-3">
@@ -331,6 +221,48 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                     </p>
                   )}
                 </form>
+              )}
+
+              {/* Gabarits : lesquels portent l'agent, et lequel */}
+              {gabarits[h.id] && (
+                <div className="border-t border-slate-800/60 pt-3 space-y-1.5">
+                  {gabarits[h.id] === 'chargement' ? (
+                    <p className="text-[10px] text-slate-500 flex items-center gap-2"><Spinner /> Lecture des modèles sur l'hyperviseur…</p>
+                  ) : (gabarits[h.id] as ProxmoxTemplate[]).length === 0 ? (
+                    <p className="text-[10px] text-slate-500">Aucun modèle sur cet hyperviseur.</p>
+                  ) : (
+                    <>
+                      <p className="text-[10px] text-slate-500">
+                        Seuls les gabarits OSIRIS sont proposés en clone nu. Un gabarit s'enregistre tout seul au scellement ;
+                        ceux scellés avant se marquent ici.
+                      </p>
+                      {(gabarits[h.id] as ProxmoxTemplate[]).map(t => (
+                        <div key={t.vmid} className="flex items-center justify-between gap-3 text-xs">
+                          <span className="min-w-0 truncate">
+                            <span className="text-slate-200">{t.name}</span>
+                            {t.node && <span className="text-slate-600 font-mono text-[10px]"> · {t.node}</span>}
+                          </span>
+                          <span className="flex items-center gap-2 flex-shrink-0">
+                            {!t.osiris ? (
+                              <span className="text-[10px] text-slate-600">sans agent OSIRIS</span>
+                            ) : t.osiris.etat === 'a_jour' ? (
+                              <span className="text-[10px] text-emerald-400">✓ agent à jour</span>
+                            ) : t.osiris.etat === 'perime' ? (
+                              <span className="text-[10px] text-amber-400" title="Scellé avec une version antérieure de l'agent : le resceller pour lui donner les derniers correctifs.">agent ancien — à resceller</span>
+                            ) : (
+                              <span className="text-[10px] text-slate-400" title="Marqué à la main : OSIRIS ne sait pas avec quelle version de l'agent il a été scellé.">gabarit OSIRIS · agent inconnu</span>
+                            )}
+                            {(!t.osiris || t.osiris.etat === 'inconnu') && (
+                              <button onClick={() => basculerMarque(h.id, t)} className="osiris-btn-ghost text-[10px] border border-slate-700 rounded px-2 py-0.5">
+                                {t.osiris ? 'Retirer' : 'Marquer comme gabarit OSIRIS'}
+                              </button>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
               )}
 
               {/* Résultat du test */}
@@ -428,285 +360,6 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
           )
         })}
       </div>
-
-      {/* Formulaire d'ajout */}
-      {/* Bouton + formulaire création VM */}
-      {hypervisors.length > 0 && (
-        <div className="pt-3 border-t border-slate-800/50">
-          {!showVmForm ? (
-            <button onClick={() => {
-                setShowVmForm(true)
-                // Présélection : quelqu'un qui découvre l'outil doit trouver un bon choix déjà fait
-                setVmForm(f => f.profile_id ? f : avecProfil(f, profilsPourVm(profiles, f.os).utilisables[0]))
-              }} className="osiris-btn text-xs px-4">+ Créer une VM</button>
-          ) : (
-            <form onSubmit={handleCreateVm} className="space-y-3">
-              <div className="flex items-center justify-between">
-                <p className="text-[9px] uppercase tracking-widest text-slate-600">Nouvelle VM</p>
-                <button type="button" onClick={() => setShowVmForm(false)} className="text-slate-600 hover:text-slate-300 text-xs">Annuler</button>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <input required placeholder="Hostname" value={vmForm.hostname} onChange={e => setVmForm(f => ({...f, hostname: e.target.value}))} className="osiris-input text-xs font-mono" />
-                <input required placeholder="Client / label" value={vmForm.client} onChange={e => setVmForm(f => ({...f, client: e.target.value}))} className="osiris-input text-xs" />
-                {/* L'organisation portait la supervision, le webhook et les reglages
-                    materiel, mais n'apparaissait nulle part ici : le formulaire reprenait
-                    en silence le filtre « Client » du haut de page. Une VM creee filtre sur
-                    « Tous les clients » naissait sans organisation, donc sans agent Zabbix,
-                    sans que rien ne le signale. Vecu le 2026-08-05. */}
-                <select value={vmForm.organization_id} onChange={e => setVmForm(f => ({...f, organization_id: e.target.value === '' ? '' : Number(e.target.value)}))} className="osiris-input text-xs">
-                  <option value="">— Aucune organisation (pas de supervision) —</option>
-                  {organizations.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
-                </select>
-                <select value={vmForm.os} onChange={e => setVmForm(f => avecProfil({
-                    ...f, os: e.target.value,
-                    // Windows = PXE uniquement (WinPE) : le cloud-init est spécifique Linux.
-                    ...(e.target.value === 'windows' ? { boot_mode: 'pxe', template_id: '' } : {}),
-                  }, profilsPourVm(profiles, e.target.value).utilisables[0]))} className="osiris-input text-xs">
-                  <option value="ubuntu">Ubuntu</option>
-                  <option value="debian">Debian</option>
-                  <option value="windows">Windows</option>
-                </select>
-                {/* Pas d'option « par défaut » : elle désignait en silence le plus
-                    ancien profil de l'OS — pour Ubuntu, un poste sans aucune clé. Les
-                    profils utilisables d'abord (le premier est présélectionné à
-                    l'ouverture), ceux qui ne donnent aucun accès grisés en dessous,
-                    avec la raison : on voit pourquoi ils ne sont pas proposés. */}
-                <select required value={vmForm.profile_id} onChange={e => setVmForm(f => avecProfil(f, profiles.find(p => String(p.id) === e.target.value)))} className="osiris-input text-xs">
-                  {!vmForm.profile_id && (
-                    <option value="" disabled>{profilsVm.utilisables.length ? '— Choisir un profil —' : 'Aucun profil utilisable pour cet OS'}</option>
-                  )}
-                  {profilsVm.utilisables.map(p => (
-                    <option key={p.id} value={p.id}>{p.name}{p.machine_type === 'server' ? ' [serveur]' : ''}</option>
-                  ))}
-                  {profilsVm.inutilisables.length > 0 && (
-                    <optgroup label="Inutilisables pour une VM : aucun accès">
-                      {profilsVm.inutilisables.map(p => (
-                        <option key={p.id} value={p.id} disabled>{p.name}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                </select>
-                <input placeholder="OU (optionnel)" value={vmForm.ou} onChange={e => setVmForm(f => ({...f, ou: e.target.value}))} className="osiris-input text-xs font-mono col-span-2" />
-                <div className="col-span-2">
-                  <ResumeProfil resume={profilEffectif?.resume} />
-                </div>
-              </div>
-
-              {/* Sélection hyperviseur + noeud */}
-              <div className="grid grid-cols-2 gap-2">
-                <select required value={vmHvId} onChange={e => handleVmHvChange(Number(e.target.value))} className="osiris-input text-xs">
-                  <option value="">Hyperviseur...</option>
-                  {hypervisors.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
-                </select>
-                <select required value={vmNode} onChange={e => handleVmNodeChange(e.target.value)} className="osiris-input text-xs" disabled={!vmHvId || vmNodes.length === 0}>
-                  <option value="">Noeud...</option>
-                  {vmNodes.map(n => (
-                    <option key={n.node} value={n.node}>{n.node} — {n.cpu}% CPU · {n.mem_gb}/{n.maxmem_gb} Go RAM</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Mode de boot — Windows : PXE ou template sysprep ; Linux : + cloud-init */}
-              <div className="flex gap-2">
-                {(vmForm.os === 'windows' ? ['pxe', 'template'] as const : ['pxe', 'template', 'cloudinit'] as const).map(mode => (
-                  <button key={mode} type="button"
-                    onClick={() => setVmForm(f => ({...f, boot_mode: mode, template_id: '', iso: ''}))}
-                    className={`flex-1 py-1.5 rounded text-xs border transition-colors ${vmForm.boot_mode === mode ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500'}`}>
-                    {mode === 'pxe'
-                      ? (vmForm.os === 'windows' ? 'PXE / WinPE' : 'PXE (ISO / installation)')
-                      : mode === 'template' ? 'Template (clone)' : 'Cloud-init'}
-                  </button>
-                ))}
-              </div>
-
-              {/* Ressources */}
-              <div className="grid grid-cols-2 gap-2">
-                <select required value={vmForm.storage} onChange={e => setVmForm(f => ({...f, storage: e.target.value}))} className="osiris-input text-xs" disabled={vmStorages.length === 0}>
-                  <option value="">Stockage...</option>
-                  {vmStorages.map(s => <option key={s.storage} value={s.storage}>{s.storage} ({s.type}) — {s.avail_gb} Go libres</option>)}
-                </select>
-                <select required value={vmForm.bridge} onChange={e => handleVmBridgeChange(e.target.value)} className="osiris-input text-xs" disabled={vmNetworks.length === 0}>
-                  <option value="">Bridge réseau...</option>
-                  {/* Le commentaire porté par le bridge est le nom du VLAN côté réseau
-                      (« ADMIN », « Clients_MUTU »…) : c'est cela que l'exploitant a en
-                      tête, pas « vmbr320 ». */}
-                  {vmNetworks.map(n => (
-                    <option key={n.iface} value={n.iface}>
-                      {n.iface}{n.comments ? ` — ${n.comments}` : ''}{n.cidr ? ` (${n.cidr})` : ''}
-                    </option>
-                  ))}
-                </select>
-                {/* Rangement vSphere. Absent sur Proxmox : la liste revient vide. */}
-                {vmFolders.length > 0 && (
-                  <select value={vmForm.folder} onChange={e => setVmForm(f => ({...f, folder: e.target.value}))} className="osiris-input text-xs col-span-2">
-                    <option value="">Dossier : racine du datacenter</option>
-                    {vmFolders.map(d => <option key={d.path} value={d.path}>{d.path}</option>)}
-                  </select>
-                )}
-                <div className="flex items-center gap-1">
-                  <label className="text-[10px] text-slate-500 shrink-0">vCPU</label>
-                  <input type="number" min={1} max={64} value={vmForm.vcpus} onChange={e => setVmForm(f => ({...f, vcpus: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-                </div>
-                <div className="flex items-center gap-1">
-                  <label className="text-[10px] text-slate-500 shrink-0">RAM Mo</label>
-                  <input type="number" min={512} step={512} value={vmForm.ram_mb} onChange={e => setVmForm(f => ({...f, ram_mb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-                </div>
-                <div className="flex items-center gap-1">
-                  <label className="text-[10px] text-slate-500 shrink-0">Disque Go</label>
-                  <input type="number" min={8} value={vmForm.disk_gb} onChange={e => setVmForm(f => ({...f, disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-                </div>
-                <div className="flex items-center gap-1">
-                  <label className="text-[10px] text-slate-500 shrink-0" title="Second disque, formaté et monté sur /data au premier démarrage. 0 = aucun.">/data Go</label>
-                  <input type="number" min={0} value={vmForm.data_disk_gb} onChange={e => setVmForm(f => ({...f, data_disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-                </div>
-
-                <div className="col-span-2 space-y-1 pt-1">
-                  <p className="text-[9px] uppercase tracking-widest text-slate-600">
-                    Adressage IP <span className="normal-case text-slate-700">(vide = DHCP)</span>
-                  </p>
-                  <div className="grid grid-cols-3 gap-2">
-                    <input placeholder={sansAdressage ? 'indisponible dans ce mode'
-                             : vmNetDef?.reseau ? `adresse dans ${vmNetDef.reseau}` : '10.0.0.60/24'}
-                      value={sansAdressage ? '' : vmForm.ip_cidr} disabled={sansAdressage}
-                      onChange={e => setVmForm(f => ({...f, ip_cidr: e.target.value}))}
-                      onBlur={completerPrefixe}
-                      className="osiris-input text-xs font-mono disabled:opacity-40" />
-                    <input placeholder="Passerelle" value={sansAdressage ? '' : vmForm.gateway}
-                      disabled={sansAdressage}
-                      onChange={e => setVmForm(f => ({...f, gateway: e.target.value}))}
-                      className="osiris-input text-xs font-mono disabled:opacity-40" />
-                    {/* Exigé dès qu'une adresse fixe est saisie : sans DHCP pour en
-                        fournir un, la VM n'aurait AUCUN résolveur — et le dirait si peu
-                        qu'elle se déclarerait déployée. L'API refuse aussi, mais autant
-                        le dire avant d'envoyer le formulaire. */}
-                    <input placeholder={vmForm.ip_cidr ? 'DNS — obligatoire' : 'DNS (séparés par ,)'}
-                      required={!!vmForm.ip_cidr && !sansAdressage}
-                      value={sansAdressage ? '' : vmForm.dns_servers} disabled={sansAdressage}
-                      onChange={e => setVmForm(f => ({...f, dns_servers: e.target.value}))}
-                      className="osiris-input text-xs font-mono disabled:opacity-40" />
-                  </div>
-                  {/* Un champ qu'on ne peut pas remplir vaut mieux qu'un formulaire
-                      rejeté après coup — et infiniment mieux qu'une adresse acceptée
-                      puis perdue en silence, qui laissait la VM muette. */}
-                  {sansAdressage && (
-                    <p className="text-[9px] text-amber-400">
-                      ⚠ Un clone nu sur cet hyperviseur n'injecte rien : rien dans la VM ne saurait
-                      lire une adresse fixe. Choisir « cloud-init », qui porte l'adressage, ou laisser
-                      la machine en DHCP.
-                    </p>
-                  )}
-                  <p className="text-[9px] text-slate-600">
-                    À renseigner sur un VLAN sans DHCP : sans adresse, la VM démarre et ne rappelle jamais OSIRIS. Adresse en notation CIDR (préfixe /24 obligatoire), passerelle sans préfixe. En adressage fixe, le DNS est obligatoire — aucun bail ne viendra en fournir un.
-                  </p>
-
-                  {/* Passerelle et DNS sont des propriétés du RÉSEAU, pas de la machine :
-                      les retaper de mémoire à chaque déploiement n'apporte rien qu'un
-                      risque de faute de frappe. L'adresse, elle, reste saisie à la main —
-                      OSIRIS ne voit que ses propres fiches et ne peut affirmer qu'une
-                      adresse est libre. On dit donc ce qu'on sait pris, jamais ce qu'on
-                      croit disponible. */}
-                  {vmNetDef && (
-                    <div className="text-[9px] space-y-0.5 border-l-2 border-slate-800 pl-2">
-                      {vmNetDef.reseau ? (
-                        <p className="text-slate-500">
-                          Réseau <span className="font-mono text-slate-400">{vmNetDef.reseau}</span>
-                          {vmNetDef.gateway && <> · passerelle <span className="font-mono text-slate-400">{vmNetDef.gateway}</span></>}
-                          {vmNetDef.dns_servers && <> · DNS <span className="font-mono text-slate-400">{vmNetDef.dns_servers}</span></>}
-                          {provenance && <span className="text-slate-600"> — {provenance}</span>}
-                        </p>
-                      ) : (
-                        <p className="text-slate-600">
-                          Adressage inconnu pour {vmNetDef.bridge} : ce réseau ne porte aucune adresse sur le nœud, et OSIRIS n'y a encore rien déployé. Tout est à saisir — cette fois seulement, le prochain déploiement reprendra ces valeurs.
-                        </p>
-                      )}
-                      {vmNetDef.occupees.length > 0 && (
-                        <p className="text-slate-600">
-                          Déjà attribuées par OSIRIS : <span className="font-mono">{vmNetDef.occupees.join(', ')}</span> — il ignore tout des machines posées à la main, cette liste dit ce qui est pris, jamais ce qui est libre.
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {horsReseau && (
-                    <p className="text-[9px] text-amber-400">
-                      ⚠ {adresseSaisie} est hors de {vmNetDef?.reseau}. Une VM adressée hors de son réseau démarre, ne route nulle part et reste « en attente » sans un mot d'explication. À vérifier — un VLAN peut légitimement porter plusieurs réseaux.
-                    </p>
-                  )}
-                  {dejaPrise && (
-                    <p className="text-[9px] text-amber-400">
-                      ⚠ {adresseSaisie} est déjà l'adresse d'une machine enregistrée dans OSIRIS.
-                    </p>
-                  )}
-                </div>
-
-                {vmForm.boot_mode === 'pxe' ? (
-                  <input placeholder="ISO Proxmox (ex: local:iso/ubuntu-24.04.iso) — optionnel" value={vmForm.iso} onChange={e => setVmForm(f => ({...f, iso: e.target.value}))} className="osiris-input text-xs font-mono col-span-2" />
-                ) : (
-                  <select required value={vmForm.template_id} onChange={e => setVmForm(f => ({...f, template_id: e.target.value}))} className="osiris-input text-xs col-span-2" disabled={vmTemplates.length === 0}>
-                    <option value="">{vmTemplates.length === 0 ? (vmNode ? 'Aucun template trouvé sur ce noeud' : 'Choisir un noeud d\'abord') : 'Template Proxmox...'}</option>
-                    {/* Le nœud du template est affiché : il n'a plus besoin d'être celui du
-                        déploiement, mais savoir où vit un modèle reste utile — c'est le
-                        seul indice si un clone échoue faute de stockage partagé. */}
-                    {vmTemplates.map(t => <option key={t.vmid} value={t.vmid}>{t.name} (VMID {t.vmid}){t.node ? ` · sur ${t.node}` : ''} — {t.cores} vCPU · {t.maxmem_gb} Go</option>)}
-                  </select>
-                )}
-              </div>
-
-              {/* En mode gabarit, l'OS ne vient PAS du profil : il vient de l'image
-                  clonee. Le profil continue de decider tout le reste (jonction,
-                  applications, supervision), mais son image systeme est ignoree.
-                  Sans ce rappel, un profil nomme d'apres un OS laisse croire qu'on
-                  deploie cet OS-la — vecu le 2026-08-25, ou un gabarit 2022 a ete
-                  clone avec un profil nomme « Windows Server 2025 ». Rien n'echoue :
-                  on obtient juste un autre OS que celui qu'on croyait demander. */}
-              {vmForm.boot_mode !== 'pxe' && (
-                <p className="text-[9px] text-amber-400">
-                  ⚠ L'OS vient du gabarit cloné, pas du profil.
-                  {imageDuProfilIgnoree(vmForm.boot_mode, profiles.find(p => String(p.id) === String(vmForm.profile_id)))
-                    && ` L'image « ${profiles.find(p => String(p.id) === String(vmForm.profile_id))?.win_image} » déclarée par ce profil n'est pas utilisée dans ce mode.`}
-                </p>
-              )}
-
-              <div className="text-[10px] text-slate-600 bg-slate-900/60 rounded p-2 font-mono">
-                {vmForm.boot_mode === 'pxe'
-                  ? (vmForm.os === 'windows'
-                      ? 'WinPE livré en CD-ROM (UEFI/OVMF · disque SATA · carte e1000). La VM s\'installe puis rappelle OSIRIS.'
-                      : 'Boot order : PXE → disque → ISO. La VM s\'enregistrera dans OSIRIS au premier boot réseau.')
-                  : vmForm.boot_mode === 'template'
-                    ? 'Clone du template + MAC neuve. Le clone lit sa MAC au démarrage et rappelle OSIRIS (agent cuit dans le template). Démarrage ~2 min, aucune injection.'
-                    : 'Clone complet du template + cloud-init injecté via snippets Proxmox. Démarrage ~30s, pas de PXE requis.'}
-              </div>
-              <div className="space-y-1">
-                <p className="text-[9px] uppercase tracking-widest text-slate-600">
-                  Script de post-installation — propre a CETTE VM (optionnel)
-                </p>
-                <textarea rows={4} value={vmForm.post_script}
-                  onChange={e => setVmForm(f => ({...f, post_script: e.target.value}))}
-                  placeholder={vmForm.os === 'windows' ? 'PowerShell, execute en fin de premier demarrage' : 'Commandes bash, executees en fin de premier demarrage'}
-                  className="osiris-input text-[10px] font-mono w-full resize-y" />
-                <p className="text-[9px] text-slate-600">
-                  Joue APRES le script du profil : le profil pose le socle commun, celui-ci
-                  ne vaut que pour cette VM. Une erreur est journalisee sans faire echouer le
-                  deploiement. Execute en root, et grave dans la configuration de la VM cote
-                  hyperviseur : y faire CHERCHER un secret, jamais l'y ecrire.
-                </p>
-              </div>
-              {vmInaccessible && (
-                <p className="text-[10px] text-red-400">
-                  {!vmSansProfil
-                    ? "Création impossible avec ce profil : personne ne pourrait entrer dans la VM. Lui ajouter une clé SSH ou le mot de passe root de secours, ou en choisir un autre."
-                    : profilsVm.utilisables.length
-                      ? 'Choisir un profil de déploiement.'
-                      : "Aucun profil de cet OS ne donne accès à une VM. En créer un avec une clé SSH (Administration → Profils), ou ajouter une clé à un profil existant."}
-                </p>
-              )}
-              <button type="submit" disabled={vmCreating || vmInaccessible || !vmNode || !vmForm.storage || !vmForm.bridge} className="osiris-btn text-xs px-4 w-full disabled:opacity-50">
-                {vmCreating ? 'Création en cours...' : 'Créer et démarrer la VM'}
-              </button>
-            </form>
-          )}
-        </div>
-      )}
 
       <form onSubmit={handleCreateHv} className="space-y-3 pt-3 border-t border-slate-800/50">
         <p className="text-[9px] uppercase tracking-widest text-slate-600">Ajouter un hyperviseur</p>

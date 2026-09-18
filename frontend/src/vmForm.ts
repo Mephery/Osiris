@@ -118,3 +118,60 @@ export const avecProfil = <F extends { profile_id: string; vcpus: number; ram_mb
 ): F => p
   ? { ...f, profile_id: String(p.id), vcpus: p.vm_vcpus ?? f.vcpus, ram_mb: p.vm_ram_mb ?? f.ram_mb, disk_gb: p.vm_disk_gb ?? f.disk_gb, data_disk_gb: p.vm_data_disk_gb ?? f.data_disk_gb }
   : { ...f, profile_id: '' }
+
+export type ModeVm = 'pxe' | 'template' | 'cloudinit'
+
+/** Le mode d'amorçage qui marche, selon l'hyperviseur et le système.
+ *
+ *  Le formulaire partait en PXE pour tout le monde : le mode le plus lent, et
+ *  celui qu'on n'utilise presque plus. Le choix n'est pas du goût, il découle de
+ *  ce que chaque hyperviseur sait porter :
+ *  - vSphere : le clone NU du gabarit, dont l'agent lit son adresse dans
+ *    `guestinfo` — validé sous Linux et Windows ;
+ *  - Proxmox, Linux : cloud-init, seul canal qui y porte une adresse fixe (un
+ *    clone nu n'en reçoit aucune, le serveur le refuse) ;
+ *  - Proxmox, Windows : PXE / WinPE, faute de gabarit sysprepé à cloner.
+ *  Les autres modes restent accessibles dans les options avancées. */
+export const modeParDefaut = (typeHv: string | undefined, os: string): ModeVm => {
+  if ((typeHv ?? '').toLowerCase() === 'proxmox') return os === 'windows' ? 'pxe' : 'cloudinit'
+  return 'template'
+}
+
+/** Ce qui manque encore pour pouvoir créer la VM, dans l'ordre de l'écran.
+ *  Un bouton grisé sans raison laisse chercher ; une liste dit quoi faire. */
+export const champsManquants = (f: {
+  hostname: string; client: string; boot_mode: string; template_id: string; storage: string; bridge: string
+}, hvChoisi: boolean, noeud: string): string[] => [
+  !f.hostname.trim() && 'nom',
+  !f.client.trim() && 'client',
+  !hvChoisi && 'hyperviseur',
+  hvChoisi && !noeud && 'nœud',
+  f.boot_mode !== 'pxe' && !f.template_id && 'gabarit',
+  !f.storage && 'stockage',
+  !f.bridge && 'réseau',
+].filter((c): c is string => Boolean(c))
+
+/** Les modèles d'un hyperviseur, triés selon ce que le mode exige d'eux.
+ *
+ *  Un clone NU ne reçoit aucune injection : c'est l'agent gravé dans le gabarit
+ *  qui rappelle OSIRIS. Un modèle sans agent y démarre et ne rappelle jamais —
+ *  il est donc proposé grisé, avec la raison. Un modèle d'un autre système
+ *  aussi : un gabarit Windows sous un profil Ubuntu n'a aucun sens.
+ *  cloud-init n'a pas besoin de l'agent : tout reste choisissable, les gabarits
+ *  OSIRIS en tête. */
+export const gabaritsPourMode = <T extends { vmid: number; famille?: string; osiris?: { os: string } | null }>(
+  modeles: T[],
+  mode: string,
+  os: string,
+): { proposes: T[]; autres: T[]; autresChoisissables: boolean } => {
+  const famille = os === 'windows' ? 'windows' : 'linux'
+  // Le système se lit d'abord sur l'hyperviseur (type d'invité), puis sur le
+  // scellement : un gabarit marqué à la main ne porte que le premier.
+  const systeme = (m: T) => m.famille || m.osiris?.os || ''
+  const convient = (m: T) => Boolean(m.osiris) && (!systeme(m) || systeme(m) === famille)
+  return {
+    proposes: modeles.filter(convient),
+    autres: modeles.filter(m => !convient(m)),
+    autresChoisissables: mode !== 'template',
+  }
+}
