@@ -10,7 +10,7 @@ import type {
 } from './types'
 import { IMAGE_STATUS, EMPTY_FORM, authHeader } from './types'
 import {
-  IcoOsiris, IcoRefresh, IcoSearch, IcoPower, IcoPencil, IcoX, IcoChevRight, IcoGear,
+  IcoOsiris, IcoRefresh, IcoSearch, IcoPencil, IcoX, IcoChevRight, IcoGear,
   IcoSun, IcoMoon,
 } from './icons'
 import { applyTheme, preferredTheme, type Theme } from './theme'
@@ -229,13 +229,6 @@ export default function App() {
       .catch(() => toast.error('Impossible de recuperer le mot de passe LAPS'))
   }
 
-  const redeployNow = (mac: string) => {
-    if (!auth) return
-    fetch(`${API_URL}/machines/${mac}/redeploy-now`, { method: 'POST', headers: authHeader(auth.token) })
-      .then(r => { if (r.ok) { fetchAll(auth.token); toast.success('Machine repassee en pending + WoL envoye') } else throw new Error() })
-      .catch(() => toast.error('Erreur redeploy-now'))
-  }
-
   const saveNotes = (mac: string, notes: string) => {
     if (!auth) return
     fetch(`${API_URL}/machines/${mac}`, {
@@ -322,13 +315,17 @@ export default function App() {
 
   // ── Chargement des données ──────────────────────────────────────────────────
 
+  // `loading` ne vaut vrai qu'au PREMIER chargement (valeur initiale). Le remettre
+  // à vrai à chaque rafraîchissement remplaçait le tableau par des lignes
+  // fantômes après chaque action : la page clignotait. Le tableau reste désormais
+  // en place pendant sa mise à jour.
   const fetchAll = useCallback((token: string, orgFilter: number | null = null) => {
-    setLoading(true)
-    setError(null)  // repart propre : sinon une erreur précédente (ex. « Session expirée » sur token périmé) reste affichée après une reconnexion réussie
     const url = orgFilter ? `${API_URL}/machines?org_id=${orgFilter}` : `${API_URL}/machines`
     fetch(url, { headers: authHeader(token) })
       .then((res) => { if (res.status === 401) { setAuth(null); throw new Error("Session expirée") } if (!res.ok) throw new Error("Erreur API"); return res.json() })
-      .then((data) => { setMachines(data); setLoading(false) })
+      // L'erreur s'efface au SUCCÈS : sinon une erreur précédente (ex. « Session
+      // expirée ») restait affichée après une reconnexion réussie
+      .then((data) => { setMachines(data); setError(null); setLoading(false) })
       .catch((err) => { setError(err.message); setLoading(false) })
   }, [])
 
@@ -414,6 +411,24 @@ export default function App() {
         setTotpLoginCode('')
       })
       .catch(() => toast.error('Code incorrect'))
+  }
+
+  // L'export était un simple lien : le navigateur ne joint pas le jeton à un lien,
+  // l'API répondait 401 à chaque clic. On télécharge donc en passant le jeton,
+  // puis on remet le fichier au navigateur.
+  const exporterCsv = () => {
+    if (!auth) return
+    fetch(`${API_URL}/machines/export`, { headers: authHeader(auth.token) })
+      .then(r => { if (!r.ok) throw new Error("L'export a échoué"); return r.blob() })
+      .then(blob => {
+        const url = URL.createObjectURL(blob)
+        const lien = document.createElement('a')
+        lien.href = url
+        lien.download = 'osiris-machines.csv'
+        lien.click()
+        URL.revokeObjectURL(url)
+      })
+      .catch(err => toast.error(err.message))
   }
 
   const handleCsvImport = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -712,30 +727,26 @@ export default function App() {
 
   // ── Redéploiement machine ───────────────────────────────────────────────────
 
+  // Un seul bouton « Redéployer ». Il y en avait deux, presque identiques, dont
+  // l'un réinstallait SANS confirmation et l'autre oubliait de renvoyer une VM
+  // Windows sur son CD d'installation. `redeploy-now` fait les deux choses justes.
   const handleRedeploy = (mac: string, hostname: string) => {
     toast(`Redéployer "${hostname}" ?`, {
-      description: "L'OS sera réinstallé au prochain démarrage réseau.",
+      description: "La machine sera RÉINSTALLÉE : son disque sera effacé au prochain démarrage.",
       action: {
-        label: 'Confirmer',
+        label: 'Réinstaller',
         onClick: () => {
           setRedeployingMac(mac)
-          fetch(`${API_URL}/machines/${mac}/status?status=pending`, { method: 'POST', headers: authHeader(auth.token) })
-            .then((res) => { if (!res.ok) throw new Error('Erreur') })
-            .then(() => toast.success(`${hostname} — en attente de déploiement`))
+          fetch(`${API_URL}/machines/${mac}/redeploy-now`, { method: 'POST', headers: authHeader(auth.token) })
+            .then((res) => { if (!res.ok) throw new Error('Le redéploiement a été refusé') })
+            .then(() => { fetchAll(auth.token); toast.success(`${hostname} — en attente de déploiement`) })
             .catch((err) => toast.error(err.message))
             .finally(() => setRedeployingMac(null))
         }
       },
       cancel: { label: 'Annuler', onClick: () => {} },
-      duration: 8000,
+      duration: 10000,
     })
-  }
-
-  const handleWol = (mac: string, hostname: string) => {
-    fetch(`${API_URL}/machines/${mac}/wol`, { method: 'POST', headers: authHeader(auth.token) })
-      .then((res) => { if (!res.ok) throw new Error('Erreur WOL') })
-      .then(() => toast.success(`Magic packet envoyé à "${hostname}"`))
-      .catch((err) => toast.error(err.message))
   }
 
   // ── Admin : créer org ───────────────────────────────────────────────────────
@@ -849,21 +860,32 @@ export default function App() {
       ? new Set()
       : new Set(filteredMachines.map(m => m.mac)))
 
+  // Réinstaller plusieurs machines partait en UN clic, sans confirmation — et sans
+  // rien dire ensuite, ni succès ni échec.
   const handleBatchRedeploy = () => {
-    if (selectedMacs.size === 0) return
-    fetch(`${API_URL}/machines/batch-status`, {
-      method: 'POST',
-      headers: { ...authHeader(auth!.token), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ macs: Array.from(selectedMacs), status: 'pending' }),
-    }).then(() => setSelectedMacs(new Set())).catch(() => {})
-  }
-
-  const handleBatchWol = () => {
-    if (selectedMacs.size === 0) return
-    for (const mac of selectedMacs) {
-      fetch(`${API_URL}/machines/${mac}/wol`, { method: 'POST', headers: authHeader(auth!.token) }).catch(() => {})
-    }
-    setSelectedMacs(new Set())
+    const n = selectedMacs.size
+    if (n === 0) return
+    toast(`Redéployer ${n} machine${n > 1 ? 's' : ''} ?`, {
+      description: `${n > 1 ? 'Elles seront toutes RÉINSTALLÉES' : 'Elle sera RÉINSTALLÉE'} : disque effacé au prochain démarrage.`,
+      action: {
+        label: 'Réinstaller',
+        onClick: () => {
+          fetch(`${API_URL}/machines/batch-status`, {
+            method: 'POST',
+            headers: { ...authHeader(auth!.token), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ macs: Array.from(selectedMacs), status: 'pending' }),
+          }).then(async r => {
+            if (!r.ok) throw new Error('Le redéploiement en lot a été refusé')
+            const { updated } = await r.json()
+            toast.success(`${updated.length} machine${updated.length > 1 ? 's' : ''} en attente de déploiement`)
+            setSelectedMacs(new Set())
+            fetchAll(auth!.token)
+          }).catch(err => toast.error(err.message))
+        },
+      },
+      cancel: { label: 'Annuler', onClick: () => {} },
+      duration: 10000,
+    })
   }
 
   const orgName     = (id: number | null | undefined) => orgs.find(o => o.id === id)?.name ?? '—'
@@ -1414,7 +1436,7 @@ export default function App() {
                 {csvImporting ? 'Import...' : 'Importer CSV'}
               </button>
               <input ref={csvFileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={handleCsvImport} disabled={csvImporting} />
-              <a href={`${API_URL}/machines/export`} download="osiris-machines.csv" className="osiris-btn text-xs">Exporter CSV</a>
+              <button onClick={exporterCsv} className="osiris-btn text-xs">Exporter CSV</button>
               <button onClick={openCreate} className="osiris-btn text-xs">+ Enregistrer un PC</button>
               {/* Créer une VM est une action du quotidien, pas un réglage : elle vivait
                   sous la liste des hyperviseurs, dans la page d'infrastructure, où
@@ -1447,7 +1469,6 @@ export default function App() {
           <div className="flex items-center gap-3 px-4 py-2.5 bg-blue-950/40 border border-blue-800/40 rounded text-xs">
             <span className="text-blue-300 font-semibold">{selectedMacs.size} machine{selectedMacs.size > 1 ? 's' : ''} sélectionnée{selectedMacs.size > 1 ? 's' : ''}</span>
             <button onClick={handleBatchRedeploy} className="osiris-btn text-xs">Redéployer</button>
-            <button onClick={handleBatchWol} className="osiris-btn text-xs">WoL</button>
             <button onClick={() => setSelectedMacs(new Set())} className="osiris-btn-ghost text-xs ml-auto">Désélectionner</button>
           </div>
         )}
@@ -1565,27 +1586,15 @@ export default function App() {
                             className="osiris-action-btn"
                             title="Détails (logs, historique, LAPS/BitLocker, VM...)"
                           ><IcoChevRight /></button>
-                          <button
-                            onClick={() => handleWol(machine.mac, machine.hostname)}
-                            className="osiris-action-btn"
-                            title="Wake-on-LAN"
-                          ><IcoPower /></button>
                           {(machine.status === 'deployed' || machine.status === 'failed') && (
                             <button
                               onClick={() => handleRedeploy(machine.mac, machine.hostname)}
                               disabled={redeployingMac === machine.mac}
                               className="osiris-action-btn"
-                              title="Redeployer (sans WoL)"
+                              title="Redéployer (réinstaller la machine)"
                             >
                               {redeployingMac === machine.mac ? '…' : <IcoRefresh />}
                             </button>
-                          )}
-                          {(machine.status === 'deployed' || machine.status === 'failed') && (
-                            <button
-                              onClick={() => redeployNow(machine.mac)}
-                              className="osiris-action-btn"
-                              title="Redeployer maintenant (pending + WoL en une action)"
-                            ><IcoRefresh cls="w-3 h-3 inline" /><IcoPower cls="w-3 h-3 inline" /></button>
                           )}
                           <button onClick={() => openEdit(machine)} className="osiris-action-btn" title="Modifier"><IcoPencil /></button>
                           {auth.role === 'admin' && (

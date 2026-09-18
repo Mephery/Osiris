@@ -2819,7 +2819,13 @@ def post_smoke_tests(mac: str, data: dict):
 
 @app.post("/machines/{mac}/redeploy-now", dependencies=[Depends(get_current_user)])
 def redeploy_now(mac: str, background_tasks: BackgroundTasks):
-    """Remet la machine en pending ET envoie un magic packet WoL en une seule action."""
+    """Relance le déploiement d'une machine : nouvelle tentative en attente, et une
+    VM Windows renvoyée sur son CD WinPE.
+
+    Envoyait aussi un paquet Wake-on-LAN — vers une adresse de diffusion écrite en
+    dur qui ne correspondait à aucun réseau d'OSIRIS : il ne réveillait rien, et
+    l'écran annonçait « WoL envoyé ». Retiré le 18/09 avec le reste du WoL, que
+    personne n'utilisait."""
     clean_mac = validate_mac(mac)
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
@@ -2831,12 +2837,7 @@ def redeploy_now(mac: str, background_tasks: BackgroundTasks):
     # Une VM n'a pas de WoL : ce qui la fait redeployer, c'est de la renvoyer sur son
     # CD WinPE. Sans ca, elle rebooterait sur le Windows deja installe.
     background_tasks.add_task(_orienter_boot_vm_windows, clean_mac, True)
-    formatted = ":".join(clean_mac[i:i+2] for i in range(0, 12, 2))
-    try:
-        wakeonlan.send_magic_packet(formatted, ip_address="10.0.0.255", port=9)
-    except Exception:
-        pass
-    return {"detail": f"Machine {clean_mac} repassee en pending + WoL envoye"}
+    return {"detail": f"Machine {clean_mac} repassée en attente de déploiement"}
 
 
 @app.get("/dashboard", dependencies=[Depends(get_current_user)])
@@ -3883,7 +3884,6 @@ def suggest_driver(vendor: str, model: str, sysid: str = ""):
         }
 
 
-import wakeonlan
 
 _honeypot_log = logging.getLogger("osiris.honeypot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -3895,7 +3895,8 @@ class BatchStatusBody(SQLModel):
 
 
 @app.post("/machines/batch-status")
-async def batch_status(body: BatchStatusBody, current_user: User = Depends(get_current_user)):
+async def batch_status(body: BatchStatusBody, background_tasks: BackgroundTasks,
+                       current_user: User = Depends(get_current_user)):
     """Passe une liste de machines au statut donné (ex: pending pour un redéploiement en lot)."""
     if body.status not in ("pending", "deploying", "deployed", "failed"):
         raise HTTPException(status_code=400, detail="Statut invalide")
@@ -3920,17 +3921,13 @@ async def batch_status(body: BatchStatusBody, current_user: User = Depends(get_c
         session.commit()
     for mac in updated:
         await manager.broadcast({"type": "status", "mac": mac, "status": body.status})
+        # Comme le redéploiement unitaire : sans ça, une VM Windows redémarrait sur
+        # le Windows déjà installé et restait « en attente » pour toujours.
+        if body.status == "pending":
+            background_tasks.add_task(_orienter_boot_vm_windows, mac, True)
     return {"updated": updated}
 
 
-@app.post("/machines/{mac}/wol", dependencies=[Depends(get_current_user)])
-@limiter.limit("10/minute")
-def wake_on_lan(request: Request, mac: str):
-    """Envoie un magic packet WOL à la machine (doit être éteinte mais connectée au réseau)."""
-    clean_mac = validate_mac(mac)
-    formatted = ":".join(clean_mac[i:i+2] for i in range(0, 12, 2))
-    wakeonlan.send_magic_packet(formatted, ip_address="10.0.0.255", port=9)
-    return {"detail": f"Magic packet envoyé à {formatted}"}
 
 
 _HONEYPOT_ART = """\

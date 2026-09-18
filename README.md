@@ -32,8 +32,7 @@ Il remplace les outils comme MDT/WDS avec une interface web moderne, une API RES
 | Imprimantes réseau au démarrage | oui | - | - |
 | Script post-install personnalisé | PowerShell | Bash | - |
 | Notification échec firstboot | oui | oui | - |
-| Wake-on-LAN | oui | oui | oui |
-| Redéployer maintenant (WoL + pending) | oui | oui | oui |
+| Redéployer (avec confirmation) | oui | oui | oui |
 | Déploiement en lot | oui | oui | oui |
 | Historique de déploiement par machine | oui | oui | oui |
 | Notifications webhook structurées (Teams / Slack) | oui | oui | oui |
@@ -420,10 +419,11 @@ Si le script de premier démarrage échoue de façon inattendue (erreur fatale n
 
 ## Déploiement en lot
 
-Depuis l'onglet **Machines**, cochez les machines cibles, puis utilisez la barre d'actions :
-- **Redéployer** - passe les machines en `pending` (elles redéploieront au prochain boot PXE)
-- **WoL** - envoie un magic packet Wake-on-LAN
-- **Redéployer maintenant** (bouton sur chaque ligne) - combine les deux en une seule action : remet en `pending` et envoie le WoL immédiatement
+Depuis l'onglet **Machines**, cochez les machines cibles, puis **Redéployer** : après
+confirmation, elles repassent en `pending` et se réinstallent au prochain démarrage réseau.
+Une VM Windows est renvoyée d'elle-même sur son CD d'installation.
+
+Le même bouton existe sur chaque ligne, avec la même confirmation.
 
 ---
 
