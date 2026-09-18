@@ -457,6 +457,19 @@ echo "[OSIRIS] Unite osiris-firstboot.service installee et activee."
 
 if [ "$SEAL" -eq 1 ]; then
     echo "[OSIRIS] Scellement du template..."
+    # Le gabarit s'annonce a OSIRIS, qui ne proposera en clone nu QUE les modeles
+    # portant l'agent. Identite = UUID SMBIOS : il survit a la conversion en
+    # modele, et chaque clone en recoit un neuf. Empreinte = version de l'agent
+    # grave ici, pour reperer plus tard un gabarit a resceller.
+    _uuid=$(cat "${OSIRIS_PRODUCT_UUID:-/sys/class/dmi/id/product_uuid}" 2>/dev/null | tr 'A-F' 'a-f')
+    if [ -n "$_uuid" ] && curl -sf -X POST "$OSIRIS_URL/bootstrap/sealed" \
+            -H "Content-Type: application/json" --max-time 15 \
+            -d "{\"uuid\":\"$_uuid\",\"empreinte\":\"{{ empreinte }}\",\"os\":\"linux\",\"nom\":\"$(hostname)\"}" > /dev/null; then
+        echo "[OSIRIS] Gabarit enregistre aupres d'OSIRIS (agent {{ empreinte }})."
+    else
+        echo "[OSIRIS] AVERTISSEMENT : OSIRIS n'a pas enregistre ce gabarit."
+        echo "         Il faudra le marquer a la main : Infrastructure > Gabarits."
+    fi
     command -v cloud-init > /dev/null && cloud-init clean --logs --seed || true
     # machine-id identique sur tous les clones = meme DUID DHCP = baux qui se
     # volent l'un l'autre. Il doit etre vide pour etre regenere au demarrage.

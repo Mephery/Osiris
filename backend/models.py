@@ -470,3 +470,24 @@ def init_db():
     # Les migrations de schema sont gerees par Alembic (alembic upgrade head).
     # create_all reste ici comme filet de securite pour le dev local sans Alembic.
     SQLModel.metadata.create_all(engine)
+
+
+class GabaritOsiris(SQLModel, table=True):
+    """Un modèle d'hyperviseur qui porte l'agent OSIRIS.
+
+    Rien, côté hyperviseur, ne distingue un gabarit OSIRIS d'un autre modèle : la
+    liste proposait tout, et un clone NU d'un modèle sans agent ne rappelle jamais
+    — la fiche reste « pending » sans une ligne. Le nom ne suffit pas à trier
+    (« osiris-…-old » porte l'ancien agent). L'identité retenue est l'UUID SMBIOS
+    de la VM scellée : il survit à la conversion en modèle, sur vSphere comme sur
+    Proxmox, et chaque clone en reçoit un neuf.
+    """
+    __tablename__ = "gabarit_osiris"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    uuid: str = Field(index=True, unique=True)     # minuscules, tel que la VM le lit
+    # Empreinte du script d'amorçage gravé. Vide = marqué à la main depuis
+    # l'interface : on sait que c'est un gabarit OSIRIS, pas avec quel agent.
+    empreinte: str = Field(default="")
+    os: str = Field(default="")                    # "linux" | "windows" | "" (inconnu)
+    nom: str = Field(default="")                   # nom d'hôte au scellement, pour mémoire
+    scelle_le: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

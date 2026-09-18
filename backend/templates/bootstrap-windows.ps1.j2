@@ -346,6 +346,20 @@ if (-not $Seal) {
     return
 }
 
+# Le gabarit s'annonce a OSIRIS, qui ne proposera en clone nu QUE les modeles
+# portant l'agent. Identite = UUID SMBIOS : il survit a la conversion en modele,
+# et chaque clone en recoit un neuf. Empreinte = version de l'agent grave ici.
+try {
+    $uuidSmbios = (Get-CimInstance Win32_ComputerSystemProduct).UUID.ToLower()
+    $annonce = @{ uuid = $uuidSmbios; empreinte = "{{ empreinte }}"; os = "windows"; nom = $env:COMPUTERNAME } | ConvertTo-Json
+    Invoke-RestMethod -Uri "$OsirisUrl/bootstrap/sealed" -Method POST -Body $annonce `
+        -ContentType "application/json" -TimeoutSec 15 | Out-Null
+    Write-Host "[OSIRIS] Gabarit enregistre aupres d'OSIRIS (agent {{ empreinte }})."
+} catch {
+    Write-Host "[OSIRIS] AVERTISSEMENT : OSIRIS n'a pas enregistre ce gabarit - $_"
+    Write-Host "         Il faudra le marquer a la main : Infrastructure > Gabarits."
+}
+
 Write-Host "[OSIRIS] Recuperation du fichier de reponses generique..."
 $uriReponses = "$OsirisUrl/bootstrap/windows/unattend.xml"
 if ($ProductKey) {

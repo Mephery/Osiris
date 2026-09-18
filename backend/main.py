@@ -34,7 +34,7 @@ from jinja2 import Environment, FileSystemLoader
 
 import pyotp
 import qrcode
-from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
+from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
 import vpn
 import vsphere
 from auth import (
@@ -1939,6 +1939,7 @@ def get_linux_bootstrap():
     """
     content = jinja_env.get_template("bootstrap-linux.sh.j2").render(
         osiris_url=OSIRIS_BASE_URL,
+        empreinte=_empreinte_agent("linux"),
     )
     return Response(content=content, media_type="text/plain")
 
@@ -1963,8 +1964,105 @@ def get_windows_bootstrap():
     """
     content = jinja_env.get_template("bootstrap-windows.ps1.j2").render(
         osiris_url=OSIRIS_BASE_URL,
+        empreinte=_empreinte_agent("windows"),
     )
     return Response(content=content, media_type="text/plain")
+
+
+_GABARIT_AMORCAGE = {"linux": "bootstrap-linux.sh.j2", "windows": "bootstrap-windows.ps1.j2"}
+
+
+def _empreinte_agent(os_: str) -> str:
+    """Empreinte du script d'amorçage — donc de l'agent qu'il grave dans un gabarit.
+
+    Calculée sur le SOURCE, pas sur le rendu : le rendu contient l'adresse
+    d'OSIRIS, qui peut différer d'un hyperviseur à l'autre sans que l'agent change.
+    Un gabarit dont l'empreinte diffère de celle-ci porte un agent périmé : chaque
+    correctif de l'agent exige un rescellement, et rien ne le signalait.
+    """
+    fichier = _GABARIT_AMORCAGE.get(os_)
+    if not fichier:
+        return ""
+    chemin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", fichier)
+    with open(chemin, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:12]
+
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _variantes_uuid(uuid: str) -> set[str]:
+    """L'UUID tel que la VM le lit, et sa forme aux trois premiers champs inversés.
+
+    SMBIOS stocke ces trois champs en petit-boutiste depuis la version 2.6, mais
+    un BIOS plus ancien — celui d'une VM VMware en matériel ancien — les présente
+    dans l'autre ordre. Selon la version, l'UUID lu DANS la VM et celui que
+    l'hyperviseur publie ne se ressemblent donc pas octet pour octet : comparer
+    les deux formes évite de déclarer inconnu un gabarit bien scellé.
+    """
+    u = (uuid or "").strip().lower()
+    if not _UUID_RE.match(u):
+        return set()
+    a, b, c, d, e = u.split("-")
+    inverse = lambda x: "".join(reversed([x[i:i + 2] for i in range(0, len(x), 2)]))
+    return {u, f"{inverse(a)}-{inverse(b)}-{inverse(c)}-{d}-{e}"}
+
+
+class ScellementBody(SQLModel):
+    uuid: str
+    empreinte: str = ""
+    os: str = ""
+    nom: str = ""
+
+
+@app.post("/bootstrap/sealed", status_code=204)
+@limiter.limit("10/minute")
+def enregistrer_scellement(request: Request, body: ScellementBody):
+    """Le script de scellement annonce le gabarit qu'il vient de préparer.
+
+    Sans authentification, comme tout /bootstrap : la VM qu'on scelle ne porte
+    aucun secret, et c'est voulu. Le risque d'un faux enregistrement est borné —
+    il ne fait que proposer un modèle dans une liste ; il ne donne accès à rien.
+    """
+    uuid = (body.uuid or "").strip().lower()
+    if not _UUID_RE.match(uuid):
+        raise HTTPException(status_code=400, detail="UUID SMBIOS invalide")
+    if body.os not in ("linux", "windows"):
+        raise HTTPException(status_code=400, detail="os attendu : linux ou windows")
+    with Session(engine) as session:
+        g = session.exec(select(GabaritOsiris).where(GabaritOsiris.uuid == uuid)).first() \
+            or GabaritOsiris(uuid=uuid)
+        g.empreinte = (body.empreinte or "")[:64]
+        g.os = body.os
+        g.nom = (body.nom or "")[:128]
+        g.scelle_le = datetime.now(timezone.utc)
+        session.add(g)
+        session.commit()
+    return Response(status_code=204)
+
+
+def _annoter_gabarits(modeles: list[dict]) -> list[dict]:
+    """Ajoute à chaque modèle ce qu'OSIRIS en sait : `osiris` = None s'il ne porte
+    pas l'agent, sinon son état — « a_jour », « perime » ou « inconnu » (marqué à
+    la main, sans empreinte)."""
+    with Session(engine) as session:
+        connus = session.exec(select(GabaritOsiris)).all()
+    index: dict[str, GabaritOsiris] = {}
+    for g in connus:
+        for v in _variantes_uuid(g.uuid):
+            index[v] = g
+    for m in modeles:
+        g = index.get((m.get("uuid") or "").strip().lower())
+        if not g:
+            m["osiris"] = None
+            continue
+        if not g.empreinte:
+            etat = "inconnu"
+        else:
+            etat = "a_jour" if g.empreinte == _empreinte_agent(g.os) else "perime"
+        m["osiris"] = {"etat": etat, "os": g.os,
+                       "scelle_le": g.scelle_le.isoformat() if g.scelle_le else None}
+    return modeles
 
 
 CLE_PRODUIT_RE = re.compile(r"^[A-Za-z0-9]{5}(-[A-Za-z0-9]{5}){4}$")
@@ -4347,6 +4445,11 @@ class ProxmoxProvider:
         nœud puis de poser la VM là où l'opérateur l'a demandé.
         """
         res = await _proxmox_get(h, "/api2/json/cluster/resources?type=vm")
+        modeles = [v for v in (res or []) if v.get("template") == 1]
+        # L'UUID SMBIOS n'est pas dans la liste du cluster : une lecture de config
+        # par modèle, en parallèle. Ils se comptent sur les doigts d'une main.
+        configs = await asyncio.gather(*[
+            _config_vm(h, v.get("node", ""), int(v["vmid"])) for v in modeles])
         return sorted(
             [
                 {
@@ -4356,8 +4459,12 @@ class ProxmoxProvider:
                     "status":    v.get("status", "unknown"),
                     "cores":     v.get("maxcpu", 0),
                     "maxmem_gb": round(v.get("maxmem", 0) / 1073741824, 1),
+                    "uuid":      _uuid_smbios(cfg),
+                    # ostype : « win11 », « win10 »… ou « l26 ». Absent = inconnu.
+                    "famille":   ("windows" if str((cfg or {}).get("ostype", "")).startswith("win")
+                                  else "linux" if (cfg or {}).get("ostype") else ""),
                 }
-                for v in (res or []) if v.get("template") == 1
+                for v, cfg in zip(modeles, configs)
             ],
             key=lambda d: d["vmid"],
         )
@@ -4675,7 +4782,48 @@ async def get_hypervisor_templates(hv_id: int, _: User = Depends(require_admin))
     partagé.
     """
     h = _get_hypervisor(hv_id)
-    return await _provider(h).list_all_templates(h)
+    return _annoter_gabarits(await _provider(h).list_all_templates(h))
+
+
+async def _uuid_du_modele(h: Hypervisor, vmid: int) -> str:
+    modele = next((m for m in await _provider(h).list_all_templates(h) if int(m["vmid"]) == vmid), None)
+    if not modele:
+        raise HTTPException(status_code=404, detail="Modèle introuvable sur cet hyperviseur")
+    uuid = (modele.get("uuid") or "").strip().lower()
+    if not _UUID_RE.match(uuid):
+        raise HTTPException(status_code=409, detail="L'hyperviseur ne donne pas d'UUID pour ce modèle")
+    return uuid
+
+
+@app.post("/hypervisors/{hv_id}/templates/{vmid}/osiris", status_code=204)
+async def marquer_gabarit(hv_id: int, vmid: int, current_user: User = Depends(require_admin)):
+    """Marque à la main un modèle comme gabarit OSIRIS.
+
+    Pour les gabarits scellés avant que le scellement ne s'enregistre lui-même :
+    sans ça, ils seraient tous refusés en clone nu alors qu'ils fonctionnent. Faute
+    d'empreinte, leur agent est dit « inconnu », jamais « à jour ».
+    """
+    h = _get_hypervisor(hv_id)
+    uuid = await _uuid_du_modele(h, vmid)
+    with Session(engine) as session:
+        if not session.exec(select(GabaritOsiris).where(GabaritOsiris.uuid.in_(_variantes_uuid(uuid)))).first():
+            session.add(GabaritOsiris(uuid=uuid))
+        _log(session, current_user, "marquer_gabarit", details={"hypervisor_id": hv_id, "vmid": vmid})
+        session.commit()
+    return Response(status_code=204)
+
+
+@app.delete("/hypervisors/{hv_id}/templates/{vmid}/osiris", status_code=204)
+async def demarquer_gabarit(hv_id: int, vmid: int, current_user: User = Depends(require_admin)):
+    """Retire la marque : le modèle redevient un modèle quelconque de l'hyperviseur."""
+    h = _get_hypervisor(hv_id)
+    uuid = await _uuid_du_modele(h, vmid)
+    with Session(engine) as session:
+        for g in session.exec(select(GabaritOsiris).where(GabaritOsiris.uuid.in_(_variantes_uuid(uuid)))).all():
+            session.delete(g)
+        _log(session, current_user, "demarquer_gabarit", details={"hypervisor_id": hv_id, "vmid": vmid})
+        session.commit()
+    return Response(status_code=204)
 
 
 @app.get("/hypervisors/{hv_id}/nodes/{node}/templates")

@@ -311,6 +311,14 @@ def _nic_backing(network):
     )
 
 
+def _famille_invite(guest_id: str) -> str:
+    """« windows » ou « linux » d'après le type d'invité vSphere, « » s'il est absent."""
+    g = guest_id.lower()
+    if not g:
+        return ""
+    return "windows" if g.startswith("win") else "linux"
+
+
 class VSphereProvider:
     """vCenter Server. Même contrat que `ProxmoxProvider`."""
 
@@ -397,6 +405,12 @@ class VSphereProvider:
                     "cores":     vm.config.hardware.numCPU if vm.config.hardware else 0,
                     "maxmem_gb": round((vm.config.hardware.memoryMB or 0) / 1024, 1)
                                  if vm.config.hardware else 0,
+                    # Identité du gabarit pour OSIRIS : cf. GabaritOsiris
+                    "uuid":      (getattr(vm.config, "uuid", "") or "").lower(),
+                    # Famille déclarée à l'hyperviseur (« windows2019srv_64Guest »,
+                    # « debian11_64Guest »…) : sans elle, un gabarit marqué à la main
+                    # se proposait sous n'importe quel système.
+                    "famille":   _famille_invite(getattr(vm.config, "guestId", "") or ""),
                 })
             return sorted(out, key=lambda d: d["vmid"])
         return await _run(work)
