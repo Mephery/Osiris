@@ -6,6 +6,7 @@ import type { Profile, Application, WimFile } from './types'
 import { authHeader } from './types'
 import { IcoX, IcoPencil } from './icons'
 import { APP_LOGOS } from './appIconMap'
+import { ResumeProfil } from './ResumeProfil'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
@@ -116,13 +117,14 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
         <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Profils de déploiement</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {profiles.map(p => (
-            <div key={p.id} className="flex items-center justify-between py-1.5 px-3 border border-slate-800/60 rounded">
+            <div key={p.id} className={`flex items-start justify-between py-1.5 px-3 border rounded ${p.resume?.alerte ? 'border-red-800/70' : 'border-slate-800/60'}`}>
               <div className="min-w-0">
                 <span className="text-white text-sm font-medium">{p.name}</span>
                 <span className={`ml-2 osiris-os-badge osiris-os-badge--${p.os}`}>{p.os}</span>
                 {p.machine_type === 'server' && <span className="ml-1 inline-block border border-amber-700/60 text-amber-500 rounded px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider">serveur</span>}
                 <p className="text-[10px] font-mono text-slate-600 mt-0.5">{p.locale} · {p.keyboard} · {p.timezone}</p>
-                {p.os === 'windows' && <p className="text-[10px] font-mono text-slate-500">WIM index: <strong className="text-slate-300">{p.win_index}</strong>{p.domain ? ` · ${p.domain}` : ''}</p>}
+                {p.os === 'windows' && <p className="text-[10px] font-mono text-slate-500">WIM index: <strong className="text-slate-300">{p.win_index}</strong></p>}
+                <ResumeProfil resume={p.resume} />
               </div>
               <div className="flex gap-1 ml-3 flex-shrink-0">
                 <button onClick={() => setEditingProfile(p)} className="osiris-action-btn" title="Editer"><IcoPencil /></button>

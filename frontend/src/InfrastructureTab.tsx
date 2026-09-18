@@ -6,7 +6,8 @@ import type { ClusterStorage, Hypervisor, NetworkDefaults, Organization, Profile
 import { authHeader } from './types'
 import { IcoX } from './icons'
 import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree,
-         adressageFixeImpossible } from './vmForm'
+         adressageFixeImpossible, avecProfil, profilsPourVm } from './vmForm'
+import { ResumeProfil } from './ResumeProfil'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 
@@ -211,6 +212,13 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
         .map(o => o === 'bridge' ? "lu sur l'hyperviseur" : 'repris des déploiements précédents')
         .join(' · ')
     : ''
+
+  const profilsVm = profilsPourVm(profiles, vmForm.os)
+  const profilEffectif = profiles.find(p => String(p.id) === String(vmForm.profile_id))
+  // Sans profil, le serveur retomberait sur le plus ancien de l'OS ; sans accès,
+  // il refuserait. Dans les deux cas, autant le dire ici, bouton grisé.
+  const vmSansProfil = !profilEffectif
+  const vmInaccessible = vmSansProfil || Boolean(profilEffectif?.resume?.alerte)
 
   return (
     <div className="osiris-table-wrap p-5 space-y-6 max-w-4xl">
@@ -426,7 +434,11 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
       {hypervisors.length > 0 && (
         <div className="pt-3 border-t border-slate-800/50">
           {!showVmForm ? (
-            <button onClick={() => setShowVmForm(true)} className="osiris-btn text-xs px-4">+ Créer une VM</button>
+            <button onClick={() => {
+                setShowVmForm(true)
+                // Présélection : quelqu'un qui découvre l'outil doit trouver un bon choix déjà fait
+                setVmForm(f => f.profile_id ? f : avecProfil(f, profilsPourVm(profiles, f.os).utilisables[0]))
+              }} className="osiris-btn text-xs px-4">+ Créer une VM</button>
           ) : (
             <form onSubmit={handleCreateVm} className="space-y-3">
               <div className="flex items-center justify-between">
@@ -445,36 +457,39 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                   <option value="">— Aucune organisation (pas de supervision) —</option>
                   {organizations.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
                 </select>
-                <select value={vmForm.os} onChange={e => setVmForm(f => ({
-                    ...f, os: e.target.value, profile_id: '',
+                <select value={vmForm.os} onChange={e => setVmForm(f => avecProfil({
+                    ...f, os: e.target.value,
                     // Windows = PXE uniquement (WinPE) : le cloud-init est spécifique Linux.
                     ...(e.target.value === 'windows' ? { boot_mode: 'pxe', template_id: '' } : {}),
-                  }))} className="osiris-input text-xs">
+                  }, profilsPourVm(profiles, e.target.value).utilisables[0]))} className="osiris-input text-xs">
                   <option value="ubuntu">Ubuntu</option>
                   <option value="debian">Debian</option>
                   <option value="windows">Windows</option>
                 </select>
-                {/* Choisir un profil reprend son gabarit matériel : c'est le profil
-                    qui sait ce que demande ce type de serveur, pas l'opérateur. Les
-                    valeurs restent modifiables juste en dessous. */}
-                <select value={vmForm.profile_id} onChange={e => {
-                    const p = profiles.find(p => String(p.id) === e.target.value)
-                    setVmForm(f => ({
-                      ...f, profile_id: e.target.value,
-                      ...(p ? {
-                        vcpus: p.vm_vcpus ?? f.vcpus,
-                        ram_mb: p.vm_ram_mb ?? f.ram_mb,
-                        disk_gb: p.vm_disk_gb ?? f.disk_gb,
-                        data_disk_gb: p.vm_data_disk_gb ?? f.data_disk_gb,
-                      } : {}),
-                    }))
-                  }} className="osiris-input text-xs">
-                  <option value="">Profil par défaut</option>
-                  {profiles.filter(p => p.os === vmForm.os).map(p => (
+                {/* Pas d'option « par défaut » : elle désignait en silence le plus
+                    ancien profil de l'OS — pour Ubuntu, un poste sans aucune clé. Les
+                    profils utilisables d'abord (le premier est présélectionné à
+                    l'ouverture), ceux qui ne donnent aucun accès grisés en dessous,
+                    avec la raison : on voit pourquoi ils ne sont pas proposés. */}
+                <select required value={vmForm.profile_id} onChange={e => setVmForm(f => avecProfil(f, profiles.find(p => String(p.id) === e.target.value)))} className="osiris-input text-xs">
+                  {!vmForm.profile_id && (
+                    <option value="" disabled>{profilsVm.utilisables.length ? '— Choisir un profil —' : 'Aucun profil utilisable pour cet OS'}</option>
+                  )}
+                  {profilsVm.utilisables.map(p => (
                     <option key={p.id} value={p.id}>{p.name}{p.machine_type === 'server' ? ' [serveur]' : ''}</option>
                   ))}
+                  {profilsVm.inutilisables.length > 0 && (
+                    <optgroup label="Inutilisables pour une VM : aucun accès">
+                      {profilsVm.inutilisables.map(p => (
+                        <option key={p.id} value={p.id} disabled>{p.name}</option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
                 <input placeholder="OU (optionnel)" value={vmForm.ou} onChange={e => setVmForm(f => ({...f, ou: e.target.value}))} className="osiris-input text-xs font-mono col-span-2" />
+                <div className="col-span-2">
+                  <ResumeProfil resume={profilEffectif?.resume} />
+                </div>
               </div>
 
               {/* Sélection hyperviseur + noeud */}
@@ -676,7 +691,16 @@ export function InfrastructureTab({ token, hypervisors, profiles, organizations,
                   hyperviseur : y faire CHERCHER un secret, jamais l'y ecrire.
                 </p>
               </div>
-              <button type="submit" disabled={vmCreating || !vmNode || !vmForm.storage || !vmForm.bridge} className="osiris-btn text-xs px-4 w-full disabled:opacity-50">
+              {vmInaccessible && (
+                <p className="text-[10px] text-red-400">
+                  {!vmSansProfil
+                    ? "Création impossible avec ce profil : personne ne pourrait entrer dans la VM. Lui ajouter une clé SSH ou le mot de passe root de secours, ou en choisir un autre."
+                    : profilsVm.utilisables.length
+                      ? 'Choisir un profil de déploiement.'
+                      : "Aucun profil de cet OS ne donne accès à une VM. En créer un avec une clé SSH (Administration → Profils), ou ajouter une clé à un profil existant."}
+                </p>
+              )}
+              <button type="submit" disabled={vmCreating || vmInaccessible || !vmNode || !vmForm.storage || !vmForm.bridge} className="osiris-btn text-xs px-4 w-full disabled:opacity-50">
                 {vmCreating ? 'Création en cours...' : 'Créer et démarrer la VM'}
               </button>
             </form>

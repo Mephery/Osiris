@@ -169,6 +169,22 @@ export interface Profile {
   vm_data_disk_gb: number;
   /** Linux : poser un mot de passe root aléatoire, stocké chiffré côté OSIRIS. */
   set_root_password: boolean;
+  /** Ce que le profil fera vraiment, calculé par le serveur sur les mêmes
+   *  conditions que les scripts de premier démarrage. Absent d'un profil en
+   *  cours de saisie, qui n'a pas encore été enregistré. */
+  resume?: ResumeProfil;
+}
+
+export interface LigneResume {
+  sujet: string;
+  texte: string;
+  ton: 'ok' | 'attention' | 'neutre';
+}
+
+export interface ResumeProfil {
+  lignes: LigneResume[];
+  /** Non vide quand le profil ne laisse AUCUN moyen d'entrer dans la machine. */
+  alerte: string;
 }
 
 export interface Application {

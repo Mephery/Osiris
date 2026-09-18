@@ -76,3 +76,45 @@ export const adressageFixeImpossible = (
   bootMode: string,
 ): boolean => (typeHyperviseur ?? 'proxmox').toLowerCase() === 'proxmox'
   && bootMode === 'template'
+
+/** Le profil qu'OSIRIS utilisera quand aucun n'est choisi : le plus ancien de
+ *  l'OS, comme `_resolve_profile` côté serveur.
+ *
+ *  « Profil par défaut » laisse croire à un réglage neutre. C'est en réalité un
+ *  profil bien précis — pour Ubuntu, un poste de travail qui joint l'AD et ne
+ *  dépose aucune clé SSH —, choisi sans que personne l'ait vu. */
+export const profilParDefaut = <P extends { id: number; os: string }>(
+  profils: P[],
+  os: string,
+): P | undefined =>
+  profils.filter(p => p.os === os).reduce<P | undefined>((plusAncien, p) => (!plusAncien || p.id < plusAncien.id ? p : plusAncien), undefined)
+
+/** Les profils d'un OS, séparés entre ceux qui peuvent créer une VM et les autres.
+ *
+ *  Un profil sans aucune porte d'entrée (ni clé SSH, ni domaine, ni root de
+ *  secours — cf. `resume.alerte`, calculé par le serveur) déploierait une VM où
+ *  personne n'entre ; le serveur la refuse. Le formulaire ne doit donc pas le
+ *  proposer comme un choix ordinaire : quelqu'un qui découvre l'outil prend le
+ *  nom le plus rassurant, « Ubuntu — par défaut », qui était justement celui-là.
+ *
+ *  Le tri porte sur ce que fait le profil, jamais sur son nom ou son numéro : un
+ *  profil créé demain sans clé tombera tout seul du bon côté. */
+export const profilsPourVm = <P extends { id: number; os: string; resume?: { alerte: string } }>(
+  profils: P[],
+  os: string,
+): { utilisables: P[]; inutilisables: P[] } => {
+  const duSysteme = profils.filter(p => p.os === os).sort((a, b) => a.id - b.id)
+  return {
+    utilisables: duSysteme.filter(p => !p.resume?.alerte),
+    inutilisables: duSysteme.filter(p => Boolean(p.resume?.alerte)),
+  }
+}
+
+/** Sélectionne un profil et reprend son gabarit matériel : c'est le profil qui
+ *  sait ce que demande ce type de serveur. Les valeurs restent modifiables. */
+export const avecProfil = <F extends { profile_id: string; vcpus: number; ram_mb: number; disk_gb: number; data_disk_gb: number }>(
+  f: F,
+  p: { id: number; vm_vcpus?: number; vm_ram_mb?: number; vm_disk_gb?: number; vm_data_disk_gb?: number } | undefined,
+): F => p
+  ? { ...f, profile_id: String(p.id), vcpus: p.vm_vcpus ?? f.vcpus, ram_mb: p.vm_ram_mb ?? f.ram_mb, disk_gb: p.vm_disk_gb ?? f.disk_gb, data_disk_gb: p.vm_data_disk_gb ?? f.data_disk_gb }
+  : { ...f, profile_id: '' }

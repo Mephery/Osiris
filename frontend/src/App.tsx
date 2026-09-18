@@ -24,6 +24,8 @@ import { SettingsModal } from './SettingsModal'
 import { ProfilesSection } from './ProfilesSection'
 import { SkeletonRows } from './Skeleton'
 import { MachineDetailPanel } from './MachineDetailPanel'
+import { ResumeProfil } from './ResumeProfil'
+import { profilParDefaut } from './vmForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://10.0.0.1:8000'
 // ── Composant principal ────────────────────────────────────────────────────────
@@ -1758,12 +1760,12 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
               <div className="space-y-1.5">
                 <label className="block text-[10px] font-semibold uppercase tracking-widest text-slate-600">
                   Profil de déploiement
-                  <span className="ml-1 text-slate-700 normal-case font-normal">(optionnel — utilise le profil par défaut sinon)</span>
                 </label>
                 <select value={formData.profile_id ?? ''} onChange={(e) => setFormData({ ...formData, profile_id: e.target.value ? Number(e.target.value) : null })} className="osiris-input">
-                  <option value="">— Par défaut —</option>
+                  <option value="">{profilParDefaut(profiles, formData.os) ? `Par défaut : ${profilParDefaut(profiles, formData.os)!.name}` : 'Aucun profil pour cet OS'}</option>
                   {profiles.filter(p => p.os === formData.os).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
+                <ResumeProfil resume={(profiles.find(p => p.id === formData.profile_id) ?? profilParDefaut(profiles, formData.os))?.resume} physique />
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">

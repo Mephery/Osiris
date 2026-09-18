@@ -625,6 +625,49 @@ fi
 {% endfor %}
 {% endif %}
 
+# Acces a la machine - mesure sur la machine, pas deduit du profil.
+# Un profil sans cle, sans domaine et sans mot de passe de secours deployait une
+# machine ou personne ne pouvait entrer, et OSIRIS ecrivait « reussi ». Le profil
+# ne sait pas tout : le gabarit peut apporter ses propres comptes, une cle peut
+# etre mal collee. On compte donc ce qui existe VRAIMENT, et zero porte d'entree
+# est un echec du deploiement, pas un avertissement.
+# Coutures OSIRIS_PASSWD / OSIRIS_HOME_RACINE : relire le controle en test sans
+# toucher aux comptes de la machine qui fait tourner les tests.
+_portes_d_entree() {
+    local _ssh_actif=false _portes=""
+    if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
+        _ssh_actif=true
+    fi
+    while IFS=: read -r _u _x _uid _gid _gecos _home _shell; do
+        case "$_shell" in */nologin|*/false|"") continue ;; esac
+        _home="${OSIRIS_HOME_RACINE:-}$_home"
+        # Une cle sans serveur SSH ne sert a rien
+        if [ "$_ssh_actif" = true ] && [ -f "$_home/.ssh/authorized_keys" ] \
+                && grep -qvE '^[[:space:]]*(#|$)' "$_home/.ssh/authorized_keys" 2>/dev/null; then
+            _portes="$_portes cle SSH ($_u),"
+        fi
+        # P = mot de passe utilisable ; L (verrouille) et NP (vide) ne sont pas des portes
+        if [ "$(passwd -S "$_u" 2>/dev/null | awk '{print $2}')" = "P" ]; then
+            _portes="$_portes mot de passe ($_u),"
+        fi
+    done < "${OSIRIS_PASSWD:-/etc/passwd}"
+    if realm list --name-only 2>/dev/null | grep -q .; then
+        _portes="$_portes domaine,"
+    fi
+    printf '%s' "${_portes%,}"
+}
+_acces=$(_portes_d_entree)
+if [ -n "$_acces" ]; then
+    _add_test "Acces a la machine" true "${_acces# }"
+else
+    _add_test "Acces a la machine" false "aucune cle SSH, aucun mot de passe utilisable, aucun domaine : personne ne peut entrer"
+    _log "ECHEC : machine inaccessible - ajouter une cle SSH ou le mot de passe root de secours au profil, puis redeployer"
+    if [ "$_osiris_failed" -eq 0 ]; then
+        curl -s -X POST "$osiris_url/machines/$_osiris_mac/status?status=failed" --max-time 10 > /dev/null || true
+        _osiris_failed=1
+    fi
+fi
+
 _smoke_json+="]"
 
 # Envoi du rapport a OSIRIS

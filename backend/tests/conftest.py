@@ -136,6 +136,21 @@ def test_machine(clean_db, test_profile):
 
 
 @pytest.fixture(autouse=True)
+def vm_sans_acces_toleree(request, monkeypatch):
+    """Neutralise le refus d'une VM sans accès, sauf pour les tests marqués `refus_acces`.
+
+    Les tests de création de VM portent sur l'adressage, l'identité, le clonage…
+    et créent leurs VM sans profil, donc sans porte d'entrée. Le refus les
+    ferait tous tomber sur une règle qui n'est pas leur sujet. Il a ses propres
+    tests (test_vm_inaccessible.py).
+    """
+    if request.node.get_closest_marker("refus_acces"):
+        return
+    import main
+    monkeypatch.setattr(main, "_refuser_vm_sans_acces", lambda body: None)
+
+
+@pytest.fixture(autouse=True)
 def limiteur_remis_a_zero():
     """
     Remet le limiteur de débit à zéro entre chaque test.

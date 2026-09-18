@@ -1157,8 +1157,82 @@ def revoke_api_key(key_id: int, current_user: User = Depends(get_current_user)):
 
 # ── Profils de déploiement ─────────────────────────────────────────────────────
 
-def _profile_dict(p: Profile) -> dict:
+def _profile_summary(p: Profile, session: Session | None = None) -> dict:
+    """Ce que le profil fera VRAIMENT à une machine, en quelques lignes lisibles.
+
+    Deux profils Debian identiques à l'œil, dont un seul donnait un accès : le
+    second a déployé une machine où personne ne pouvait entrer, et OSIRIS l'a
+    déclarée réussie. Rien, dans la liste, ne distinguait les deux. Ce résumé
+    se lit sur les MÊMES conditions que les scripts de premier démarrage — s'il
+    les paraphrasait, il finirait par annoncer ce que la machine ne fait pas.
+
+    Chaque ligne : {"sujet", "texte", "ton"} avec ton ∈ ok | attention | neutre.
+    `alerte` est non vide quand le profil ne laisse AUCUN moyen d'entrer dans
+    une VM. Une machine physique n'est pas concernée : son installeur pose un
+    mot de passe aléatoire, affiché une fois à la création de la fiche. Une VM
+    n'en reçoit aucun — c'est pour elle que l'alerte vaut refus.
+    """
+    serveur = p.machine_type == "server"
+    domaine, join_user, join_password = _resolve_domain(p, session)
+    lignes: list[dict] = []
+
+    def ligne(sujet: str, texte: str, ton: str = "neutre"):
+        lignes.append({"sujet": sujet, "texte": texte, "ton": ton})
+
+    ligne("Type", "Serveur" if serveur else "Poste de travail")
+
+    # Mêmes conditions que firstboot-ubuntu.sh.j2 / unattend.xml.j2
+    if p.os == "windows":
+        jonction = bool(p.join_domain and join_user and join_password)
+    else:
+        jonction = bool(p.join_domain and domaine and join_user and join_password)
+    if jonction:
+        ligne("Domaine", f"joint {domaine}", "ok")
+    elif p.join_domain and p.os == "windows":
+        ligne("Domaine", f"{domaine} sans compte de jonction : n'aboutit que si "
+                         "le compte ordinateur existe déjà dans l'AD", "attention")
+    elif p.join_domain:
+        ligne("Domaine", "jonction demandée mais aucun compte de jonction : "
+                         "la machine restera hors domaine", "attention")
+    else:
+        ligne("Domaine", "hors domaine")
+
+    if p.os == "windows":
+        rotation = (f", renouvelé tous les {p.laps_rotation_days} j"
+                    if p.laps_rotation_days else "")
+        ligne("Accès", f"administrateur local, mot de passe unique gardé par OSIRIS{rotation}", "ok")
+        return {"lignes": lignes, "alerte": ""}
+
+    cles = [c for c in (p.ssh_authorized_keys or "").splitlines()
+            if c.strip() and not c.strip().startswith("#")]
+    user = (p.default_user or "").strip()
+    acces_ssh = bool(user and cles)
+    if user:
+        ligne("Compte", f"{user} (sudo)")
+    if acces_ssh:
+        ligne("SSH", f"par clé pour {user} ({len(cles)} clé{'s' if len(cles) > 1 else ''})", "ok")
+    elif cles:
+        ligne("SSH", "clés présentes mais aucun compte local : elles ne seront posées nulle part", "attention")
+    else:
+        ligne("SSH", "aucune clé", "attention")
+    if serveur:
+        # Durcissement serveur : le mot de passe ne compte plus en SSH, seulement en console
+        ligne("Mot de passe SSH", "désactivé")
+    if p.set_root_password:
+        ligne("Secours", "mot de passe root en console, gardé par OSIRIS", "ok")
+    else:
+        ligne("Secours", "aucun accès console")
+
+    alerte = ""
+    if not (acces_ssh or jonction or p.set_root_password):
+        alerte = ("Aucun accès prévu pour une VM : ni clé SSH, ni domaine, ni mot de passe "
+                  "root de secours. Elle se déploierait et personne ne pourrait s'y connecter.")
+    return {"lignes": lignes, "alerte": alerte}
+
+
+def _profile_dict(p: Profile, session: Session | None = None) -> dict:
     return {
+        "resume": _profile_summary(p, session),
         "id": p.id, "name": p.name, "os": p.os,
         "locale": p.locale, "keyboard": p.keyboard, "timezone": p.timezone,
         "default_user": p.default_user, "extra_packages": p.extra_packages,
@@ -1187,9 +1261,14 @@ def _profile_dict(p: Profile) -> dict:
     }
 
 
-def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
-    """Profil avec secrets déchiffrés — uniquement pour les templates Jinja2, jamais renvoyé au client."""
-    # Résolution du domaine AD : la DomainConfig liée fournit des valeurs, mais ne doit
+def _resolve_domain(p: Profile, session: Session | None) -> tuple[str, str, str]:
+    """Domaine et compte de jonction EFFECTIFS du profil : (domaine, user, mot de passe clair).
+
+    Partagé par le rendu des scripts et par le résumé affiché : si les deux
+    résolvaient chacun de leur côté, l'écran pourrait annoncer une jonction que
+    la machine ne fera pas.
+    """
+    # La DomainConfig liée fournit des valeurs, mais ne doit
     # écraser un champ du profil QUE si elle le renseigne réellement — sinon on efface
     # silencieusement le compte de jonction du profil (footgun : jonction avec creds vides).
     domain = p.domain
@@ -1206,6 +1285,12 @@ def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
             if dc.join_user:
                 domain_join_user = dc.join_user
                 domain_join_password = decrypt(dc.join_password or "")
+    return domain, domain_join_user, domain_join_password
+
+
+def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
+    """Profil avec secrets déchiffrés — uniquement pour les templates Jinja2, jamais renvoyé au client."""
+    domain, domain_join_user, domain_join_password = _resolve_domain(p, session)
     # WiFi : porte par la DomainConfig. On la retrouve via domain_config_id, sinon
     # (profil a domaine inline) via correspondance sur le nom de domaine resolu.
     wifi_ssid = ""
@@ -1254,7 +1339,9 @@ def _resolve_profile(session: Session, machine: Machine) -> Profile:
         profile = session.get(Profile, machine.profile_id)
         if profile:
             return profile
-    profile = session.exec(select(Profile).where(Profile.os == machine.os)).first()
+    # ORDER BY : sans lui, « le premier » est l'ordre physique de Postgres, qui
+    # change à chaque mise à jour d'un profil. L'écran annonce le plus ancien.
+    profile = session.exec(select(Profile).where(Profile.os == machine.os).order_by(Profile.id)).first()
     if profile:
         return profile
     return Profile(name="_fallback", os=machine.os)
@@ -1263,7 +1350,7 @@ def _resolve_profile(session: Session, machine: Machine) -> Profile:
 @app.get("/profiles", dependencies=[Depends(get_current_user)])
 def get_profiles():
     with Session(engine) as session:
-        return [_profile_dict(p) for p in session.exec(select(Profile)).all()]
+        return [_profile_dict(p, session) for p in session.exec(select(Profile).order_by(Profile.id)).all()]
 
 
 @app.post("/profiles", status_code=201)
@@ -1279,7 +1366,7 @@ def create_profile(body: ProfileCreate, current_user: User = Depends(require_adm
         _log(session, current_user, "create_profile", details={"name": body.name, "os": body.os})
         session.commit()
         session.refresh(profile)
-        return _profile_dict(profile)
+        return _profile_dict(profile, session)
 
 
 @app.patch("/profiles/{profile_id}")
@@ -1305,7 +1392,7 @@ def update_profile(profile_id: int, patch: ProfilePatch, current_user: User = De
         _log(session, current_user, "update_profile", details={"id": profile_id, **changes})
         session.commit()
         session.refresh(profile)
-        return _profile_dict(profile)
+        return _profile_dict(profile, session)
 
 
 @app.delete("/profiles/{profile_id}", status_code=204)
@@ -1342,7 +1429,7 @@ def clone_profile(profile_id: int, current_user: User = Depends(require_admin)):
         _log(session, current_user, "clone_profile", details={"source": src.name})
         session.commit()
         session.refresh(clone)
-        return _profile_dict(clone)
+        return _profile_dict(clone, session)
 
 
 # ── Images OS ─────────────────────────────────────────────────────────────────
@@ -4731,7 +4818,7 @@ def _resolve_profile_for_vm(body) -> Profile:
     with Session(engine) as session:
         profile = session.get(Profile, body.profile_id) if body.profile_id else None
         if not profile:
-            profile = session.exec(select(Profile).where(Profile.os == body.os)).first()
+            profile = session.exec(select(Profile).where(Profile.os == body.os).order_by(Profile.id)).first()
     return profile or Profile(name="_fallback", os=body.os)
 
 
@@ -4874,6 +4961,27 @@ def _valider_adressage(body) -> None:
                 f"serveurs se séparent par des virgules : « 8.8.8.8, 1.1.1.1 »."))
 
 
+def _refuser_vm_sans_acces(body) -> None:
+    """Refuse une VM dont le profil ne laisse aucune porte d'entrée.
+
+    Une VM ne reçoit aucun mot de passe : sans clé SSH, sans domaine et sans root
+    de secours, elle se déployait, se déclarait réussie, et personne ne pouvait
+    y entrer. Vécu le 17/09. Mieux vaut un refus qui dit quoi corriger qu'une VM
+    à détruire. Le contrôle post-déploiement « Accès à la machine » reste le
+    filet : il mesure ce que le gabarit apporte en plus, ce qu'on ne sait pas ici.
+    """
+    profile = _resolve_profile_for_vm(body)
+    with Session(engine) as session:
+        alerte = _profile_summary(profile, session)["alerte"]
+    if alerte:
+        if profile.name == "_fallback":
+            remede = f"Aucun profil n'existe pour « {body.os} » : en créer un avec une clé SSH."
+        else:
+            remede = (f"Ajouter une clé SSH ou le mot de passe root de secours au profil "
+                      f"« {profile.name} », ou en choisir un autre.")
+        raise HTTPException(status_code=400, detail=f"{alerte} {remede}")
+
+
 @app.post("/hypervisors/{hv_id}/create-vm", status_code=201)
 async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends(require_admin)):
     """
@@ -4894,6 +5002,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     # Avant le moindre appel à l'hyperviseur : un adressage mal formé ne doit pas
     # coûter un clone puis une destruction.
     _valider_adressage(body)
+    _refuser_vm_sans_acces(body)
 
     with Session(engine) as session:
         h = session.get(Hypervisor, hv_id)

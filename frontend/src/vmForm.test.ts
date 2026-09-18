@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -151,5 +151,67 @@ describe('adressageFixeImpossible', () => {
     // Le défaut historique du champ `type` : mieux vaut refuser à tort et le
     // dire que laisser passer une adresse qui sera perdue en silence.
     expect(adressageFixeImpossible(undefined, 'template')).toBe(true)
+  })
+})
+
+describe('profilParDefaut', () => {
+  // Même règle que _resolve_profile côté serveur : le plus ancien de l'OS.
+  // L'écran l'annonce par son nom — il doit désigner celui qui sera réellement pris.
+  const profils = [
+    { id: 7, os: 'ubuntu' },
+    { id: 3, os: 'debian' },
+    { id: 2, os: 'ubuntu' },
+    { id: 9, os: 'ubuntu' },
+  ]
+
+  it("prend le plus petit identifiant de l'OS, quel que soit l'ordre reçu", () => {
+    expect(profilParDefaut(profils, 'ubuntu')?.id).toBe(2)
+  })
+
+  it("ignore les profils d'un autre OS", () => {
+    expect(profilParDefaut(profils, 'debian')?.id).toBe(3)
+  })
+
+  it("ne désigne rien quand l'OS n'a aucun profil", () => {
+    expect(profilParDefaut(profils, 'windows')).toBeUndefined()
+  })
+})
+
+describe('profilsPourVm', () => {
+  const sans = { alerte: 'Aucun accès prévu pour une VM' }
+  const avec = { alerte: '' }
+  const profils = [
+    { id: 13, os: 'ubuntu', resume: avec },
+    { id: 1, os: 'ubuntu', resume: sans },
+    { id: 4, os: 'ubuntu', resume: sans },
+    { id: 14, os: 'debian', resume: avec },
+  ]
+
+  it("met à part les profils sans accès, quel que soit leur nom ou leur rang", () => {
+    const { utilisables, inutilisables } = profilsPourVm(profils, 'ubuntu')
+    expect(utilisables.map(p => p.id)).toEqual([13])
+    expect(inutilisables.map(p => p.id)).toEqual([1, 4])
+  })
+
+  it("le premier utilisable est celui qu'on présélectionne — jamais un profil sans accès", () => {
+    // Le cas du piège : le plus ancien profil Ubuntu (1) est celui sans accès
+    expect(profilsPourVm(profils, 'ubuntu').utilisables[0]?.id).toBe(13)
+  })
+
+  it("ne propose rien quand aucun profil de l'OS ne donne accès", () => {
+    expect(profilsPourVm(profils.filter(p => p.id !== 14), 'debian').utilisables).toEqual([])
+  })
+})
+
+describe('avecProfil', () => {
+  const form = { profile_id: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, hostname: 'srv' }
+
+  it('reprend le gabarit matériel du profil et garde le reste du formulaire', () => {
+    const f = avecProfil(form, { id: 13, vm_vcpus: 4, vm_ram_mb: 8192, vm_disk_gb: 60, vm_data_disk_gb: 10 })
+    expect(f).toEqual({ profile_id: '13', vcpus: 4, ram_mb: 8192, disk_gb: 60, data_disk_gb: 10, hostname: 'srv' })
+  })
+
+  it("sans profil, vide la sélection plutôt que d'en garder une d'un autre OS", () => {
+    expect(avecProfil({ ...form, profile_id: '13' }, undefined).profile_id).toBe('')
   })
 })
