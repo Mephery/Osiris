@@ -499,7 +499,8 @@ export default function App() {
     if (auth.role !== 'admin') return
     // Chargement paresseux : on ne récupère les données d'une section que quand son sous-onglet est ouvert
     if (activeTab === 'admin') {
-      if (adminSubTab === 'domains') fetchDomainConfigs(auth.token)
+      // Les profils listent aussi les fiches AD : c'est là qu'on en choisit une.
+      if (adminSubTab === 'domains' || adminSubTab === 'profiles') fetchDomainConfigs(auth.token)
       else if (adminSubTab === 'vpn') fetchVpnTunnels(auth.token)
     }
     else if (activeTab === 'infrastructure') fetchHypervisors(auth.token)
@@ -1173,6 +1174,8 @@ export default function App() {
               token={auth.token}
               profiles={profiles}
               apps={apps}
+              domainConfigs={domainConfigs}
+              organizations={orgs}
               onProfilesChanged={() => fetchProfiles(auth.token)}
             />
             )}

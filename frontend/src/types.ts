@@ -160,6 +160,8 @@ export interface Profile {
   tv_suffix: string;
   app_ids: string;
   laps_rotation_days: number;
+  /** Fiche Domaine AD liée (null = domaine et compte saisis dans le profil). */
+  domain_config_id?: number | null;
   machine_type: string;
   ssh_authorized_keys: string;
   ntp_servers: string;

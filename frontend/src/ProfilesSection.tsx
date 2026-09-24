@@ -2,11 +2,12 @@
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { useState } from 'react'
 import { toast } from 'sonner'
-import type { Profile, Application, WimFile } from './types'
+import type { Profile, Application, WimFile, DomainConfig, Organization } from './types'
 import { authHeader } from './types'
 import { IcoX, IcoPencil } from './icons'
 import { APP_LOGOS } from './appIconMap'
 import { ResumeProfil } from './ResumeProfil'
+import { compteSaisiDansLeProfil, ficheDuProfil, libelleFiche } from './profilAd'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
@@ -16,6 +17,8 @@ interface ProfilesSectionProps {
   token: string
   profiles: Profile[]
   apps: Application[]
+  domainConfigs: DomainConfig[]
+  organizations: Organization[]
   onProfilesChanged: () => void
 }
 
@@ -39,6 +42,18 @@ function GoldenImageWarning({ winImage, hasSelectedApps, onClearApps }: { winIma
   )
 }
 
+// Ce que la fiche Domaine AD liée apporte au profil, à la place des champs qu'elle rend inutiles.
+function FicheAdLiee({ fiche, className }: { fiche: DomainConfig; className: string }) {
+  return (
+    <p className={`text-[10px] text-slate-500 self-center ${className}`}>
+      Domaine <span className="font-mono text-slate-300">{fiche.domain}</span>
+      {fiche.join_user
+        ? <> · compte <span className="font-mono text-slate-300">{fiche.join_user}</span> — géré dans Domaines AD</>
+        : <> · la fiche n'a pas de compte de jonction : saisissez-le ci-dessous</>}
+    </p>
+  )
+}
+
 // Grille de cartes pour le sélecteur d'applications, réutilisée pour la création et l'édition de profil.
 function AppGrid({ apps, selected, onToggle }: { apps: Application[]; selected: Set<string>; onToggle: (id: number) => void }) {
   return (
@@ -58,7 +73,7 @@ function AppGrid({ apps, selected, onToggle }: { apps: Application[]; selected: 
   )
 }
 
-export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: ProfilesSectionProps) {
+export function ProfilesSection({ token, profiles, apps, domainConfigs, organizations, onProfilesChanged }: ProfilesSectionProps) {
   const [newProfile, setNewProfile] = useState<Partial<Profile>>(EMPTY_PROFILE)
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<Profile | null>(null)
@@ -237,13 +252,26 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
             <input type="checkbox" checked={newProfile.join_domain ?? true} onChange={e => setNewProfile({ ...newProfile, join_domain: e.target.checked })} className="accent-blue-500" />
             Joindre l'AD
           </label>
-          {newProfile.join_domain && (
-            <>
-              <input placeholder="Domaine AD" value={newProfile.domain ?? ''} onChange={e => setNewProfile({ ...newProfile, domain: e.target.value })} className="osiris-input text-xs font-mono" />
-              <input placeholder="Compte jonction AD (ex: svc-joinpc)" value={newProfile.domain_join_user ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_user: e.target.value })} className="osiris-input text-xs font-mono" />
-              <input type="password" placeholder="Mot de passe jonction AD" value={newProfile.domain_join_password ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_password: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
-            </>
-          )}
+          {newProfile.join_domain && (() => {
+            const fiche = ficheDuProfil(newProfile.domain_config_id, domainConfigs)
+            return (
+              <>
+                <select value={newProfile.domain_config_id ?? 0} onChange={e => setNewProfile({ ...newProfile, domain_config_id: Number(e.target.value) })} title="Une fiche Domaine AD centralise le domaine et le compte de jonction d'un client" className="osiris-input text-xs">
+                  <option value={0}>Domaine saisi dans ce profil</option>
+                  {domainConfigs.map(dc => <option key={dc.id} value={dc.id}>{libelleFiche(dc, organizations)}</option>)}
+                </select>
+                {fiche
+                  ? <FicheAdLiee fiche={fiche} className="col-span-2 sm:col-span-2" />
+                  : <input placeholder="Domaine AD" value={newProfile.domain ?? ''} onChange={e => setNewProfile({ ...newProfile, domain: e.target.value })} className="osiris-input text-xs font-mono" />}
+                {compteSaisiDansLeProfil(fiche) && (
+                  <>
+                    <input placeholder="Compte jonction AD (ex: svc-joinpc)" value={newProfile.domain_join_user ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_user: e.target.value })} className="osiris-input text-xs font-mono" />
+                    <input type="password" placeholder="Mot de passe jonction AD" value={newProfile.domain_join_password ?? ''} onChange={e => setNewProfile({ ...newProfile, domain_join_password: e.target.value })} className="osiris-input text-xs font-mono col-span-2 sm:col-span-1" />
+                  </>
+                )}
+              </>
+            )
+          })()}
           {newProfile.os === 'windows' && (() => {
             const drives: {letter:string,path:string}[] = (() => { try { return JSON.parse(newProfile.network_drives || '[]') } catch { return [] } })()
             const printers: string[] = (() => { try { return JSON.parse(newProfile.printers || '[]') } catch { return [] } })()
@@ -379,14 +407,28 @@ export function ProfilesSection({ token, profiles, apps, onProfilesChanged }: Pr
                     <span>Joindre l'AD</span>
                   </label>
                 </label>
-                {editingProfile.join_domain && (<>
-                  <label className="text-xs text-slate-400 self-center">Domaine AD</label>
-                  <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain} onChange={e => setEditingProfile({ ...editingProfile, domain: e.target.value })} />
-                  <label className="text-xs text-slate-400 self-center">Compte jonction</label>
-                  <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain_join_user} onChange={e => setEditingProfile({ ...editingProfile, domain_join_user: e.target.value })} />
-                  <label className="text-xs text-slate-400 self-center">Mot de passe jonction</label>
-                  <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, domain_join_password: e.target.value })} />
-                </>)}
+                {editingProfile.join_domain && (() => {
+                  const fiche = ficheDuProfil(editingProfile.domain_config_id, domainConfigs)
+                  return (<>
+                    <label className="text-xs text-slate-400 self-center">Configuration AD</label>
+                    <select className="osiris-input text-xs" value={editingProfile.domain_config_id ?? 0} onChange={e => setEditingProfile({ ...editingProfile, domain_config_id: Number(e.target.value) })}>
+                      <option value={0}>Domaine saisi dans ce profil</option>
+                      {domainConfigs.map(dc => <option key={dc.id} value={dc.id}>{libelleFiche(dc, organizations)}</option>)}
+                    </select>
+                    {fiche
+                      ? <FicheAdLiee fiche={fiche} className="col-span-2" />
+                      : <>
+                          <label className="text-xs text-slate-400 self-center">Domaine AD</label>
+                          <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain} onChange={e => setEditingProfile({ ...editingProfile, domain: e.target.value })} />
+                        </>}
+                    {compteSaisiDansLeProfil(fiche) && (<>
+                      <label className="text-xs text-slate-400 self-center">Compte jonction</label>
+                      <input className="osiris-input text-xs font-mono" defaultValue={editingProfile.domain_join_user} onChange={e => setEditingProfile({ ...editingProfile, domain_join_user: e.target.value })} />
+                      <label className="text-xs text-slate-400 self-center">Mot de passe jonction</label>
+                      <input type="password" className="osiris-input text-xs font-mono" placeholder="(inchangé si vide)" onChange={e => setEditingProfile({ ...editingProfile, domain_join_password: e.target.value })} />
+                    </>)}
+                  </>)
+                })()}
                 {editingProfile.os === 'windows' && (<>
                   <div className="col-span-2 space-y-1">
                     <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">

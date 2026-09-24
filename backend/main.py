@@ -422,8 +422,13 @@ class MachinePatch(SQLModel):
     dns_servers: Optional[str] = None
 
 class ProfileCreate(SQLModel):
+    # Même règle que ProfilePatch : un champ du modèle absent d'ici est accepté
+    # par l'API puis jeté sans un mot. `laps_rotation_days` et `domain_config_id`
+    # l'ont été à la création jusqu'au 24/09. Un test vérifie la couverture.
     name: str
     os: str
+    laps_rotation_days: int = 0
+    domain_config_id: Optional[int] = None
     locale: str = "fr_FR.UTF-8"
     keyboard: str = "fr"
     timezone: str = "Europe/Paris"
@@ -463,7 +468,7 @@ class ProfilePatch(SQLModel):
     name: Optional[str] = None
     os: Optional[str] = None
     laps_rotation_days: Optional[int] = None
-    domain_config_id: Optional[int] = None
+    domain_config_id: Optional[int] = None   # 0 = détacher (None veut dire « inchangé »)
     locale: Optional[str] = None
     keyboard: Optional[str] = None
     timezone: Optional[str] = None
@@ -1356,6 +1361,8 @@ def _profile_dict(p: Profile, session: Session | None = None) -> dict:
         "vm_disk_gb": p.vm_disk_gb,
         "vm_data_disk_gb": p.vm_data_disk_gb,
         "set_root_password": p.set_root_password,
+        "laps_rotation_days": p.laps_rotation_days,
+        "domain_config_id": p.domain_config_id,
     }
 
 
@@ -1451,6 +1458,30 @@ def get_profiles():
         return [_profile_dict(p, session) for p in session.exec(select(Profile).order_by(Profile.id)).all()]
 
 
+def _appliquer_config_ad(session: Session, profile: Profile) -> None:
+    """Aligne un profil sur la configuration AD à laquelle il est lié.
+
+    Quand la fiche porte son propre compte de jonction, c'est lui qui sert
+    (`_resolve_domain`) : celui du profil n'est plus qu'un secret dormant, que
+    l'écran continuait d'afficher comme s'il comptait, et qui reprendrait du
+    service le jour où l'on viderait le compte de la fiche. On le retire. Une
+    fiche SANS compte laisse en revanche celui du profil en place : c'est le
+    cas « domaine et Wi-Fi centralisés, compte propre au profil ».
+    """
+    if not profile.domain_config_id:
+        profile.domain_config_id = None      # 0 = détacher le profil de sa fiche
+        return
+    dc = session.get(DomainConfig, profile.domain_config_id)
+    if not dc:
+        raise HTTPException(status_code=400, detail=(
+            f"Configuration AD n°{profile.domain_config_id} introuvable."))
+    if dc.domain:
+        profile.domain = dc.domain
+    if dc.join_user:
+        profile.domain_join_user = ""
+        profile.domain_join_password = ""
+
+
 @app.post("/profiles", status_code=201)
 def create_profile(body: ProfileCreate, current_user: User = Depends(require_admin)):
     if body.os not in ("ubuntu", "windows", "debian"):
@@ -1460,6 +1491,7 @@ def create_profile(body: ProfileCreate, current_user: User = Depends(require_adm
         data["tv_suffix"] = encrypt(data.get("tv_suffix", ""))
         data["domain_join_password"] = encrypt(data.get("domain_join_password", ""))
         profile = Profile(**data)
+        _appliquer_config_ad(session, profile)
         session.add(profile)
         _log(session, current_user, "create_profile", details={"name": body.name, "os": body.os})
         session.commit()
@@ -1480,12 +1512,27 @@ def update_profile(profile_id: int, patch: ProfilePatch, current_user: User = De
         if "os" in changes and changes["os"] not in ("ubuntu", "windows", "debian"):
             raise HTTPException(status_code=400, detail=(
                 f"OS « {changes['os']} » inconnu — attendu : ubuntu, debian ou windows."))
-        if "tv_suffix" in changes:
+        # `_profile_dict` masque ces deux secrets en « *** », et l'écran d'édition
+        # renvoie le profil tel qu'il l'a lu : sans ce filtre, enregistrer un profil
+        # sans toucher au mot de passe remplaçait le mot de passe de jonction par
+        # trois étoiles. Rien ne le montrait — le champ paraît toujours rempli — et
+        # la jonction échouait au déploiement suivant. Même piège, déjà corrigé,
+        # que le secret des hyperviseurs. Le mot de passe vide vaut aussi
+        # « inchangé » (c'est ce qu'annonce le formulaire) ; pour l'effacer, on
+        # vide le compte : un mot de passe sans compte ne sert à rien.
+        if changes.get("tv_suffix") == "***":
+            changes.pop("tv_suffix")
+        elif "tv_suffix" in changes:
             changes["tv_suffix"] = encrypt(changes["tv_suffix"])
-        if "domain_join_password" in changes:
+        if changes.get("domain_join_password") in ("", "***"):
+            changes.pop("domain_join_password")
+        elif "domain_join_password" in changes:
             changes["domain_join_password"] = encrypt(changes["domain_join_password"])
+        if changes.get("domain_join_user") == "":
+            changes["domain_join_password"] = ""
         for field, value in changes.items():
             setattr(profile, field, value)
+        _appliquer_config_ad(session, profile)
         session.add(profile)
         _log(session, current_user, "update_profile", details={"id": profile_id, **changes})
         session.commit()
