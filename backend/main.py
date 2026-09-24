@@ -5768,7 +5768,10 @@ async def _cloner_template(h: Hypervisor, body, vm_id: int) -> None:
                 f"vers « {body.node} ». Déployer sur « {source} », ou déplacer le disque "
                 f"du template sur un stockage partagé. Détail : {e.detail}"))
         raise
-    await _proxmox_wait_task(h, body.node, str(upid), max_wait=600)
+    # La tâche appartient au nœud qui l'a LANCÉE, c'est-à-dire `source` — pas au
+    # nœud d'accueil. Un UPID interrogé ailleurs se fait répondre « no such task »,
+    # et le déploiement échoue alors que le clone, lui, se déroule très bien.
+    await _proxmox_wait_task(h, source, str(upid), max_wait=600)
 
 
 async def _noeud_du_template(h: Hypervisor, template_id: int) -> str:

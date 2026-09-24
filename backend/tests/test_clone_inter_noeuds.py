@@ -41,7 +41,7 @@ def _hv() -> int:
 
 
 def _patch(monkeypatch) -> dict:
-    vu: dict = {"clones": []}
+    vu: dict = {"clones": [], "attentes": []}
 
     async def fake_get(h, path):
         if "type=vm" in path:
@@ -69,6 +69,9 @@ def _patch(monkeypatch) -> dict:
         return "UPID:pve:task"
 
     async def fake_wait(h, node, upid, max_wait=120):
+        # On ENREGISTRE le nœud : la version précédente de ce faux l'avalait, et
+        # c'est exactement ce qui a laissé passer le bug « no such task ».
+        vu["attentes"].append((node, upid))
         return None
 
     monkeypatch.setattr(main, "_proxmox_get", fake_get)
@@ -104,6 +107,28 @@ def test_le_clone_est_adresse_au_noeud_du_template(client, admin_headers, monkey
     chemin, _ = vu["clones"][0]
     assert "/nodes/pve2/qemu/9003/clone" in chemin, \
         f"le clone doit viser le nœud du template, vu : {chemin}"
+
+
+def test_l_attente_vise_le_noeud_qui_a_lance_la_tache(client, admin_headers, monkeypatch):
+    """Un UPID appartient au nœud qui l'a CRÉÉ, pas au nœud d'accueil.
+
+    Le clone partait bien vers le nœud du template, mais l'attente de la tâche
+    visait le nœud choisi dans le formulaire. Proxmox répondait alors
+    « no such task » (400) et le déploiement échouait — alors que le clone, lui,
+    se déroulait normalement. Le déploiement inter-nœuds n'avait donc jamais
+    fonctionné : le chemin n'était exercé qu'avec un gabarit vivant déjà sur le
+    nœud d'accueil, cas où les deux coïncident.
+    """
+    hv_id = _hv()
+    vu = _patch(monkeypatch)
+
+    resp = _creer(client, admin_headers, hv_id, node="pve1", template_id=9003)
+
+    assert resp.status_code == 201, resp.text
+    assert vu["attentes"], "aucune attente de tâche enregistrée"
+    noeud, _ = vu["attentes"][0]
+    assert noeud == "pve2", \
+        f"l'attente doit viser le nœud qui a lancé la tâche (pve2), vu : {noeud}"
 
 
 def test_la_vm_nait_sur_le_noeud_demande(client, admin_headers, monkeypatch):
