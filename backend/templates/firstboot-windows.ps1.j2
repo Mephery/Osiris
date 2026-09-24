@@ -370,7 +370,9 @@ try {
             }
             Enable-BitLocker -MountPoint "C:" -EncryptionMethod XtsAes256 -TpmAndPinProtector -Pin $securePin -SkipHardwareTest -ErrorAction Stop | Out-Null
         }
-        Write-Log "BitLocker TPM+PIN active - PIN : $pin"
+        # Jamais le PIN lui-meme : ce journal remonte a OSIRIS, qui le garde en base et
+        # l'exporte en .txt. Le PIN est range chiffre avec la cle, juste en dessous.
+        Write-Log "BitLocker TPM+PIN active (PIN a 6 chiffres genere)"
 
         if ($mac) {
             $blBody = @{ key = $existingKey; pin = $pin } | ConvertTo-Json

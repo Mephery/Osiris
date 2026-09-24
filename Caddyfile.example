@@ -101,3 +101,11 @@ http://10.0.0.1 {
         redir https://10.0.0.1{uri} 308
     }
 }
+
+# ── HTTP sur le nom public : redirection vers HTTPS ─────────────────────────
+# `auto_https disable_redirects` coupe la redirection automatique de Caddy : sans
+# ce bloc, http://<nom> tombe sur une page vide (200, 0 octet) au lieu de
+# basculer en HTTPS. Les rappels des machines passent par l'IP, pas par ce nom.
+http://osiris.example.local {
+    redir https://osiris.example.local{uri} 308
+}
