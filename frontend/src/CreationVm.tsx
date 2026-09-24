@@ -5,24 +5,17 @@ import { toast } from 'sonner'
 import type { GabaritOsiris, Hypervisor, NetworkDefaults, Organization, Profile, ProxmoxNetwork, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { buildCreateVmPayload, champsManquants, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree,
-         adressageFixeImpossible, avecProfil, gabaritsPourMode, modeParDefaut, profilsPourVm, type ModeVm } from './vmForm'
+         adressageFixeImpossible, avecProfil, gabaritsPourMode, modeParDefaut, profilsPourVm,
+         FORMULAIRE_VIDE, LIBELLE_MODE, recapVm, etapesVm } from './vmForm'
 import { ResumeProfil } from './ResumeProfil'
 import { ChampEnCours } from './Skeleton'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
-const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
-
 const ETAT_AGENT: Record<GabaritOsiris['etat'], string> = {
   a_jour: '',
   perime: ' — agent ancien',
   inconnu: ' — agent de version inconnue',
-}
-
-const LIBELLE_MODE: Record<ModeVm, string> = {
-  template: 'Clone du gabarit',
-  cloudinit: 'Clone + cloud-init',
-  pxe: 'Installation PXE',
 }
 
 interface CreationVmProps {
@@ -68,6 +61,9 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
     { ...FORMULAIRE_VIDE, organization_id: selectedOrg ?? '' as number | '' },
     profilsPourVm(profiles, FORMULAIRE_VIDE.os).utilisables[0]))
   const [vmCreating, setVmCreating]     = useState(false)
+  // Le formulaire rempli passe d'abord par un récapitulatif : créer une VM
+  // réserve des ressources et démarre une machine, ça se relit avant.
+  const [recap, setRecap]               = useState(false)
 
   // Hyperviseur et nœud réellement choisis À L'INSTANT. Chaque réponse s'y
   // compare avant d'écrire : changer d'hyperviseur pendant qu'une liste charge
@@ -175,11 +171,12 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const creer = (e: React.FormEvent) => {
     e.preventDefault()
     if (!vmHvId || !vmNode) return
+    if (!recap) { setRecap(true); return }
     setVmCreating(true)
     fetch(`${API_URL}/hypervisors/${vmHvId}/create-vm`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
-      body: JSON.stringify(buildCreateVmPayload(vmForm, vmNode)),
+      body: JSON.stringify(charge),
     }).then(async r => {
       if (!r.ok) { const e = await r.json(); throw new Error(e.detail ?? 'Erreur') }
       return r.json()
@@ -229,16 +226,74 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
 
   const resumeAvance = [
     LIBELLE_MODE[vmForm.boot_mode],
-    `${vmForm.vcpus} vCPU`,
-    `${vmForm.ram_mb >= 1024 ? `${+(vmForm.ram_mb / 1024).toFixed(1)} Go` : `${vmForm.ram_mb} Mo`} RAM`,
-    `${vmForm.disk_gb} Go${vmForm.data_disk_gb ? ` + ${vmForm.data_disk_gb} Go /data` : ''}`,
     vmFolders.length > 0 && (vmForm.folder || 'dossier racine'),
     vmForm.ou && `OU ${vmForm.ou}`,
     vmForm.post_script.trim() && 'script post-install',
   ].filter(Boolean).join(' · ')
 
+  // Ce qui part au serveur, et ce que montre le récapitulatif : UN seul objet.
+  // Un clone nu Proxmox n'affiche pas l'adresse (champ grisé) mais la gardait
+  // en mémoire et l'envoyait — refusée en 400 après coup. Elle part vide.
+  const charge = buildCreateVmPayload(
+    sansAdressage ? { ...vmForm, ip_cidr: '', gateway: '', dns_servers: '' } : vmForm, vmNode)
+  const reseauChoisi = vmNetworks.find(n => n.iface === vmForm.bridge)
+  const stockageChoisi = vmStorages.find(s => s.storage === vmForm.storage)
+  // Les avertissements du formulaire, repris tels quels au récapitulatif : lus
+  // une première fois ou non, ils se relisent au moment de valider.
+  const aVerifier = [
+    horsReseau && `${adresseSaisie} est hors de ${vmNetDef?.reseau} : la VM démarrerait sans pouvoir joindre personne.`,
+    dejaPrise && `${adresseSaisie} est déjà l'adresse d'une machine enregistrée dans OSIRIS.`,
+    clone && gabaritChoisi?.osiris && gabaritChoisi.osiris.etat !== 'a_jour'
+      && "Gabarit scellé avec un agent ancien ou de version inconnue : à resceller.",
+    imageDuProfilIgnoree(vmForm.boot_mode, profilEffectif)
+      && `L'image « ${profilEffectif?.win_image} » du profil ne sera pas utilisée : le système est celui du gabarit.`,
+  ].filter((a): a is string => Boolean(a))
+
   const titre = 'text-[10px] font-semibold uppercase tracking-widest text-slate-500'
   const aide  = 'text-[10px] text-slate-600'
+
+  if (recap) return (
+    <form onSubmit={creer} className="p-6 space-y-4">
+      <p className="text-xs text-slate-400">Récapitulatif — rien n'est encore créé.</p>
+      {recapVm(charge, {
+        hyperviseur: hypervisors.find(h => h.id === Number(vmHvId))?.name ?? String(vmHvId),
+        organisation: organizations.find(o => o.id === charge.organization_id)?.name,
+        profil: profilEffectif,
+        gabarit: gabaritChoisi?.name,
+        reseau: reseauChoisi ? `${reseauChoisi.iface}${reseauChoisi.comments ? ` — ${reseauChoisi.comments}` : ''}` : undefined,
+        stockage: stockageChoisi ? `${stockageChoisi.storage} (${stockageChoisi.avail_gb} Go libres)` : undefined,
+        dossiers: vmFolders.length > 0,
+      }).map(s => (
+        <section key={s.titre} className="space-y-0.5">
+          <p className={titre}>{s.titre}</p>
+          {s.lignes.map(l => (
+            <p key={l.champs.join()} className={`text-xs ${l.attention ? 'text-amber-400' : 'text-slate-300'}`}>
+              {l.attention && '⚠ '}{l.texte}
+            </p>
+          ))}
+        </section>
+      ))}
+      <section className="space-y-0.5">
+        <p className={titre}>Ce qui va se passer</p>
+        <ol className="list-decimal list-inside text-xs text-slate-300 space-y-0.5">
+          {etapesVm(charge, gabaritChoisi?.name).map(e => <li key={e}>{e}</li>)}
+        </ol>
+      </section>
+      {aVerifier.length > 0 && (
+        <section className="space-y-0.5 border-l-2 border-amber-500/60 pl-2">
+          <p className={titre}>À vérifier</p>
+          {aVerifier.map(a => <p key={a} className="text-xs text-amber-400">⚠ {a}</p>)}
+        </section>
+      )}
+      <div className="flex gap-2">
+        <button type="button" onClick={() => setRecap(false)} disabled={vmCreating}
+          className="osiris-btn-ghost text-xs px-4 border border-slate-700 rounded">← Modifier</button>
+        <button type="submit" autoFocus disabled={vmCreating} className="osiris-btn text-xs px-4 flex-1 disabled:opacity-50">
+          {vmCreating ? 'Création en cours...' : 'Créer et démarrer la VM'}
+        </button>
+      </div>
+    </form>
+  )
 
   return (
     <form onSubmit={creer} className="p-6 space-y-5">
@@ -466,6 +521,27 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
         )}
       </section>
 
+      {/* ── 4. Matériel ───────────────────────────────────────────────────── */}
+      {/* Hors des options avancées : on y revient à presque chaque VM, et les
+          disques en plus (nom, taille, LVM, swap) s'y ajouteront. */}
+      <section className="space-y-2">
+        <p className={titre}>4 · Matériel <span className="normal-case font-normal text-slate-600">— repris du profil, modifiable</span></p>
+        <div className="grid grid-cols-4 gap-2">
+          <label className="flex items-center gap-1 text-[10px] text-slate-500">vCPU
+            <input type="number" min={1} max={64} value={vmForm.vcpus} onChange={e => setVmForm(f => ({...f, vcpus: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+          </label>
+          <label className="flex items-center gap-1 text-[10px] text-slate-500">RAM Mo
+            <input type="number" min={512} step={512} value={vmForm.ram_mb} onChange={e => setVmForm(f => ({...f, ram_mb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+          </label>
+          <label className="flex items-center gap-1 text-[10px] text-slate-500">Disque Go
+            <input type="number" min={8} value={vmForm.disk_gb} onChange={e => setVmForm(f => ({...f, disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+          </label>
+          <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Second disque, formaté et monté sur /data au premier démarrage. 0 = aucun.">/data Go
+            <input type="number" min={0} value={vmForm.data_disk_gb} onChange={e => setVmForm(f => ({...f, data_disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+          </label>
+        </div>
+      </section>
+
       {/* ── Options avancées ──────────────────────────────────────────────── */}
       <section className="border border-slate-800/60 rounded">
         <button type="button" onClick={() => setAvance(a => !a)}
@@ -499,24 +575,6 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
               {vmForm.boot_mode === 'pxe' && (
                 <input placeholder="ISO Proxmox (ex: local:iso/ubuntu-24.04.iso) — optionnel" value={vmForm.iso} onChange={e => setVmForm(f => ({...f, iso: e.target.value}))} className="osiris-input text-xs font-mono w-full" />
               )}
-            </div>
-
-            <div className="space-y-1">
-              <p className={aide}>Matériel — repris du profil, modifiable</p>
-              <div className="grid grid-cols-4 gap-2">
-                <label className="flex items-center gap-1 text-[10px] text-slate-500">vCPU
-                  <input type="number" min={1} max={64} value={vmForm.vcpus} onChange={e => setVmForm(f => ({...f, vcpus: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-                </label>
-                <label className="flex items-center gap-1 text-[10px] text-slate-500">RAM Mo
-                  <input type="number" min={512} step={512} value={vmForm.ram_mb} onChange={e => setVmForm(f => ({...f, ram_mb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-                </label>
-                <label className="flex items-center gap-1 text-[10px] text-slate-500">Disque Go
-                  <input type="number" min={8} value={vmForm.disk_gb} onChange={e => setVmForm(f => ({...f, disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-                </label>
-                <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Second disque, formaté et monté sur /data au premier démarrage. 0 = aucun.">/data Go
-                  <input type="number" min={0} value={vmForm.data_disk_gb} onChange={e => setVmForm(f => ({...f, data_disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-                </label>
-              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-2">
@@ -560,8 +618,8 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
         )}
         <div className="flex gap-2">
           <button type="button" onClick={onClose} className="osiris-btn-ghost text-xs px-4 border border-slate-700 rounded">Annuler</button>
-          <button type="submit" disabled={vmCreating || vmInaccessible || manquants.length > 0} className="osiris-btn text-xs px-4 flex-1 disabled:opacity-50">
-            {vmCreating ? 'Création en cours...' : 'Créer et démarrer la VM'}
+          <button type="submit" disabled={vmInaccessible || manquants.length > 0} className="osiris-btn text-xs px-4 flex-1 disabled:opacity-50">
+            Vérifier avant de créer →
           </button>
         </div>
       </div>

@@ -175,3 +175,117 @@ export const gabaritsPourMode = <T extends { vmid: number; famille?: string; osi
     autresChoisissables: mode !== 'template',
   }
 }
+
+export const LIBELLE_MODE: Record<ModeVm, string> = {
+  template: 'Clone du gabarit',
+  cloudinit: 'Clone + cloud-init',
+  pxe: 'Installation PXE',
+}
+
+/** Le formulaire de création de VM à l'ouverture. Ici plutôt que dans le composant
+ *  pour que le test du récapitulatif en dérive ses champs : un champ ajouté ici
+ *  sans être montré au récapitulatif fait échouer ce test. */
+export const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
+
+export type ChargeVm = ReturnType<typeof buildCreateVmPayload<typeof FORMULAIRE_VIDE>>
+
+export const tailleRam = (mo: number) => mo >= 1024 ? `${+(mo / 1024).toFixed(1)} Go` : `${mo} Mo`
+
+const NOM_OS: Record<string, string> = { ubuntu: 'Ubuntu', debian: 'Debian', windows: 'Windows' }
+
+/** Une ligne du récapitulatif, et les champs envoyés qu'elle montre. */
+export interface LigneRecap { texte: string; champs: (keyof ChargeVm)[]; attention?: boolean }
+export interface SectionRecap { titre: string; lignes: LigneRecap[] }
+
+/** Ce que le formulaire sait nommer mieux que la charge : la charge porte des
+ *  identifiants (organisation 3, gabarit 9005), l'écran doit dire leur nom. */
+export interface ContexteRecap {
+  hyperviseur: string
+  organisation?: string
+  profil?: { name: string; resume?: { lignes: { sujet: string; texte: string }[] } }
+  gabarit?: string
+  reseau?: string
+  stockage?: string
+  /** vSphere seulement : Proxmox n'a pas de dossiers, la ligne n'y dirait rien. */
+  dossiers: boolean
+}
+
+/** Le récapitulatif avant création, lu dans la charge qui PART au serveur.
+ *
+ *  Pas dans le formulaire : un récapitulatif recopié champ par champ diverge un
+ *  jour de ce qui est envoyé — c'est la famille des « champs décoratifs », un
+ *  réglage montré qui n'est pas celui appliqué. Ici chaque ligne déclare les
+ *  champs qu'elle montre, et le test exige que TOUS les champs de la charge
+ *  soient montrés. Une valeur vide se dit (« DHCP », « aucun script ») au lieu
+ *  de disparaître : ce qu'on a accepté sans le voir est justement ce qu'il faut
+ *  voir ici. */
+export const recapVm = (c: ChargeVm, ctx: ContexteRecap): SectionRecap[] => {
+  const clone = c.boot_mode !== 'pxe'
+  const os = NOM_OS[c.os] ?? c.os
+  const profil = ctx.profil
+    ? `Profil « ${ctx.profil.name} »${ctx.profil.resume?.lignes.length
+        ? ' : ' + ctx.profil.resume.lignes.map(l => `${l.sujet} ${l.texte}`).join(' · ') : ''}`
+    : 'Aucun profil'
+  return [
+    { titre: 'La machine', lignes: [
+      { texte: `${c.hostname} · client ${c.client}`, champs: ['hostname', 'client'] },
+      c.organization_id === null
+        ? { texte: 'Aucune organisation : la VM ne sera pas supervisée', champs: ['organization_id'], attention: true }
+        : { texte: `Organisation ${ctx.organisation ?? c.organization_id} : supervisée`, champs: ['organization_id'] },
+      { texte: clone
+          ? `${os} : système du gabarit « ${ctx.gabarit ?? c.template_id ?? '?'} », pas celui du profil`
+          : `${os} : installé par le réseau`,
+        champs: ['os', 'template_id'] },
+      { texte: profil, champs: ['profile_id'], attention: !ctx.profil },
+    ] },
+    { titre: 'Où', lignes: [
+      { texte: `${ctx.hyperviseur} › ${c.node} · stockage ${ctx.stockage ?? c.storage} · réseau ${ctx.reseau ?? c.bridge}`,
+        champs: ['node', 'storage', 'bridge'] },
+      ...(ctx.dossiers || c.folder
+        ? [{ texte: `Dossier ${c.folder || 'racine du datacenter'}`, champs: ['folder'] as (keyof ChargeVm)[] }]
+        : []),
+    ] },
+    { titre: 'Adresse', lignes: [
+      c.ip_cidr
+        ? { texte: `${c.ip_cidr} · passerelle ${c.gateway || 'aucune'} · DNS ${c.dns_servers || 'aucun'}`,
+            champs: ['ip_cidr', 'gateway', 'dns_servers'] }
+        : { texte: "DHCP : un serveur DHCP doit répondre sur ce réseau, sinon la VM ne contactera jamais OSIRIS",
+            champs: ['ip_cidr', 'gateway', 'dns_servers'] },
+    ] },
+    { titre: 'Matériel', lignes: [
+      { texte: `${c.vcpus} vCPU · ${tailleRam(c.ram_mb)} RAM · disque ${c.disk_gb} Go`
+          + (c.data_disk_gb ? ` · ${c.data_disk_gb} Go montés sur /data` : ' · pas de disque /data'),
+        champs: ['vcpus', 'ram_mb', 'disk_gb', 'data_disk_gb'] },
+    ] },
+    { titre: 'Comment', lignes: [
+      { texte: LIBELLE_MODE[c.boot_mode] + (c.iso ? ` · ISO ${c.iso}` : ''), champs: ['boot_mode', 'iso'] },
+      { texte: `OU Active Directory : ${c.ou || 'non précisée (emplacement par défaut)'}`, champs: ['ou'] },
+      { texte: c.post_script.trim()
+          ? `Script propre à cette VM : ${c.post_script.trim().split('\n').length} ligne(s), exécuté après celui du profil`
+          : 'Pas de script propre à cette VM',
+        champs: ['post_script'] },
+    ] },
+  ]
+}
+
+/** Ce qui va se passer après le clic, et combien de temps. Un déploiement qui
+ *  n'annonce pas sa durée passe pour planté à la première minute : c'est ainsi
+ *  qu'un collègue a abandonné l'outil en août. Durées mesurées, données en
+ *  « environ » — une promesse tenue au plus près vaut mieux qu'une précise. */
+export const etapesVm = (c: Pick<ChargeVm, 'boot_mode' | 'os' | 'node'>, gabarit?: string): string[] => {
+  const suivi = 'Suivi en direct dans Machines, jusqu\'à « déployée »'
+  if (c.boot_mode === 'pxe') return [
+    c.os === 'windows'
+      ? 'La VM démarre sur WinPE et installe Windows : environ 20 min'
+      : 'La VM démarre sur le réseau et installe le système : environ 20 min',
+    'Elle contacte OSIRIS à la fin de l\'installation',
+    suivi,
+  ]
+  return [
+    `Copie du gabarit${gabarit ? ` « ${gabarit} »` : ''} sur ${c.node}`,
+    c.boot_mode === 'cloudinit'
+      ? 'Configuration par cloud-init au démarrage (nom, réseau, comptes) : environ 30 s'
+      : 'Au démarrage, l\'agent OSIRIS du gabarit contacte OSIRIS : environ 2 min',
+    suivi,
+  ]
+}

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, FORMULAIRE_VIDE, recapVm, etapesVm, type ChargeVm, type ContexteRecap } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -280,5 +280,62 @@ describe('gabaritsPourMode', () => {
 
   it("en cloud-init, qui n'a pas besoin de l'agent, tout reste choisissable", () => {
     expect(gabaritsPourMode(modeles, 'cloudinit', 'ubuntu').autresChoisissables).toBe(true)
+  })
+})
+
+describe('recapVm', () => {
+  const ctx: ContexteRecap = { hyperviseur: 'Cluster A', dossiers: false }
+  const champsMontres = (c: ChargeVm, x: ContexteRecap = ctx) =>
+    new Set(recapVm(c, x).flatMap(s => s.lignes.flatMap(l => l.champs)))
+
+  // L'invariant qui fait du récapitulatif autre chose qu'un décor : tout champ
+  // rempli envoyé au serveur y est montré (un champ vide ET sans objet, comme le
+  // dossier sur Proxmox, peut se taire). Dérivé du formulaire lui-même, jamais d'une
+  // liste : un champ ajouté demain au formulaire fait échouer ce test tant que
+  // le récapitulatif ne le montre pas.
+  it.each(['template', 'cloudinit', 'pxe'] as const)('montre chaque champ envoyé (mode %s)', mode => {
+    const rempli = Object.fromEntries(Object.entries(FORMULAIRE_VIDE).map(([k, v]) =>
+      [k, typeof v === 'number' ? 3 : k === 'organization_id' ? 1 : k === 'template_id' || k === 'profile_id' ? '9' : 'x'])) as unknown as typeof FORMULAIRE_VIDE
+    const charge = buildCreateVmPayload({ ...rempli, boot_mode: mode }, 'n1')
+    const manquants = Object.keys(charge).filter(k => !champsMontres(charge).has(k as keyof ChargeVm))
+    expect(manquants).toEqual([])
+  })
+
+  const texte = (c: ChargeVm, x: ContexteRecap = ctx) =>
+    recapVm(c, x).flatMap(s => s.lignes.map(l => l.texte)).join('\n')
+
+  it('dit « DHCP » plutôt que de taire une adresse vide', () => {
+    expect(texte(buildCreateVmPayload(FORMULAIRE_VIDE, 'n1'))).toMatch(/DHCP/)
+  })
+
+  it('signale une VM sans organisation, donc sans supervision', () => {
+    const l = recapVm(buildCreateVmPayload(FORMULAIRE_VIDE, 'n1'), ctx)[0].lignes
+      .find(l => l.champs.includes('organization_id'))
+    expect(l?.attention).toBe(true)
+  })
+
+  it('nomme le gabarit et le réseau plutôt que leurs identifiants', () => {
+    const c = buildCreateVmPayload({ ...FORMULAIRE_VIDE, template_id: '9005', bridge: 'vmbr320' }, 'n1')
+    const t = texte(c, { ...ctx, gabarit: 'debian-12-osiris', reseau: 'vmbr320 — Clients' })
+    expect(t).toContain('« debian-12-osiris »')
+    expect(t).toContain('vmbr320 — Clients')
+  })
+
+  it('ne parle de dossier que sur un hyperviseur qui en a', () => {
+    const c = buildCreateVmPayload(FORMULAIRE_VIDE, 'n1')
+    expect(texte(c)).not.toMatch(/Dossier/)
+    expect(texte(c, { ...ctx, dossiers: true })).toMatch(/Dossier racine du datacenter/)
+  })
+})
+
+describe('etapesVm', () => {
+  it('annonce une durée dans chaque mode', () => {
+    for (const boot_mode of ['template', 'cloudinit', 'pxe'] as const) {
+      expect(etapesVm({ boot_mode, os: 'debian', node: 'n1' }).join(' ')).toMatch(/environ/)
+    }
+  })
+
+  it('parle de WinPE pour un Windows en PXE', () => {
+    expect(etapesVm({ boot_mode: 'pxe', os: 'windows', node: 'n1' })[0]).toMatch(/WinPE/)
   })
 })
