@@ -1363,7 +1363,7 @@ export default function App() {
                 <option value={0}>-- Organisation --</option>
                 {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
               </select>
-              <input placeholder="Nom (ex: Tunnel Midi2i)" value={newVpnTunnel.name} onChange={e => setNewVpnTunnel({...newVpnTunnel, name: e.target.value})} className="osiris-input text-xs font-mono" />
+              <input placeholder="Nom (ex: Tunnel Acme)" value={newVpnTunnel.name} onChange={e => setNewVpnTunnel({...newVpnTunnel, name: e.target.value})} className="osiris-input text-xs font-mono" />
               <input placeholder="DNS interne client (ex: 192.0.2.53)" value={newVpnTunnel.remote_dns} onChange={e => setNewVpnTunnel({...newVpnTunnel, remote_dns: e.target.value})} className="osiris-input text-xs font-mono" />
               <input placeholder="Réseau client (ex: 10.8.0.0/16)" value={newVpnTunnel.route_cidr} onChange={e => setNewVpnTunnel({...newVpnTunnel, route_cidr: e.target.value})} className="osiris-input text-xs font-mono" />
               <input placeholder="Utilisateur auth-user-pass" value={newVpnTunnel.vpn_username} onChange={e => setNewVpnTunnel({...newVpnTunnel, vpn_username: e.target.value})} className="osiris-input text-xs font-mono" />

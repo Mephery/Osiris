@@ -3,7 +3,7 @@
 """Adressage d'une VM : refuser une saisie fautive AVANT de toucher l'hyperviseur.
 
 Régression du 2026-08-14, sur une vraie création. L'adresse avait été saisie sans
-son préfixe (« 172.29.12.200 » au lieu de « …/24 ») et partait telle quelle vers
+son préfixe (« 192.0.2.200 » au lieu de « …/24 ») et partait telle quelle vers
 Proxmox, qui exige `ip=<adresse>/<préfixe>`. Le clone réussissait, la configuration
 échouait juste après, et le rollback détruisait la VM qui venait de naître : un
 aller-retour clone/destruction sur une infrastructure de production, pour une faute
@@ -64,16 +64,16 @@ def _creer(client, admin_headers, hv_id, **o):
 # ── Le cas réellement rencontré ───────────────────────────────────────────────
 
 def test_une_adresse_sans_prefixe_est_refusee_sans_rien_creer(client, admin_headers, monkeypatch):
-    """LE bug du 14/08 : « 172.29.12.200 » au lieu de « 172.29.12.200/24 »."""
+    """LE bug du 14/08 : « 192.0.2.200 » au lieu de « 192.0.2.200/24 »."""
     hv_id = _hv()
     appels = _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id,
-                  ip_cidr="172.29.12.200", gateway="172.29.12.1", dns_servers="8.8.8.8")
+                  ip_cidr="192.0.2.200", gateway="192.0.2.1", dns_servers="8.8.8.8")
 
     assert resp.status_code == 400, resp.text
     d = resp.json()["detail"]
-    assert "172.29.12.200/24" in d, "le message doit montrer la forme attendue"
+    assert "192.0.2.200/24" in d, "le message doit montrer la forme attendue"
     assert appels == [], f"l'hyperviseur n'aurait pas dû être appelé : {appels}"
 
 
@@ -83,7 +83,7 @@ def test_une_adresse_en_cidr_passe(client, admin_headers, monkeypatch):
     _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id,
-                  ip_cidr="172.29.12.200/24", gateway="172.29.12.1", dns_servers="8.8.8.8")
+                  ip_cidr="192.0.2.200/24", gateway="192.0.2.1", dns_servers="8.8.8.8")
 
     assert resp.status_code != 400, resp.text
 
@@ -101,7 +101,7 @@ def test_une_passerelle_hors_du_reseau_est_refusee(client, admin_headers, monkey
     appels = _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id,
-                  ip_cidr="172.29.12.200/24", gateway="172.29.99.1")
+                  ip_cidr="192.0.2.200/24", gateway="198.51.100.1")
 
     assert resp.status_code == 400, resp.text
     assert "hors du réseau" in resp.json()["detail"]
@@ -115,7 +115,7 @@ def test_une_passerelle_point_a_point_reste_autorisee(client, admin_headers, mon
     _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id,
-                  ip_cidr="172.29.12.200/32", gateway="172.29.99.1",
+                  ip_cidr="192.0.2.200/32", gateway="198.51.100.1",
                   dns_servers="8.8.8.8")
 
     assert resp.status_code != 400, resp.text
@@ -126,7 +126,7 @@ def test_une_passerelle_qui_nest_pas_une_adresse_est_refusee(client, admin_heade
     appels = _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id,
-                  ip_cidr="172.29.12.200/24", gateway="172.29.12.1/24")
+                  ip_cidr="192.0.2.200/24", gateway="192.0.2.1/24")
 
     assert resp.status_code == 400, resp.text
     assert "sans préfixe" in resp.json()["detail"], "dire que la passerelle s'écrit nue"
@@ -139,7 +139,7 @@ def test_une_passerelle_sans_adresse_est_refusee(client, admin_headers, monkeypa
     hv_id = _hv()
     appels = _mouchard(monkeypatch)
 
-    resp = _creer(client, admin_headers, hv_id, ip_cidr="", gateway="172.29.12.1")
+    resp = _creer(client, admin_headers, hv_id, ip_cidr="", gateway="192.0.2.1")
 
     assert resp.status_code == 400, resp.text
     assert appels == []
@@ -152,7 +152,7 @@ def test_un_dns_invalide_est_refuse(client, admin_headers, monkeypatch):
     appels = _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id,
-                  ip_cidr="172.29.12.200/24", dns_servers="8.8.8.8, pas-une-ip")
+                  ip_cidr="192.0.2.200/24", dns_servers="8.8.8.8, pas-une-ip")
 
     assert resp.status_code == 400, resp.text
     assert appels == []
@@ -163,7 +163,7 @@ def test_plusieurs_dns_separes_par_des_virgules_passent(client, admin_headers, m
     _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id,
-                  ip_cidr="172.29.12.200/24", dns_servers="8.8.8.8, 1.1.1.1")
+                  ip_cidr="192.0.2.200/24", dns_servers="8.8.8.8, 1.1.1.1")
 
     assert resp.status_code != 400, resp.text
 
@@ -194,7 +194,7 @@ def test_ladressage_est_valide_quel_que_soit_le_mode(client, admin_headers, monk
     appels = _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id, boot_mode=mode,
-                  ip_cidr="172.29.12.200", **extra)
+                  ip_cidr="192.0.2.200", **extra)
 
     assert resp.status_code == 400, f"mode {mode} : {resp.text}"
     assert appels == []
@@ -217,7 +217,7 @@ def test_une_adresse_fixe_sans_dns_est_refusee(client, admin_headers, monkeypatc
     appels = _mouchard(monkeypatch)
 
     resp = _creer(client, admin_headers, hv_id,
-                  ip_cidr="172.29.12.200/24", gateway="172.29.12.1", dns_servers="")
+                  ip_cidr="192.0.2.200/24", gateway="192.0.2.1", dns_servers="")
 
     assert resp.status_code == 400, resp.text
     assert "résolveur" in resp.json()["detail"]
@@ -230,8 +230,8 @@ def test_le_message_propose_les_deux_issues(client, admin_headers, monkeypatch):
     hv_id = _hv()
     _mouchard(monkeypatch)
 
-    d = _creer(client, admin_headers, hv_id, ip_cidr="172.29.12.200/24",
-               gateway="172.29.12.1", dns_servers="").json()["detail"]
+    d = _creer(client, admin_headers, hv_id, ip_cidr="192.0.2.200/24",
+               gateway="192.0.2.1", dns_servers="").json()["detail"]
 
     assert "DNS" in d and "DHCP" in d
 

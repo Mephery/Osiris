@@ -8,7 +8,7 @@ clone en hérite, cloud-init y trouve une source de données VMware parfaitement
 valide, et rejoue ce qu'elle contient : nom d'hôte, adressage, et jusqu'au
 script de premier démarrage de la machine de construction.
 
-Constaté le 17/09 : une VM demandée sous le nom `valid-debian` en 10.251.110.203
+Constaté le 17/09 : une VM demandée sous le nom `valid-debian` en 198.51.100.203
 tournait sous le nom de la VM de construction. L'agent avait bien posé l'adresse
 à 14:30:00 ; cloud-init a reposé l'identité du gabarit à 14:30:18.
 

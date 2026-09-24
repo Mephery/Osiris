@@ -35,20 +35,20 @@ def _domain_config(**kw):
 
 def test_domain_config_sans_compte_conserve_celui_du_profil(clean_db):
     """Le cas du footgun : DomainConfig pour le domaine + WiFi seulement, compte sur le profil."""
-    dc = _domain_config(domain="midi2i.com", join_user="", join_password="",
+    dc = _domain_config(domain="acme.example", join_user="", join_password="",
                         wifi_ssid="WNHC", wifi_password=encrypt("wpa-secret"))
-    p = _profile(domain="ancien.local", domain_join_user="midi2i.com\\svc_join",
+    p = _profile(domain="ancien.local", domain_join_user="acme.example\\svc_join",
                  domain_join_password=encrypt("p@ss"), domain_config_id=dc.id)
 
     with Session(engine) as s:
         ctx = main._profile_for_template(s.get(Profile, p.id), s)
 
     # le domaine et le WiFi viennent de la DomainConfig...
-    assert ctx["domain"] == "midi2i.com"
+    assert ctx["domain"] == "acme.example"
     assert ctx["wifi_ssid"] == "WNHC"
     assert ctx["wifi_password"] == "wpa-secret"
     # ...mais le compte de jonction du profil est PRÉSERVÉ (le footgun l'effaçait)
-    assert ctx["domain_join_user"] == "midi2i.com\\svc_join"
+    assert ctx["domain_join_user"] == "acme.example\\svc_join"
     assert ctx["domain_join_password"] == "p@ss"
 
 

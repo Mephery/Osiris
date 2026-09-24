@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Coline Derycke. See LICENSE.
 """Reprise de la jonction au domaine sur panne réseau.
 
-Le 2026-08-04 sur M2KL099, le tunnel VPN vers le client était tombé au moment précis
+Le 2026-08-04 sur PC-ACME-09, le tunnel VPN vers le client était tombé au moment précis
 de la jonction — qui se joue quelques secondes après le démarrage du firstboot. Un
 essai unique, donc une jonction à refaire à la main. La reprise couvre ce cas.
 
@@ -20,9 +20,9 @@ MOTIF_IDENTIFIANTS = (
     r"0x52e|\b1326\b|mot de passe|password|informations d.identification|credential"
 )
 
-# Message RÉEL relevé dans le journal de M2KL099 le 2026-08-04.
+# Message RÉEL relevé dans le journal de PC-ACME-09 le 2026-08-04.
 PANNE_RESEAU_REELLE = (
-    "L'ordinateur « M2KL099 » n'a pas pu joindre le domaine « midi2i.com » a partir "
+    "L'ordinateur « PC-ACME-09 » n'a pas pu joindre le domaine « acme.example » a partir "
     "de son groupe de travail actuel « WORKGROUP » avec le message d'erreur suivant : "
     "Le domaine specifie n'existe pas ou n'a pas pu etre contacte."
 )

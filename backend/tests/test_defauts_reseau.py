@@ -24,8 +24,8 @@ from models import Hypervisor, Machine, engine
 # `vmbr12` porte une adresse : le nœud est lui-même sur ce VLAN. `vmbr320` non —
 # il n'est que commuté, ce qui est le cas ordinaire d'un réseau de VM.
 RESEAUX = [
-    {"iface": "vmbr12", "type": "bridge", "address": "172.29.12.13",
-     "cidr": "172.29.12.13/24", "gateway": "172.29.12.1", "active": 1,
+    {"iface": "vmbr12", "type": "bridge", "address": "192.0.2.13",
+     "cidr": "192.0.2.13/24", "gateway": "192.0.2.1", "active": 1,
      "comments": "mgmt web"},
     {"iface": "vmbr320", "type": "bridge", "address": None, "cidr": None,
      "gateway": None, "active": 1, "comments": "Clients_MUTU"},
@@ -83,9 +83,9 @@ def _defauts(client, admin_headers, hv_id, bridge, node="pve1") -> dict:
 def test_un_bridge_adresse_donne_reseau_et_passerelle(client, admin_headers, hv_id, proxmox):
     d = _defauts(client, admin_headers, hv_id, "vmbr12")
 
-    assert d["reseau"] == "172.29.12.0/24"
+    assert d["reseau"] == "192.0.2.0/24"
     assert d["prefixe"] == 24
-    assert d["gateway"] == "172.29.12.1"
+    assert d["gateway"] == "192.0.2.1"
 
 
 def test_la_provenance_accompagne_chaque_valeur(client, admin_headers, hv_id, proxmox):
@@ -130,21 +130,21 @@ def test_un_deploiement_passe_renseigne_le_bridge_muet(client, admin_headers,
 
 def test_le_bridge_prime_sur_lhistorique(client, admin_headers, hv_id, proxmox):
     """Lu en direct, il ne peut pas être périmé — une fiche ancienne, si."""
-    _machine(hv_id, "SRV-B", "vmbr12", "172.29.12.50/24", "172.29.12.254", "172.29.12.9")
+    _machine(hv_id, "SRV-B", "vmbr12", "192.0.2.50/24", "192.0.2.254", "192.0.2.9")
 
     d = _defauts(client, admin_headers, hv_id, "vmbr12")
 
-    assert d["gateway"] == "172.29.12.1", "la passerelle déclarée par le nœud"
+    assert d["gateway"] == "192.0.2.1", "la passerelle déclarée par le nœud"
     assert d["origines"]["gateway"] == "bridge"
 
 
 def test_le_dns_ne_peut_venir_que_de_lhistorique(client, admin_headers, hv_id, proxmox):
     """Aucun hyperviseur ne sait quel résolveur une VM doit utiliser."""
-    _machine(hv_id, "SRV-C", "vmbr12", "172.29.12.50/24", "172.29.12.1", "172.29.12.9")
+    _machine(hv_id, "SRV-C", "vmbr12", "192.0.2.50/24", "192.0.2.1", "192.0.2.9")
 
     d = _defauts(client, admin_headers, hv_id, "vmbr12")
 
-    assert d["dns_servers"] == "172.29.12.9"
+    assert d["dns_servers"] == "192.0.2.9"
     assert d["origines"]["dns_servers"] == "deploiement"
 
 
@@ -164,12 +164,12 @@ def test_la_fiche_la_plus_recente_gagne(client, admin_headers, hv_id, proxmox):
 def test_aucune_adresse_ip_nest_proposee(client, admin_headers, hv_id, proxmox):
     """OSIRIS ignore tout des machines posées à la main : il ne peut affirmer
     qu'une adresse est libre, donc il n'en désigne aucune."""
-    _machine(hv_id, "SRV-D", "vmbr12", "172.29.12.50/24", "172.29.12.1")
+    _machine(hv_id, "SRV-D", "vmbr12", "192.0.2.50/24", "192.0.2.1")
 
     d = _defauts(client, admin_headers, hv_id, "vmbr12")
 
     assert "ip_cidr" not in d and "adresse" not in d
-    assert d["occupees"] == ["172.29.12.50"], "on dit ce qui est PRIS, pas ce qui est libre"
+    assert d["occupees"] == ["192.0.2.50"], "on dit ce qui est PRIS, pas ce qui est libre"
 
 
 def test_le_dns_du_noeud_nest_jamais_consulte(client, admin_headers, hv_id, proxmox):
@@ -188,7 +188,7 @@ def test_le_dns_du_noeud_nest_jamais_consulte(client, admin_headers, hv_id, prox
 def test_un_autre_bridge_ne_contamine_pas(client, admin_headers, hv_id, proxmox):
     """Deux réseaux du même cluster n'ont aucune raison de partager un plan
     d'adressage : mélanger les deux propose une passerelle d'un autre VLAN."""
-    _machine(hv_id, "SRV-E", "vmbr12", "172.29.12.50/24", "172.29.12.1", "172.29.12.9")
+    _machine(hv_id, "SRV-E", "vmbr12", "192.0.2.50/24", "192.0.2.1", "192.0.2.9")
 
     d = _defauts(client, admin_headers, hv_id, "vmbr320")
 

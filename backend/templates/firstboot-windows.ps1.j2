@@ -197,8 +197,8 @@ if ($csDom -and $csDom.PartOfDomain) {
         # Qualification OBLIGATOIRE du domaine : un nom nu ("m2smasterisation") est
         # interprete comme un compte LOCAL depuis une machine en WORKGROUP, et la
         # jonction echoue en 0x52e "nom d'utilisateur ou mot de passe incorrect"
-        # MEME avec le bon mot de passe (constate en prod chez midi2i le 24/07 :
-        # "dca_cderycke" refuse, "midi2i.com\dca_cderycke" accepte, meme mdp).
+        # MEME avec le bon mot de passe (constate en production : un nom nu est
+        # refuse, le meme nom qualifie "domaine\utilisateur" est accepte).
         # L'unattend.xml n'a pas ce probleme : il a une balise <Domain> separee.
         # On ne prefixe que si l'utilisateur n'a pas deja qualifie (DOM\user ou user@dom).
         if ($djUser -notmatch '[\\@]') {
@@ -228,8 +228,8 @@ if ($csDom -and $csDom.PartOfDomain) {
 {% endif %}
         # Reprise sur echec RESEAU uniquement. La jonction se joue quelques secondes
         # apres le demarrage du firstboot : le lien vers le DC (tunnel VPN chez les
-        # clients distants) n'est pas toujours etabli. Constate le 04/08 sur M2KL099 :
-        # tunnel midi2i tombe -> "Le domaine specifie n'existe pas ou n'a pas pu etre
+        # clients distants) n'est pas toujours etabli. Constate le 04/08 sur PC-ACME-09 :
+        # tunnel acme tombe -> "Le domaine specifie n'existe pas ou n'a pas pu etre
         # contacte" -> jonction a refaire a la main.
         #
         # On ne reessaie JAMAIS une erreur d'identifiants (0x52e) : le compte de
@@ -771,7 +771,7 @@ try {
     } else {
         # Module servi par OSIRIS, PAS installe depuis PSGallery. Le PowerShellGet
         # livre en boite avec Windows 11 est en 1.0.0.1 : il ne connait pas
-        # -AcceptLicense (echec constate le 30/07 sur M2KL098 : "Impossible de
+        # -AcceptLicense (echec constate le 30/07 sur PC-ACME-08 : "Impossible de
         # trouver un parametre correspondant au nom AcceptLicense") et n'amorce pas
         # le fournisseur NuGet en session non interactive. Un simple decompactage
         # dans le chemin des modules suffit : Import-Module n'a besoin ni de

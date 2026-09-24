@@ -3,7 +3,7 @@
 """
 Gestion des tunnels VPN site-à-site par organisation.
 
-Chaque VpnTunnel correspond à un client distant (ex: Midi2i) : un fichier
+Chaque VpnTunnel correspond à un client distant (ex: Acme) : un fichier
 .ovpn permanent (un par client, tous actifs simultanément — contrairement à
 l'ancien script PowerShell qui basculait un seul VPN à la fois), une route
 vers le réseau du client, et un DNS interne à interroger pour son domaine AD.

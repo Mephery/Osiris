@@ -349,7 +349,7 @@ def test_un_moteur_qui_ecrit_SANS_EFFET_passe_la_main(fonctions, tmp_path):
     """
     sortie = _lancer(fonctions,
                      'appliquer_adressage "10.0.5.203/24" "10.0.5.1" "" eth0',
-                     tmp_path, ip_obtenue="10.251.110.66/24")   # un autre gagne
+                     tmp_path, ip_obtenue="198.51.100.66/24")   # un autre gagne
     assert "sans effet" in sortie, "l'échec silencieux doit être nommé"
     assert not (tmp_path / "60-osiris.yaml").exists(), \
         "un fichier sans effet ne doit pas rester derrière"

@@ -77,8 +77,8 @@ class VpnTunnel(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     organization_id: int = Field(foreign_key="organization.id", index=True, unique=True)
-    name: str                              # label affiche dans l'UI, ex: "Tunnel Midi2i"
-    slug: str = Field(unique=True)         # nom de fichier / instance systemd, ex: "midi2i"
+    name: str                              # label affiche dans l'UI, ex: "Tunnel Acme"
+    slug: str = Field(unique=True)         # nom de fichier / instance systemd, ex: "acme"
     ovpn_config: str = Field(default="")   # contenu du .ovpn chiffre Fernet
     remote_dns: str = Field(default="")    # IP(s) du DNS interne du client, separees par des virgules
     route_cidr: str = Field(default="")    # reseau du client joignable via le tunnel, ex: "10.8.0.0/16"

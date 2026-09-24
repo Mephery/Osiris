@@ -147,7 +147,7 @@ def test_un_nom_qui_ne_correspond_pas_est_nomme_comme_tel():
     """Certificat valide mais qui ne couvre pas l'adresse appelée : le correctif est
     de changer l'URL ou de régénérer le certificat — pas de toucher à l'autorité."""
     exc = Exception("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
-                    "IP address mismatch, certificate is not valid for '172.29.12.10'")
+                    "IP address mismatch, certificate is not valid for '192.0.2.10'")
 
     msg = main._diagnostic_tls(_hv(name="cluster"), exc)
 

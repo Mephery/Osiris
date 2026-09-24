@@ -21,8 +21,8 @@ from sqlmodel import Session
 import main
 from models import Hypervisor, Machine, Organization, Profile, engine
 
-PROXY_SITE = "172.29.12.50"       # le relais du site où tourne la VM
-PROXY_CENTRAL = "10.231.248.130"  # celui déclaré par l'organisation
+PROXY_SITE = "192.0.2.50"       # le relais du site où tourne la VM
+PROXY_CENTRAL = "203.0.113.130"  # celui déclaré par l'organisation
 
 
 def _org(slug="acme", collecteur="") -> Organization:

@@ -5349,7 +5349,7 @@ def _valider_adressage(body) -> None:
     except ValueError:
         raise HTTPException(status_code=400, detail=(
             f"L'adresse « {ip} » n'est pas une adresse réseau valide. Format attendu : "
-            f"« 172.29.12.200/24 »."))
+            f"« 192.0.2.200/24 »."))
 
     if gw:
         try:
@@ -5357,7 +5357,7 @@ def _valider_adressage(body) -> None:
         except ValueError:
             raise HTTPException(status_code=400, detail=(
                 f"La passerelle « {gw} » n'est pas une adresse IP valide. Elle s'écrit "
-                f"sans préfixe : « 172.29.12.1 »."))
+                f"sans préfixe : « 192.0.2.1 »."))
         # Réseaux /31 et /32 exclus du contrôle : en point à point, la passerelle
         # est légitimement hors du réseau de l'interface.
         if interface.network.prefixlen < 31 and passerelle not in interface.network:

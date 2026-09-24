@@ -36,15 +36,15 @@ RESSOURCES_NOVA = [
     *[{"storage": "backup_pbs11", "node": n, "shared": 1, "status": "available",
        "content": "backup", "plugintype": "pbs",
        "disk": 22964113506304, "maxdisk": 25559775051776}
-      for n in ("nvpx01", "nvpx02", "nvpx03", "nvpx04")],
-    *[{"storage": "ceph_nova", "node": n, "shared": 1, "status": "available",
+      for n in ("pve1", "pve2", "pve3", "pve4")],
+    *[{"storage": "ceph_partage", "node": n, "shared": 1, "status": "available",
        "content": "rootdir,images", "plugintype": "rbd",
        "disk": 7850000000000, "maxdisk": 19030000000000}
-      for n in ("nvpx01", "nvpx02", "nvpx03", "nvpx04")],
+      for n in ("pve1", "pve2", "pve3", "pve4")],
     *[{"storage": "local-btrfs", "node": n, "shared": 0, "status": "available",
        "content": "rootdir,images,backup,iso,vztmpl", "plugintype": "btrfs",
        "disk": 44000000000, "maxdisk": 483000000000}
-      for n in ("nvpx01", "nvpx02", "nvpx03", "nvpx04")],
+      for n in ("pve1", "pve2", "pve3", "pve4")],
 ]
 
 
@@ -55,7 +55,7 @@ def _patch(monkeypatch, ressources=None):
         if path.endswith("/version"):
             return {"version": "9.2.3"}
         if path.endswith("/nodes"):
-            return [{"node": "nvpx01", "status": "online", "cpu": 0.02,
+            return [{"node": "pve1", "status": "online", "cpu": 0.02,
                      "maxcpu": 112, "mem": 0, "maxmem": 0}]
         return {}
     monkeypatch.setattr(main, "_proxmox_get", fake_get)
@@ -68,7 +68,7 @@ def test_un_stockage_partage_napparait_quune_fois(client, admin_headers, monkeyp
 
     st = client.post(f"/hypervisors/{hv_id}/test", headers=admin_headers).json()["storages"]
 
-    ceph = [s for s in st if s["storage"] == "ceph_nova"]
+    ceph = [s for s in st if s["storage"] == "ceph_partage"]
     assert len(ceph) == 1, f"le Ceph partagé devait être replié, vu {len(ceph)} fois"
     assert ceph[0]["shared"] is True
     assert ceph[0]["node"] == "", "un stockage de cluster n'appartient à aucun nœud"
@@ -84,7 +84,7 @@ def test_un_stockage_local_apparait_par_noeud(client, admin_headers, monkeypatch
 
     locaux = [s for s in st if s["storage"] == "local-btrfs"]
     assert len(locaux) == 4, "un stockage local doit être listé pour chaque nœud"
-    assert {s["node"] for s in locaux} == {"nvpx01", "nvpx02", "nvpx03", "nvpx04"}
+    assert {s["node"] for s in locaux} == {"pve1", "pve2", "pve3", "pve4"}
     assert all(s["shared"] is False for s in locaux)
 
 
@@ -96,7 +96,7 @@ def test_les_depots_de_sauvegarde_sont_ecartes(client, admin_headers, monkeypatc
     st = client.post(f"/hypervisors/{hv_id}/test", headers=admin_headers).json()["storages"]
 
     assert not [s for s in st if "backup_pbs" in s["storage"]]
-    assert {s["storage"] for s in st} == {"ceph_nova", "local-btrfs"}
+    assert {s["storage"] for s in st} == {"ceph_partage", "local-btrfs"}
 
 
 def test_le_remplissage_est_calcule_sur_le_bon_champ(client, admin_headers, monkeypatch):
@@ -106,7 +106,7 @@ def test_le_remplissage_est_calcule_sur_le_bon_champ(client, admin_headers, monk
     _patch(monkeypatch)
 
     st = client.post(f"/hypervisors/{hv_id}/test", headers=admin_headers).json()["storages"]
-    ceph = next(s for s in st if s["storage"] == "ceph_nova")
+    ceph = next(s for s in st if s["storage"] == "ceph_partage")
 
     # Valeurs attendues DÉRIVÉES du jeu d'essai plutôt que recopiées : un nombre
     # magique recopié à la main documente l'erreur de calcul de son auteur.
@@ -125,7 +125,7 @@ def test_les_roles_disent_a_quoi_sert_le_stockage(client, admin_headers, monkeyp
 
     st = client.post(f"/hypervisors/{hv_id}/test", headers=admin_headers).json()["storages"]
 
-    assert next(s for s in st if s["storage"] == "ceph_nova")["roles"] == ["images"]
+    assert next(s for s in st if s["storage"] == "ceph_partage")["roles"] == ["images"]
     assert next(s for s in st if s["storage"] == "local-btrfs")["roles"] == ["images", "iso"]
 
 
@@ -133,7 +133,7 @@ def test_un_stockage_hors_ligne_est_signale(client, admin_headers, monkeypatch):
     """Un stockage inaccessible fait échouer la création : il doit se voir avant."""
     hv_id = _hv()
     _patch(monkeypatch, ressources=[{
-        "storage": "ceph_nova", "node": "nvpx01", "shared": 1, "status": "unknown",
+        "storage": "ceph_partage", "node": "pve1", "shared": 1, "status": "unknown",
         "content": "images", "plugintype": "rbd", "disk": 0, "maxdisk": 0,
     }])
 
