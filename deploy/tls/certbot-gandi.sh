@@ -21,10 +21,14 @@ CONF=${CONF:-/etc/letsencrypt/gandi.ini}
 set -a; . "$CONF"; set +a
 : "${GANDI_TOKEN:?GANDI_TOKEN absent de $CONF}"
 
-# La zone est declaree, pas devinee : deduire « data-expertise.com » de
-# « osiris.data-expertise.com » suppose de connaitre la liste des suffixes
-# publics, et se trompe silencieusement sur un .co.uk ou un sous-domaine delegue.
-ZONE=${GANDI_ZONE:-data-expertise.com}
+# La zone est declaree, pas devinee : la deduire du nom complet suppose de
+# connaitre la liste des suffixes publics, et se trompe silencieusement sur un
+# .co.uk ou un sous-domaine delegue.
+# EXIGEE, et non defaut : un defaut code ici ferait porter tout le renouvellement
+# sur une valeur invisible dans la configuration. Le jour ou elle ne correspond
+# plus, l'appel part vers la mauvaise zone et le renouvellement echoue sans bruit.
+: "${GANDI_ZONE:?GANDI_ZONE absent de $CONF}"
+ZONE=$GANDI_ZONE
 API="https://api.gandi.net/v5/livedns/domains/$ZONE/records"
 
 : "${CERTBOT_DOMAIN:?CERTBOT_DOMAIN absent — ce script est appele par certbot}"

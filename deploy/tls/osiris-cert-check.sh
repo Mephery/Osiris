@@ -36,13 +36,13 @@ fi
 jeton_ok=0; jeton_jours=-1
 if [ -r "$CONF" ]; then
     set -a; . "$CONF"; set +a
-    if [ -n "${GANDI_TOKEN:-}" ]; then
+    if [ -n "${GANDI_TOKEN:-}" ] && [ -n "${GANDI_ZONE:-}" ]; then
         # On interroge la zone qu'on doit pouvoir ECRIRE au renouvellement. Un 200
         # prouve que le jeton vit ET qu'il porte encore sur le bon domaine — c'est
         # exactement ce qui manquait le jour ou le premier jeton rendait 403.
         code=$(curl -s -o /dev/null -m 20 -w '%{http_code}' \
             -H "Authorization: Bearer $GANDI_TOKEN" \
-            "https://api.gandi.net/v5/livedns/domains/${GANDI_ZONE:-data-expertise.com}" || echo 000)
+            "https://api.gandi.net/v5/livedns/domains/$GANDI_ZONE" || echo 000)
         [ "$code" = "200" ] && jeton_ok=1
     fi
     [ -n "${GANDI_TOKEN_EXPIRE:-}" ] && jeton_jours=$(_jours_restants "$GANDI_TOKEN_EXPIRE")

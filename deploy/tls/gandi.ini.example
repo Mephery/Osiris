@@ -14,7 +14,7 @@ GANDI_TOKEN=
 
 # Zone LiveDNS a modifier. Declaree et non deduite du nom demande : deduire la
 # zone suppose de connaitre les suffixes publics, et se trompe en silence.
-GANDI_ZONE=data-expertise.com
+GANDI_ZONE=example.com
 
 # Echeance du jeton, relevee a sa creation. Uniquement pour la supervision, qui
 # previent AVANT l'expiration — un jeton mort casse le renouvellement sans bruit.
