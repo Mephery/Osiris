@@ -156,10 +156,12 @@ export const champsManquants = (f: {
  *  Un clone NU ne reçoit aucune injection : c'est l'agent gravé dans le gabarit
  *  qui rappelle OSIRIS. Un modèle sans agent y démarre et ne rappelle jamais —
  *  il est donc proposé grisé, avec la raison. Un modèle d'un autre système
- *  aussi : un gabarit Windows sous un profil Ubuntu n'a aucun sens.
+ *  aussi : un gabarit Windows sous un profil Ubuntu n'a aucun sens, et un
+ *  gabarit Debian quand on a choisi Ubuntu non plus. Une distribution inconnue
+ *  reste proposée, après les autres : mieux vaut ne pas trier que cacher à tort.
  *  cloud-init n'a pas besoin de l'agent : tout reste choisissable, les gabarits
  *  OSIRIS en tête. */
-export const gabaritsPourMode = <T extends { vmid: number; famille?: string; osiris?: { os: string } | null }>(
+export const gabaritsPourMode = <T extends { vmid: number; famille?: string; distribution?: string; osiris?: { os: string } | null }>(
   modeles: T[],
   mode: string,
   os: string,
@@ -169,11 +171,31 @@ export const gabaritsPourMode = <T extends { vmid: number; famille?: string; osi
   // scellement : un gabarit marqué à la main ne porte que le premier.
   const systeme = (m: T) => m.famille || m.osiris?.os || ''
   const convient = (m: T) => Boolean(m.osiris) && (!systeme(m) || systeme(m) === famille)
+    && (!m.distribution || m.distribution === os)
   return {
-    proposes: modeles.filter(convient),
+    proposes: modeles.filter(convient)
+      .sort((a, b) => Number(b.distribution === os) - Number(a.distribution === os)),
     autres: modeles.filter(m => !convient(m)),
     autresChoisissables: mode !== 'template',
   }
+}
+
+const RANG_AGENT: Record<string, number> = { a_jour: 0, perime: 1, inconnu: 2 }
+
+/** Le gabarit à présélectionner : celui de la distribution choisie, à l'agent
+ *  le plus frais, puis la version la plus récente d'après le nom (« v3 » avant
+ *  « v2 »). Aucun gabarit de CETTE distribution : rien — un gabarit au système
+ *  incertain ne se choisit pas à la place de l'opérateur. */
+export const gabaritParDefaut = <T extends { vmid: number; name: string; famille?: string; distribution?: string; osiris?: { os: string; etat?: string } | null }>(
+  modeles: T[],
+  mode: string,
+  os: string,
+): string => {
+  const [meilleur] = gabaritsPourMode(modeles, mode, os).proposes
+    .filter(m => m.distribution === os)
+    .sort((a, b) => (RANG_AGENT[a.osiris?.etat ?? ''] ?? 3) - (RANG_AGENT[b.osiris?.etat ?? ''] ?? 3)
+      || b.name.localeCompare(a.name, undefined, { numeric: true }))
+  return meilleur ? String(meilleur.vmid) : ''
 }
 
 export const LIBELLE_MODE: Record<ModeVm, string> = {

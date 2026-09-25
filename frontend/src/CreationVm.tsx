@@ -5,7 +5,7 @@ import { toast } from 'sonner'
 import type { GabaritOsiris, Hypervisor, NetworkDefaults, Organization, Profile, ProxmoxNetwork, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { buildCreateVmPayload, champsManquants, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree,
-         adressageFixeImpossible, avecProfil, gabaritsPourMode, modeParDefaut, profilsPourVm,
+         adressageFixeImpossible, avecProfil, gabaritsPourMode, gabaritParDefaut, modeParDefaut, profilsPourVm,
          FORMULAIRE_VIDE, LIBELLE_MODE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut } from './vmForm'
 import { ResumeProfil } from './ResumeProfil'
 import { ChampEnCours } from './Skeleton'
@@ -113,7 +113,13 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
     setGabaritsEnCours(true)
     fetch(`${API_URL}/hypervisors/${hvId}/templates`, { headers: authHeader(token) })
       .then(r => r.ok ? r.json() : [])
-      .then(t => { if (toujours(hvId)) setVmTemplates(Array.isArray(t) ? t : []) })
+      .then(t => {
+        if (!toujours(hvId)) return
+        const modeles: ProxmoxTemplate[] = Array.isArray(t) ? t : []
+        setVmTemplates(modeles)
+        // Le gabarit de la distribution choisie, déjà sélectionné
+        setVmForm(f => ({ ...f, template_id: f.template_id || gabaritParDefaut(modeles, f.boot_mode, f.os) }))
+      })
       .catch(() => {})
       .finally(() => { if (toujours(hvId)) setGabaritsEnCours(false) })
     setNoeudsEnCours(true)
@@ -320,7 +326,8 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
             {organizations.map(o => <option key={o.id} value={o.id}>Organisation : {o.name}</option>)}
           </select>
           <select value={vmForm.os} onChange={e => setVmForm(f => avecProfil({
-              ...f, os: e.target.value, boot_mode: modeParDefaut(typeHv, e.target.value), template_id: '', iso: '',
+              ...f, os: e.target.value, boot_mode: modeParDefaut(typeHv, e.target.value), iso: '',
+              template_id: gabaritParDefaut(vmTemplates, modeParDefaut(typeHv, e.target.value), e.target.value),
             }, profilsPourVm(profiles, e.target.value).utilisables[0]))} className="osiris-input text-xs">
             <option value="ubuntu">Ubuntu</option>
             <option value="debian">Debian</option>
@@ -580,7 +587,8 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
                 {/* cloud-init est spécifique Linux (user-data, apt) : jamais proposé à Windows */}
                 {(vmForm.os === 'windows' ? ['template', 'pxe'] as const : ['template', 'cloudinit', 'pxe'] as const).map(mode => (
                   <button key={mode} type="button"
-                    onClick={() => setVmForm(f => ({...f, boot_mode: mode, template_id: '', iso: ''}))}
+                    onClick={() => setVmForm(f => ({...f, boot_mode: mode, iso: '',
+                      template_id: mode === 'pxe' ? '' : gabaritParDefaut(vmTemplates, mode, f.os)}))}
                     className={`flex-1 py-1.5 rounded text-xs border transition-colors ${vmForm.boot_mode === mode ? 'bg-blue-600/20 border-blue-500 text-blue-300' : 'bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-500'}`}>
                     {LIBELLE_MODE[mode]}{mode === modeParDefaut(typeHv, vmForm.os) ? ' (recommandé)' : ''}
                   </button>

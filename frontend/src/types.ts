@@ -256,6 +256,9 @@ export interface ProxmoxTemplate {
   uuid?: string;
   /** « windows » | « linux », d'après le type d'invité déclaré à l'hyperviseur ; « » = inconnu. */
   famille?: string;
+  /** « ubuntu » | « debian » | « windows », d'après le type d'invité vSphere ou,
+   *  à défaut, le nom du gabarit ; « » = inconnue. */
+  distribution?: string;
   /** Ce qu'OSIRIS sait de ce modèle. `null` = il ne porte pas l'agent (ou n'a
    *  jamais été annoncé) ; un clone NU n'en rappellerait jamais. */
   osiris?: GabaritOsiris | null;

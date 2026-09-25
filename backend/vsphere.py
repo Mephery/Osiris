@@ -413,6 +413,8 @@ class VSphereProvider:
                     # « debian11_64Guest »…) : sans elle, un gabarit marqué à la main
                     # se proposait sous n'importe quel système.
                     "famille":   _famille_invite(getattr(vm.config, "guestId", "") or ""),
+                    # Brut : `_annoter_gabarits` en tire la distribution
+                    "guest_id":  getattr(vm.config, "guestId", "") or "",
                 })
             return sorted(out, key=lambda d: d["vmid"])
         return await _run(work)

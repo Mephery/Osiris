@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, FORMULAIRE_VIDE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut, type ChargeVm, type ContexteRecap } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, gabaritParDefaut, FORMULAIRE_VIDE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut, type ChargeVm, type ContexteRecap } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -280,6 +280,44 @@ describe('gabaritsPourMode', () => {
 
   it("en cloud-init, qui n'a pas besoin de l'agent, tout reste choisissable", () => {
     expect(gabaritsPourMode(modeles, 'cloudinit', 'ubuntu').autresChoisissables).toBe(true)
+  })
+})
+
+describe('distribution des gabarits', () => {
+  // Ce que montrait Nova le 25/09 : Ubuntu choisi, Debian proposé à égalité
+  const nova = [
+    { vmid: 9003, name: 'ubuntu-24.04-osiris-v3', famille: 'linux', distribution: 'ubuntu', osiris: { os: '', etat: 'inconnu' } },
+    { vmid: 9005, name: 'debian-12-osiris', famille: 'linux', distribution: 'debian', osiris: { os: 'linux', etat: 'a_jour' } },
+  ]
+
+  it("ne propose pas un gabarit Debian quand on a choisi Ubuntu", () => {
+    const g = gabaritsPourMode(nova, 'cloudinit', 'ubuntu')
+    expect(g.proposes.map(m => m.vmid)).toEqual([9003])
+    expect(g.autres.map(m => m.vmid)).toEqual([9005])
+  })
+
+  it('présélectionne le gabarit de la distribution choisie', () => {
+    expect(gabaritParDefaut(nova, 'cloudinit', 'ubuntu')).toBe('9003')
+    expect(gabaritParDefaut(nova, 'cloudinit', 'debian')).toBe('9005')
+  })
+
+  it("entre deux gabarits de la distribution, l'agent à jour puis la version la plus récente", () => {
+    const vcenter = [
+      { vmid: 1, name: 'osiris-ubuntu-24.04-v2', distribution: 'ubuntu', osiris: { os: 'linux', etat: 'perime' } },
+      { vmid: 2, name: 'osiris-ubuntu-24.04-v9', distribution: 'ubuntu', osiris: { os: 'linux', etat: 'a_jour' } },
+      { vmid: 3, name: 'osiris-ubuntu-24.04-v10', distribution: 'ubuntu', osiris: { os: 'linux', etat: 'a_jour' } },
+    ]
+    expect(gabaritParDefaut(vcenter, 'template', 'ubuntu')).toBe('3')
+  })
+
+  it("une distribution inconnue reste proposée mais n'est jamais présélectionnée", () => {
+    const flou = [{ vmid: 4, name: 'linux-generique', famille: 'linux', distribution: '', osiris: { os: 'linux', etat: 'a_jour' } }]
+    expect(gabaritsPourMode(flou, 'template', 'ubuntu').proposes.map(m => m.vmid)).toEqual([4])
+    expect(gabaritParDefaut(flou, 'template', 'ubuntu')).toBe('')
+  })
+
+  it('ne présélectionne rien en PXE, qui ne clone rien', () => {
+    expect(gabaritParDefaut([], 'pxe', 'ubuntu')).toBe('')
   })
 })
 

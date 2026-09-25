@@ -2192,10 +2192,36 @@ def enregistrer_scellement(request: Request, body: ScellementBody):
     return Response(status_code=204)
 
 
+_DISTRIBUTIONS = ("ubuntu", "debian")
+
+
+def _distribution_gabarit(modele: dict) -> str:
+    """La distribution d'un gabarit — « ubuntu », « debian », « windows » — ou « ».
+
+    Choisir Ubuntu et se voir proposer un gabarit Debian à égalité obligeait à
+    savoir lequel prendre : le tri ne connaissait que la famille. Or rien ne
+    déclare la distribution partout : le scellement ne note que « linux »,
+    Proxmox que « l26 ». Deux sources, dans l'ordre :
+    - le type d'invité vSphere (`ubuntu64Guest`, `debian11_64Guest`) ;
+    - le nom du gabarit, que l'administrateur a écrit pour dire ce qu'il
+      contient — le seul indice sur Proxmox.
+    Ne rien trouver rend « » : le formulaire le propose alors sans le classer,
+    plutôt que de le cacher à tort."""
+    if modele.get("famille") == "windows":
+        return "windows"
+    for source in (modele.get("guest_id") or "", modele.get("name") or ""):
+        for d in _DISTRIBUTIONS:
+            if re.search(rf"(?<![a-z]){d}", source.lower()):
+                return d
+    return ""
+
+
 def _annoter_gabarits(modeles: list[dict]) -> list[dict]:
     """Ajoute à chaque modèle ce qu'OSIRIS en sait : `osiris` = None s'il ne porte
     pas l'agent, sinon son état — « a_jour », « perime » ou « inconnu » (marqué à
-    la main, sans empreinte)."""
+    la main, sans empreinte) ; et sa `distribution`."""
+    for m in modeles:
+        m["distribution"] = _distribution_gabarit(m)
     with Session(engine) as session:
         connus = session.exec(select(GabaritOsiris)).all()
     index: dict[str, GabaritOsiris] = {}
