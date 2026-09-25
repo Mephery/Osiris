@@ -143,3 +143,35 @@ def test_tout_apt_get_attend_le_verrou_de_dpkg(tmp_path):
     r = subprocess.run(["bash", "-c", f"{bloc}\napt-get install -y lvm2"], text=True,
                        capture_output=True, env={"PATH": f"{tmp_path}:/usr/bin:/bin"})
     assert "ARGS -o DPkg::Lock::Timeout=120 install -y lvm2" in r.stdout, r.stdout + r.stderr
+
+
+def test_apt_update_attend_que_le_verrou_des_listes_se_libere(tmp_path):
+    """La mise à jour automatique du premier démarrage tient le verrou des listes :
+    `apt-get update` échouait en une seconde et les installations suivantes aussi
+    (vu le 25/09). Le script réessaie au lieu d'abandonner."""
+    script = _rendu()
+    debut = script.index("_apt_update() {")
+    bloc = script[debut:script.index("\n}\n", debut) + 3]
+    compteur = tmp_path / "n"
+    faux_apt = tmp_path / "apt-get"
+    faux_apt.write_text(f'#!/bin/bash\nn=$(cat {compteur} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {compteur}\n'
+                        '[ "$n" -ge 3 ] && exit 0\necho "E: Could not get lock /var/lib/apt/lists/lock" >&2; exit 100\n')
+    faux_apt.chmod(0o755)
+    corps = f'sleep() {{ :; }}\n_osiris_log() {{ echo "OSIRIS $1"; }}\n{bloc}\n_apt_update && echo REUSSI'
+    r = subprocess.run(["bash", "-c", corps], text=True, capture_output=True,
+                       env={"PATH": f"{tmp_path}:/usr/bin:/bin"})
+    assert "REUSSI" in r.stdout, r.stdout + r.stderr
+    assert compteur.read_text().strip() == "3"
+
+
+def test_apt_update_dit_pourquoi_il_renonce(tmp_path):
+    script = _rendu()
+    debut = script.index("_apt_update() {")
+    bloc = script[debut:script.index("\n}\n", debut) + 3]
+    faux_apt = tmp_path / "apt-get"
+    faux_apt.write_text('#!/bin/bash\necho "E: Could not get lock /var/lib/apt/lists/lock" >&2; exit 100\n')
+    faux_apt.chmod(0o755)
+    corps = f'sleep() {{ :; }}\n_osiris_log() {{ echo "OSIRIS $1"; }}\n{bloc}\n_apt_update || echo RENONCE'
+    r = subprocess.run(["bash", "-c", corps], text=True, capture_output=True,
+                       env={"PATH": f"{tmp_path}:/usr/bin:/bin"})
+    assert "RENONCE" in r.stdout and "lists/lock" in r.stdout

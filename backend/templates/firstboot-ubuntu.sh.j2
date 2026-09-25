@@ -15,6 +15,29 @@ osiris_url="{{ osiris_url }}"
 # les rappels partaient alors sur une MAC inconnue d'OSIRIS.
 _osiris_mac="{{ machine.mac }}"
 
+# Jeton de la machine (cf. jetons.py cote serveur) : il prouve a OSIRIS que les
+# appels viennent bien d'ELLE, et non de quiconque connait sa MAC. Il n'est
+# ajoute QU'AUX appels vers OSIRIS : le smoke test d'acces internet joint un site
+# exterieur, qui n'a pas a le recevoir. Vide = serveur en mode transition.
+_osiris_jeton={{ jeton | bash_squote }}
+curl() {
+    local _a
+    if [ -n "$_osiris_jeton" ]; then
+        for _a in "$@"; do
+            case "$_a" in
+                "$osiris_url"/*) command curl -H "X-Osiris-Jeton: $_osiris_jeton" "$@"; return ;;
+            esac
+        done
+    fi
+    command curl "$@"
+}
+# Garde pour l'agent : s'il doit recharger ce script (redemarrage en cours de
+# route), il presentera ce jeton. Lisible par root seul.
+if [ -n "$_osiris_jeton" ]; then
+    { install -d -m 700 /var/lib/osiris \
+      && ( umask 077; printf '%s' "$_osiris_jeton" > /var/lib/osiris/jeton ); } 2>/dev/null || true
+fi
+
 # Une erreur n'interrompt pas le script (pas de `set -e`) : on continue, mais on
 # retient qu'elle a eu lieu pour ne PAS annoncer un deploiement reussi a la fin.
 _osiris_failed=0
@@ -65,6 +88,22 @@ _log() {
 # post-installation, lances en sous-shell, en heritent.
 export DEBIAN_FRONTEND=noninteractive
 apt-get() { command apt-get -o DPkg::Lock::Timeout=120 "$@"; }
+
+# `apt-get update` a son propre verrou (celui des listes), que DPkg::Lock::Timeout
+# ne couvre pas — et la mise a jour automatique du premier demarrage le tient
+# souvent a ce moment precis. Il echouait alors en une seconde, sans autre
+# raison ; les listes restaient vides et tout `apt-get install` suivant
+# echouait a son tour (vu le 25/09 : agent de supervision non installe). On reessaie
+# donc une minute, et l'erreur du dernier essai part dans le journal.
+_apt_update() {
+    local _essai _sortie
+    for _essai in 1 2 3 4 5 6; do
+        _sortie=$(apt-get update -qq 2>&1) && return 0
+        sleep 10
+    done
+    _osiris_log "apt-get update : $(printf '%s' "$_sortie" | tail -2 | tr '\n' ' ')"
+    return 1
+}
 
 echo "[$(ts)] ============================================"
 _log "OSIRIS First Boot - {{ machine.hostname }}"
@@ -132,7 +171,7 @@ _log "Installation des applications via apt..."
 # deja present (souvent grave dans le gabarit, sinon servi par OSIRIS). Laisser
 # cette commande nue faisait declencher le piege ERR et marquait en echec un
 # deploiement par ailleurs parfaitement reussi — constate le 17/09.
-apt-get update -qq || _log "AVERTISSEMENT : depots injoignables - on poursuit avec le cache local"
+_apt_update || _log "AVERTISSEMENT : depots injoignables - on poursuit avec le cache local"
 {% for app in linux_apps %}
 # Le compte rendu suit le RESULTAT. Annoncer « Installe » sans regarder faisait
 # dire a OSIRIS qu'un paquet etait pose sur une machine ou apt venait d'echouer,
@@ -164,7 +203,7 @@ _log "Supervision Zabbix : agent actif vers {{ zabbix.server }}"
 # deja present (souvent grave dans le gabarit, sinon servi par OSIRIS). Laisser
 # cette commande nue faisait declencher le piege ERR et marquait en echec un
 # deploiement par ailleurs parfaitement reussi — constate le 17/09.
-apt-get update -qq || _log "AVERTISSEMENT : depots injoignables - on poursuit avec le cache local"
+_apt_update || _log "AVERTISSEMENT : depots injoignables - on poursuit avec le cache local"
 # D'abord les depots de la distribution (Debian fournit encore l'agent), puis le
 # paquet servi par OSIRIS. Aucun depot tiers n'est ajoute a la machine.
 _zbx_pkg=""
@@ -180,14 +219,18 @@ if [ -z "$_zbx_pkg" ]; then
     # Les dependances, elles, viennent des depots de la distribution.
     _zbx_deb=/tmp/osiris-zabbix-agent.deb
     _log "Agent absent des depots de la distribution - recuperation depuis OSIRIS..."
-    if curl -sf -o "$_zbx_deb" --max-time 120 \
-            "$osiris_url/static/installers/zabbix-agent2.deb" \
-       && apt-get install -y "$_zbx_deb" > /dev/null 2>&1; then
+    # Deux echecs bien distincts, qu'un seul message confondait : le paquet
+    # introuvable sur OSIRIS, ou telecharge mais pas installable — ses
+    # dependances viennent des depots, et sans listes a jour elles manquent.
+    if ! curl -sf -o "$_zbx_deb" --max-time 120 "$osiris_url/static/installers/zabbix-agent2.deb"; then
+        _log "AVERTISSEMENT : agent Zabbix introuvable, ni dans les depots ni sur OSIRIS"
+        _log "  -> deposer le paquet dans backend/static/installers/zabbix-agent2.deb (voir README)"
+    elif _zbx_sortie=$(apt-get install -y "$_zbx_deb" 2>&1); then
         _zbx_pkg="zabbix-agent2"
         _log "Agent Zabbix installe depuis OSIRIS."
     else
-        _log "AVERTISSEMENT : agent Zabbix introuvable, ni dans les depots ni sur OSIRIS"
-        _log "  -> deposer le paquet dans backend/static/installers/zabbix-agent2.deb (voir README)"
+        _log "AVERTISSEMENT : paquet Zabbix recupere sur OSIRIS mais non installable"
+        _osiris_log "apt zabbix : $(printf '%s' "$_zbx_sortie" | tail -3 | tr '\n' ' ')"
     fi
     rm -f "$_zbx_deb"
 fi
