@@ -6,6 +6,7 @@ import type { ClusterStorage, Hypervisor, ProxmoxNode, ProxmoxTemplate } from '.
 import { authHeader } from './types'
 import { IcoX } from './icons'
 import { lireReponse } from './api'
+import { InventaireHyperviseur } from './InventaireHyperviseur'
 import { Spinner } from './Skeleton'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
@@ -30,6 +31,7 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
   // Modèles de chaque hyperviseur, affichés à la demande : leur liste coûte un
   // appel à l'hyperviseur (et une lecture de config par modèle sur Proxmox).
   const [gabarits, setGabarits]         = useState<Record<number, ProxmoxTemplate[] | 'chargement' | undefined>>({})
+  const [inventaireOuvert, setInventaireOuvert] = useState<Record<number, boolean>>({})
 
   const handleCreateHv = (e: React.FormEvent) => {
     e.preventDefault()
@@ -147,6 +149,10 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
                     className="osiris-btn text-xs px-3">
                     {gabarits[h.id] ? 'Masquer les gabarits' : 'Gabarits'}
                   </button>
+                  <button onClick={() => setInventaireOuvert(o => ({ ...o, [h.id]: !o[h.id] }))}
+                    className="osiris-btn text-xs px-3" title="Toutes les VM de l'hyperviseur, leurs réseaux et leurs adresses — lecture seule">
+                    {inventaireOuvert[h.id] ? "Masquer l'inventaire" : 'Inventaire'}
+                  </button>
                   <button onClick={() => editHvId === h.id ? setEditHvId(null) : startEditHv(h)}
                     className="osiris-btn text-xs px-3">
                     {editHvId === h.id ? 'Annuler' : 'Modifier'}
@@ -223,6 +229,12 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
                     </p>
                   )}
                 </form>
+              )}
+
+              {inventaireOuvert[h.id] && (
+                <div className="border-t border-slate-800/60 pt-3">
+                  <InventaireHyperviseur token={token} hvId={h.id} />
+                </div>
               )}
 
               {/* Gabarits : lesquels portent l'agent, et lequel */}

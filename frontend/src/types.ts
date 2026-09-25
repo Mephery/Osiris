@@ -284,6 +284,21 @@ export interface ProxmoxNode {
 /** Réseau proposé au raccordement d'une VM — bridge Proxmox ou port group vSphere.
  *  `cidr` et `gateway` ne sont renseignés que si le NŒUD est lui-même sur ce VLAN,
  *  ce qui est l'exception : un réseau de VM n'est le plus souvent que commuté. */
+/** Une VM telle que l'hyperviseur la voit (GET /hypervisors/{id}/inventory). */
+export interface InventaireVm {
+  vmid: number;
+  nom: string;
+  /** Nœud Proxmox, ou cluster vSphere. */
+  noeud: string;
+  etat: 'allumee' | 'eteinte';
+  genre: 'vm' | 'conteneur';
+  /** Une entrée par carte réseau. `source` : « agent » = lu dans la VM,
+   *  « configuration » = déclaré (cloud-init, conteneur). */
+  cartes: { reseau: string; ips: { ip: string; source: string }[] }[];
+  /** Nom de la fiche OSIRIS de cette VM ; « » = posée à la main. */
+  osiris: string;
+}
+
 export interface ProxmoxNetwork {
   iface: string;
   type: string;

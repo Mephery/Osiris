@@ -4897,7 +4897,11 @@ class ProxmoxProvider:
 
     @staticmethod
     async def adresses_sur_reseau(h: Hypervisor, pont: str) -> dict:
-        return await _adresses_proxmox(h, pont)
+        return _adresses_du_reseau(await _inventaire_proxmox(h), pont)
+
+    @staticmethod
+    async def inventaire(h: Hypervisor) -> list[dict]:
+        return await _inventaire_proxmox(h)
 
     @staticmethod
     async def list_templates(h: Hypervisor, node: str) -> list[dict]:
@@ -5020,19 +5024,14 @@ def _ip_declaree(valeur: str) -> str:
     return ip if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ip) else ""
 
 
-async def _adresses_proxmox(h: Hypervisor, pont: str) -> dict:
-    """Les adresses IPv4 utilisées sur un pont, lues sur TOUTES les VM du cluster.
+async def _inventaire_proxmox(h: Hypervisor) -> list[dict]:
+    """Toutes les VM et conteneurs du cluster, avec chaque carte réseau et ses IPv4.
 
-    OSIRIS ne connaissait que ses propres fiches : « déjà prises par OSIRIS »
-    taisait les dizaines de VM posées à la main sur le même réseau, et choisir
-    une adresse revenait à parier. Deux sources, par VM :
-    - l'agent invité (ce que la VM porte VRAIMENT), restreint à la carte branchée
-      sur ce pont — reconnue à sa MAC, pour ne pas compter le 172.17.0.1 d'un
-      Docker ou l'adresse d'une autre carte ;
+    Lecture seule. Par carte, deux sources :
+    - l'agent invité (ce que la VM porte VRAIMENT), rattaché à la carte par sa
+      MAC — le 172.17.0.1 d'un Docker n'appartient à aucune carte et ne compte pas ;
     - la configuration (`ipconfigN` cloud-init, `ip=` d'un conteneur) : ce qui
-      est DÉCLARÉ, seule source quand l'agent manque ou que la VM est éteinte.
-    Une VM branchée ici dont on ne sait rien est listée à part : l'absence
-    d'adresse connue ne veut pas dire adresse libre."""
+      est DÉCLARÉ, seule source quand l'agent manque ou que la VM est éteinte."""
     import asyncio
     ressources = await _proxmox_get(h, "/api2/json/cluster/resources?type=vm") or []
     limite = asyncio.Semaphore(8)
@@ -5045,37 +5044,63 @@ async def _adresses_proxmox(h: Hypervisor, pont: str) -> dict:
                 cfg = await _proxmox_get(h, f"{base}/config")
             except Exception:
                 return None
-            cartes = _cartes_sur_pont(cfg, pont)
-            if not cartes:
-                return None
-            ips: dict[str, str] = {}
-            for idx, carte in cartes.items():
-                for ip in (_ip_declaree(carte["ip"]), _ip_declaree(str(cfg.get(f"ipconfig{idx}", "")))):
+            cartes = {}
+            for cle, valeur in (cfg or {}).items():
+                if re.fullmatch(r"net\d+", cle):
+                    opts = _options_carte(str(valeur))
+                    if opts.get("bridge"):
+                        cartes[cle[3:]] = opts["bridge"]
+            ips: dict[str, dict[str, str]] = {idx: {} for idx in cartes}
+            macs: dict[str, str] = {}
+            for idx, pont in cartes.items():
+                carte = _cartes_sur_pont(cfg, pont).get(idx, {})
+                macs[carte.get("mac", "")] = idx
+                for ip in (_ip_declaree(carte.get("ip", "")), _ip_declaree(str(cfg.get(f"ipconfig{idx}", "")))):
                     if ip:
-                        ips.setdefault(ip, "configuration")
-            if genre == "qemu" and v.get("status") == "running":
+                        ips[idx].setdefault(ip, "configuration")
+            if genre == "qemu" and v.get("status") == "running" and cartes:
                 try:
                     rep = await _proxmox_get(h, f"{base}/agent/network-get-interfaces")
-                    macs = {c["mac"] for c in cartes.values()}
                     for itf in (rep or {}).get("result", []):
-                        if (itf.get("hardware-address") or "").lower() not in macs:
+                        idx = macs.get((itf.get("hardware-address") or "").lower())
+                        if idx is None:
                             continue
                         for a in itf.get("ip-addresses", []):
                             if a.get("ip-address-type") == "ipv4":
-                                ips[a["ip-address"]] = "agent"
+                                ips[idx][a["ip-address"]] = "agent"
                 except Exception:
                     pass   # pas d'agent : on garde ce qui est déclaré
-            return {"vm": cfg.get("name") or cfg.get("hostname") or f"VM {v.get('vmid')}",
-                    "vmid": v.get("vmid"), "ips": ips}
+            return {
+                "vmid": v.get("vmid"),
+                "nom": cfg.get("name") or cfg.get("hostname") or f"VM {v.get('vmid')}",
+                "noeud": v.get("node", ""),
+                "etat": "allumee" if v.get("status") == "running" else "eteinte",
+                "genre": "conteneur" if genre == "lxc" else "vm",
+                "cartes": [{"reseau": cartes[idx],
+                            "ips": [{"ip": ip, "source": src} for ip, src in ips[idx].items()]}
+                           for idx in sorted(cartes, key=int)],
+            }
 
-    lues = [r for r in await asyncio.gather(*(lire(v) for v in ressources
-                                              if not v.get("template"))) if r]
-    return {
-        "adresses": sorted(({"ip": ip, "vm": r["vm"], "source": src}
-                            for r in lues for ip, src in r["ips"].items()),
-                           key=lambda a: tuple(int(o) for o in a["ip"].split("."))),
-        "sans_adresse": sorted(r["vm"] for r in lues if not r["ips"]),
-    }
+    lues = await asyncio.gather(*(lire(v) for v in ressources if not v.get("template")))
+    return sorted((r for r in lues if r), key=lambda r: r["nom"].lower())
+
+
+def _adresses_du_reseau(inventaire: list[dict], reseau: str) -> dict:
+    """Les adresses utilisées sur un réseau, tirées de l'inventaire : UNE lecture,
+    pour que la liste du formulaire et l'écran Inventaire ne puissent diverger.
+    Une VM branchée ici dont on ne sait rien est listée à part : inconnue ne
+    veut pas dire libre."""
+    adresses, sans = [], []
+    for vm in inventaire:
+        cartes = [c for c in vm["cartes"] if c["reseau"] == reseau]
+        if not cartes:
+            continue
+        ips = {a["ip"]: a["source"] for c in cartes for a in c["ips"]}
+        if not ips:
+            sans.append(vm["nom"])
+        adresses += [{"ip": ip, "vm": vm["nom"], "source": src} for ip, src in ips.items()]
+    adresses.sort(key=lambda a: tuple(int(o) for o in a["ip"].split(".")))
+    return {"adresses": adresses, "sans_adresse": sorted(sans)}
 
 
 def _reserve_reseau(n: dict) -> str:
@@ -5098,6 +5123,21 @@ def _reserve_reseau(n: dict) -> str:
     if "pxe" in f"{n.get('iface', '')} {n.get('comments', '')}".lower():
         return "pxe"
     return ""
+
+
+@app.get("/hypervisors/{hv_id}/inventory")
+async def get_inventory(hv_id: int, _: User = Depends(require_admin)):
+    """Toutes les VM de l'hyperviseur, leurs réseaux et leurs adresses. Lecture seule.
+
+    `osiris` : le nom de la fiche OSIRIS qui porte cette VM, ou « » pour une VM
+    posée à la main — c'est ce qui distingue, dans une liste de cinquante, les
+    machines dont OSIRIS répond de celles qu'il ne fait que voir."""
+    h = _get_hypervisor(hv_id)
+    vms = await _provider(h).inventaire(h)
+    with Session(engine) as session:
+        fiches = {m.proxmox_vm_id: m.hostname for m in session.exec(
+            select(Machine).where(Machine.hypervisor_id == hv_id, Machine.proxmox_vm_id > 0)).all()}
+    return [{**vm, "osiris": fiches.get(vm["vmid"], "")} for vm in vms]
 
 
 @app.get("/hypervisors/{hv_id}/network-usage")

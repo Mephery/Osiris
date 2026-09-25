@@ -10,7 +10,7 @@ import pytest
 from sqlmodel import Session
 
 import main
-from models import Hypervisor, engine
+from models import Hypervisor, Machine, engine
 
 RESSOURCES = [
     {"vmid": 101, "node": "pve1", "type": "qemu", "status": "running"},
@@ -105,3 +105,30 @@ def test_les_gabarits_et_les_autres_reseaux_sont_ignores(client, admin_headers, 
 ])
 def test_ip_declaree(valeur, attendu):
     assert main._ip_declaree(valeur) == attendu
+
+
+# ── L'inventaire complet ──────────────────────────────────────────────────────
+
+def _inventaire(client, admin_headers, hv_id) -> dict:
+    resp = client.get(f"/hypervisors/{hv_id}/inventory", headers=admin_headers)
+    assert resp.status_code == 200, resp.text
+    return {v["nom"]: v for v in resp.json()}
+
+
+def test_l_inventaire_liste_chaque_vm_avec_ses_cartes(client, admin_headers, hv_id):
+    inv = _inventaire(client, admin_headers, hv_id)
+    assert set(inv) == {"web-01", "ailleurs", "cloud-01", "ct-01", "muette"}, "gabarit exclu"
+    assert inv["web-01"]["cartes"] == [{"reseau": "vmbr320", "ips": [{"ip": "192.0.2.10", "source": "agent"}]}]
+    assert inv["ct-01"]["genre"] == "conteneur"
+    assert inv["cloud-01"]["etat"] == "eteinte"
+
+
+def test_l_inventaire_distingue_les_vm_d_osiris(client, admin_headers, hv_id):
+    """Dans une liste de cinquante, savoir de quelles machines OSIRIS répond."""
+    with Session(engine) as session:
+        session.add(Machine(mac="020000000101", hostname="srv-web-01", client="Acme", os="debian",
+                            hypervisor_id=hv_id, proxmox_vm_id=101))
+        session.commit()
+    inv = _inventaire(client, admin_headers, hv_id)
+    assert inv["web-01"]["osiris"] == "srv-web-01"
+    assert inv["ailleurs"]["osiris"] == ""

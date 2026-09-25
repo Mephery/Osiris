@@ -489,6 +489,48 @@ class VSphereProvider:
         return await _run(work)
 
     @staticmethod
+    async def inventaire(h: Hypervisor) -> list[dict]:
+        """Toutes les VM du vCenter, leurs port groups et leurs IPv4 (VMware Tools).
+
+        Même contrat que côté Proxmox, et toutes les lectures groupées : un
+        attribut par aller-retour coûtait près de 20 s sur un vCenter moyen."""
+        def work():
+            si = _connect(h)
+            vms = _proprietes(si, _all(si, vim.VirtualMachine), vim.VirtualMachine,
+                              ["name", "config.template", "runtime.powerState", "runtime.host",
+                               "network", "guest.net"])
+            vms = [v for v in vms if not v.get("config.template")]
+            nets = {n["_obj"]._moId: n.get("name", "") for n in _proprietes(
+                si, list({x._moId: x for v in vms for x in (v.get("network") or [])}.values()),
+                vim.Network, ["name"])}
+            hotes = _proprietes(si, list({v["runtime.host"]._moId: v["runtime.host"]
+                                          for v in vms if v.get("runtime.host")}.values()),
+                                vim.HostSystem, ["parent"])
+            grappes = {g["_obj"]._moId: g.get("name", "") for g in _proprietes(
+                si, list({x["parent"]._moId: x["parent"] for x in hotes if x.get("parent")}.values()),
+                vim.ComputeResource, ["name"])}
+            grappe_de = {x["_obj"]._moId: grappes.get(x["parent"]._moId, "") for x in hotes if x.get("parent")}
+            out = []
+            for v in vms:
+                cartes = []
+                for ref in v.get("network") or []:
+                    nom = nets.get(ref._moId, "")
+                    ips = sorted({ip for nic in (v.get("guest.net") or []) if nic.network == nom
+                                  for ip in (nic.ipAddress or []) if "." in ip and ":" not in ip})
+                    cartes.append({"reseau": nom, "ips": [{"ip": ip, "source": "agent"} for ip in ips]})
+                hote = v.get("runtime.host")
+                out.append({
+                    "vmid": _moid_number(v["_obj"]),
+                    "nom": v.get("name", ""),
+                    "noeud": grappe_de.get(hote._moId, "") if hote else "",
+                    "etat": "allumee" if str(v.get("runtime.powerState")) == "poweredOn" else "eteinte",
+                    "genre": "vm",
+                    "cartes": cartes,
+                })
+            return sorted(out, key=lambda r: r["nom"].lower())
+        return await _run(work)
+
+    @staticmethod
     async def adresses_sur_reseau(h: Hypervisor, reseau: str) -> dict:
         """Adresses IPv4 des VM branchées sur ce port group, lues par VMware Tools.
 
