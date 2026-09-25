@@ -148,8 +148,12 @@ OSIRIS_URL_HTTPS = os.environ.get("OSIRIS_URL_HTTPS", "").strip().rstrip("/")
 def _osiris_ip() -> str:
     """L'adresse IP d'OSIRIS, lue dans OSIRIS_BASE_URL : c'est sur elle qu'on épingle
     le nom HTTPS (`curl --resolve`), les VLAN clients ne le résolvant pas."""
+    ip = re.compile(r"\d{1,3}(\.\d{1,3}){3}")
     hote = urllib.parse.urlparse(OSIRIS_BASE_URL).hostname or ""
-    return hote if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", hote) else ""
+    if ip.fullmatch(hote):
+        return hote
+    repli = os.environ.get("OSIRIS_IP", "")
+    return repli if ip.fullmatch(repli) else ""
 OSIRIS_IP       = os.environ.get("OSIRIS_IP", "10.0.0.1")
 SSH_PUBKEY      = os.environ.get("OSIRIS_SSH_PUBKEY", "").strip()
 ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL", "admin@osiris.local")
