@@ -20,7 +20,8 @@ from typing import Optional
 from urllib.parse import quote
 from xml.sax.saxutils import escape
 from passlib.hash import sha512_crypt
-from fastapi import HTTPException, FastAPI, Request, Response, Depends, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import HTTPException, FastAPI, Request, Response, Depends, Header, WebSocket, WebSocketDisconnect, BackgroundTasks
+import jetons
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -2005,7 +2006,7 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
                              linux_apps: list, zabbix: Optional[dict],
                              osiris_url: str, post_script: str = "",
                              ip_attendue: str = "", disques: Optional[list] = None,
-                             compte: Optional[dict] = None) -> str:
+                             compte: Optional[dict] = None, jeton: str = "") -> str:
     """Le script de premier démarrage Linux, rendu à partir d'un contexte explicite.
 
     Volontairement sans accès à la base : le script est aussi embarqué dans le
@@ -2028,6 +2029,7 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
         disques=(disques if disques is not None else valider_disques(
             [], profile_ctx.get("vm_data_disk_gb", 0) or 0)),
         compte=compte,
+        jeton=jeton,
         # Variable propre, et NON `machine.ip_cidr` : `machine` est un dict
         # volontairement etroit, et Jinja rend `Undefined` — donc faux — pour une
         # cle absente, sans rien dire. Un `{% if machine.ip_cidr %}` ecrit ici ne
@@ -2037,7 +2039,7 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
     )
 
 
-def _render_linux_firstboot(mac: str) -> Response:
+def _render_linux_firstboot(mac: str, jeton: Optional[str] = None) -> Response:
     """Rend le script de premier démarrage Linux (Ubuntu et Debian partagent apt-get)."""
     clean_mac = validate_mac(mac)
     with Session(engine) as session:
@@ -2045,6 +2047,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         if not machine:
             raise HTTPException(status_code=404, detail="Machine inconnue")
         _exiger_fenetre_de_deploiement(session, machine)
+        jeton_script = _jeton_pour_script(session, machine, jeton, "firstboot-linux")
         profile = _resolve_profile(session, machine)
         app_id_list = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
         linux_apps = session.exec(select(Application).where(Application.id.in_(app_id_list), Application.apt_package != "")).all() if app_id_list else []
@@ -2061,6 +2064,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         ip_attendue=machine.ip_cidr or "",
         disques=disques_de(machine.disques) if machine.disques else None,
         compte=json.loads(machine.compte) if machine.compte else None,
+        jeton=jeton_script,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -2320,18 +2324,18 @@ def get_windows_sysprep_unattend(locale: str = "fr-FR",
 
 
 @app.get("/firstboot-linux/{mac}")
-def get_linux_firstboot(mac: str):
+def get_linux_firstboot(mac: str, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """
     Point d'entrée générique du premier démarrage Linux — celui qu'appelle le
     mécanisme d'amorçage cuit dans les templates de VM, qui ignore la distribution.
     """
-    return _render_linux_firstboot(mac)
+    return _render_linux_firstboot(mac, jeton)
 
 
 @app.get("/firstboot-ubuntu/{mac}")
-def get_ubuntu_firstboot(mac: str):
+def get_ubuntu_firstboot(mac: str, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Script bash généré à la volée, exécuté au premier démarrage Ubuntu via systemd oneshot."""
-    return _render_linux_firstboot(mac)
+    return _render_linux_firstboot(mac, jeton)
 
 
 @app.get("/preseed/{mac}")
@@ -2358,9 +2362,9 @@ def get_preseed(mac: str):
 
 
 @app.get("/firstboot-debian/{mac}")
-def get_debian_firstboot(mac: str):
+def get_debian_firstboot(mac: str, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Réutilise le template Ubuntu — apt-get est identique sur Debian."""
-    return _render_linux_firstboot(mac)
+    return _render_linux_firstboot(mac, jeton)
 
 
 @app.get("/firstboot-windows/{mac}")
@@ -2758,9 +2762,10 @@ async def delete_snapshot(mac: str, name: str, _: User = Depends(require_admin))
 
 
 @app.post("/machines/{mac}/hardware")
-def post_hardware(mac: str, data: dict):
+def post_hardware(mac: str, data: dict, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Remonte les infos materiel collectees au premier demarrage (sans auth - appele par la machine)."""
     clean_mac = validate_mac(mac)
+    _controler_jeton_mac(clean_mac, jeton, "hardware")
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
@@ -2777,9 +2782,10 @@ def post_hardware(mac: str, data: dict):
 
 
 @app.post("/machines/{mac}/bitlocker-key")
-def post_bitlocker_key(mac: str, data: dict):
+def post_bitlocker_key(mac: str, data: dict, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Stocke la cle de recuperation et/ou le PIN BitLocker chiffres (sans auth - appele par la machine en firstboot)."""
     clean_mac = validate_mac(mac)
+    _controler_jeton_mac(clean_mac, jeton, "bitlocker-key")
     key = (data.get("key") or "").strip()
     pin = (data.get("pin") or "").strip()
     if not key and not pin:
@@ -2822,9 +2828,10 @@ def get_bitlocker_key(mac: str, current_user: User = Depends(require_admin)):
 
 
 @app.post("/machines/{mac}/laps-password")
-def post_laps_password(mac: str, data: dict):
+def post_laps_password(mac: str, data: dict, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Stocke le mot de passe admin local (LAPS) chiffre (sans auth - appele par la machine en firstboot ou rotation)."""
     clean_mac = validate_mac(mac)
+    _controler_jeton_mac(clean_mac, jeton, "laps-password")
     password = (data.get("password") or "").strip()
     if not password:
         raise HTTPException(status_code=400, detail="Mot de passe manquant")
@@ -2865,7 +2872,7 @@ def _rotation_laps_due(session: Session, machine: Machine) -> tuple[bool, Option
 
 
 @app.get("/machines/{mac}/laps-due")
-def laps_due(mac: str):
+def laps_due(mac: str, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """
     Verifie si la rotation LAPS est due pour cette machine.
     Sans auth : appele par le script de renouvellement au demarrage Windows.
@@ -2873,6 +2880,7 @@ def laps_due(mac: str):
     periode est ecoulee depuis la derniere rotation (ou depuis le deploiement).
     """
     clean_mac = validate_mac(mac)
+    _controler_jeton_mac(clean_mac, jeton, "laps-due")
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
@@ -2898,13 +2906,14 @@ def get_laps_password(mac: str, current_user: User = Depends(require_admin)):
 
 
 @app.post("/machines/{mac}/smoke-tests")
-def post_smoke_tests(mac: str, data: dict):
+def post_smoke_tests(mac: str, data: dict, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """
     Recoit le rapport de smoke tests envoye par le script firstboot en fin de deploiement.
     Pas d'auth : appele par la machine elle-meme comme les autres callbacks firstboot.
     Payload : {"tests": [{"name": "...", "ok": true/false, "detail": "..."}]}
     """
     clean_mac = validate_mac(mac)
+    _controler_jeton_mac(clean_mac, jeton, "smoke-tests")
     tests = data.get("tests", [])
     if not isinstance(tests, list):
         raise HTTPException(status_code=400, detail="Format invalide : 'tests' doit etre une liste")
@@ -3149,9 +3158,13 @@ async def _orienter_boot_vm_windows(mac: str, vers_winpe: bool) -> None:
 @app.post("/machines/{mac}/status")
 @limiter.limit("10/minute")
 def report_machine_status(request: Request, mac: str, status: str, background_tasks: BackgroundTasks,
-                          operateur: Optional[User] = Depends(get_current_user_optional)):
+                          operateur: Optional[User] = Depends(get_current_user_optional),
+                          jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Appelé par la machine elle-même via curl pendant l'installation."""
     clean_mac = validate_mac(mac)
+    # Un opérateur connecté n'a pas de jeton de machine : c'est la machine qui en a un
+    if operateur is None:
+        _controler_jeton_mac(clean_mac, jeton, "status")
     valid = {"pending", "deploying", "deployed", "failed"}
     if status not in valid:
         raise HTTPException(status_code=400, detail=f"Statut invalide. Valeurs : {valid}")
@@ -3287,9 +3300,10 @@ def get_machine_history(mac: str):
 
 @app.post("/machines/{mac}/deploy-progress")
 @limiter.limit("60/minute")
-async def report_deploy_progress(request: Request, mac: str, p: int):
+async def report_deploy_progress(request: Request, mac: str, p: int, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Appelé par WinPE à chaque étape pour mettre à jour la progression DISM."""
     clean_mac = validate_mac(mac)
+    _controler_jeton_mac(clean_mac, jeton, "deploy-progress")
     progress = max(0, min(100, p))
     _deploy_progress[clean_mac] = progress
     await manager.broadcast({"mac": clean_mac, "dism_progress": progress})
@@ -3320,6 +3334,9 @@ def _open_new_deploy_run(machine: Machine) -> None:
     # leur absence marque la fenêtre où le premier démarrage peut encore venir
     # chercher son script (cf. _exiger_fenetre_de_deploiement).
     machine.smoke_status = ""
+    # Nouveau déploiement, nouveau jeton : l'ancien meurt ici, le prochain script
+    # servi en portera un neuf (cf. jetons.py).
+    machine.jeton_hash = ""
     _deploy_progress.pop(machine.mac, None)
 
 
@@ -3333,6 +3350,60 @@ def _fenetre_ouverte(session: Session, machine: Machine) -> bool:
         return True
     except HTTPException:
         return False
+
+
+# Appels sans jeton déjà consignés, par (MAC, déploiement) : un agent qui réessaie
+# toutes les 10 s ne doit pas noyer le journal d'audit.
+_sans_jeton_signales: set = set()
+
+
+def _controler_jeton(session: Session, machine: Machine, presente: Optional[str], route: str) -> None:
+    """Un appel de machine : jeton juste = accepté ; faux = 403, toujours ; absent
+    = accepté et consigné en transition, 403 en mode obligatoire (cf. jetons.py).
+    À appeler AVANT toute modification : il peut valider la session."""
+    if presente:
+        if jetons.correspond(presente, machine.jeton_hash):
+            return
+        _log_systeme(session, "jeton_refuse", target_mac=machine.mac, details={"route": route})
+        session.commit()
+        raise HTTPException(status_code=403, detail="Jeton de machine invalide.")
+    if jetons.obligatoire():
+        raise HTTPException(status_code=403, detail=(
+            "Jeton de machine requis : cette machine doit présenter le jeton reçu "
+            "dans son script de déploiement."))
+    cle = (machine.mac, machine.deploy_log_run)
+    if cle not in _sans_jeton_signales:
+        _sans_jeton_signales.add(cle)
+        _log_systeme(session, "appel_sans_jeton", target_mac=machine.mac, details={"route": route})
+        session.commit()
+
+
+def _controler_jeton_mac(clean_mac: str, presente: Optional[str], route: str) -> None:
+    """`_controler_jeton` pour un rappel qui ne charge pas encore la machine. Une
+    MAC inconnue passe : chaque route traite déjà ce cas à sa façon (404, ligne de
+    journal rangée à part…)."""
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if machine:
+            _controler_jeton(session, machine, presente, route)
+
+
+def _jeton_pour_script(session: Session, machine: Machine, presente: Optional[str], route: str) -> str:
+    """Le jeton à inscrire dans le script servi ; « » = aucun (transition).
+
+    Première demande de la fenêtre : un jeton neuf est créé et remis — c'est la
+    remise unique. Ensuite, la demande doit le présenter (un agent qui recharge
+    son script après un redémarrage, par exemple)."""
+    if presente:
+        _controler_jeton(session, machine, presente, route)
+        return presente
+    if not machine.jeton_hash:
+        clair, machine.jeton_hash = jetons.nouveau()
+        session.add(machine)
+        session.commit()
+        return clair
+    _controler_jeton(session, machine, None, route)
+    return ""
 
 
 def _exiger_fenetre_de_deploiement(session: Session, machine: Machine) -> None:
@@ -3402,9 +3473,10 @@ def _append_log_line(session: Session, clean_mac: str, run: int, line: str) -> N
 
 @app.post("/machines/{mac}/log")
 @limiter.limit("120/minute")
-async def append_deploy_log(request: Request, mac: str, msg: str):
+async def append_deploy_log(request: Request, mac: str, msg: str, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Appelé par WinPE et le firstboot pour envoyer une ligne de log en temps réel."""
     clean_mac = validate_mac(mac)
+    _controler_jeton_mac(clean_mac, jeton, "log")
     line = _stamp(msg)
     with Session(engine) as session:
         _append_log_line(session, clean_mac, _current_run(session, clean_mac), line)
@@ -3867,9 +3939,10 @@ def list_captures():
 
 
 @app.post("/capture/{mac}/done")
-async def capture_done(mac: str, success: bool = True):
+async def capture_done(mac: str, success: bool = True, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Appelé par le script WinPE à la fin de la capture."""
     clean_mac = validate_mac(mac)
+    _controler_jeton_mac(clean_mac, jeton, "capture-done")
     if clean_mac in _capture_jobs:
         _capture_jobs[clean_mac]["status"] = "done" if success else "failed"
         _capture_jobs[clean_mac]["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -5509,7 +5582,7 @@ def _resolve_profile_for_vm(body) -> Profile:
     return profile or Profile(name="_fallback", os=body.os)
 
 
-def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str) -> str:
+def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str, jeton: str = "") -> str:
     """
     User-data cloud-init d'une VM à créer, indépendant de l'hyperviseur.
 
@@ -5551,6 +5624,7 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str) -> str:
         ip_attendue=getattr(body, "ip_cidr", "") or "",
         disques=[d.model_dump() if hasattr(d, "model_dump") else d for d in (getattr(body, "disques", None) or [])],
         compte=body.compte.model_dump() if getattr(body, "compte", None) else None,
+        jeton=jeton,
     )
 
     return jinja_env.get_template("cloud-init-user-data.j2").render(
@@ -5762,9 +5836,17 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
 
     # Le user-data cloud-init est rendu ici, pour les deux hyperviseurs : Proxmox
     # le dépose en snippet, vSphere l'injecte en guestinfo. Même contenu.
+    # Sur vSphere, le jeton naît avec la VM : le script embarqué dans le cloud-init
+    # (livré par guestinfo) le porte déjà, sans qu'il transite par le réseau. Sur
+    # Proxmox, ce cloud-init n'arrive PAS dans la VM (cf. snippets) : un jeton créé
+    # ici n'y parviendrait jamais et bloquerait la remise unique — l'agent le
+    # recevra dans le premier script servi.
     user_data = ""
+    jeton_clair, jeton_hash = ("", "")
     if body.boot_mode == "cloudinit":
-        user_data = _render_cloud_init_user_data(h, body, mac_plain)
+        if (h.type or "proxmox").lower() == "vsphere":
+            jeton_clair, jeton_hash = jetons.nouveau()
+        user_data = _render_cloud_init_user_data(h, body, mac_plain, jeton_clair)
 
     # ── Fiche + audit AVANT le moindre appel à l'hyperviseur ───────────────────
     # Ils étaient écrits après le démarrage de la VM. Tout ce qui interrompait la
@@ -5794,6 +5876,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                 disques=(json.dumps([d.model_dump() for d in body.disques])
                          if body.os != "windows" else ""),
                 compte=json.dumps(body.compte.model_dump()) if body.compte else "",
+                jeton_hash=jeton_hash,
                 ip_cidr=body.ip_cidr.strip(),
                 gateway=body.gateway.strip(),
                 dns_servers=body.dns_servers.strip(),
@@ -5827,7 +5910,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     try:
         created = await provider.provision_vm(
             h, body, vm_id, mac_colons, mac_plain, user_data,
-            lambda mac: _render_cloud_init_user_data(h, body, mac),
+            lambda mac: _render_cloud_init_user_data(h, body, mac, jeton_clair),
         )
         if created:
             # vSphere décide de l'identifiant ET de la MAC au moment du clone.

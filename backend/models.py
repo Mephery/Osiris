@@ -343,6 +343,10 @@ class Machine(SQLModel, table=True):
     # clé SSH, sudo. Relu par le premier démarrage, y compris lors d'un
     # redéploiement. « » = aucun.
     compte: str = Field(default="")
+    # Empreinte (SHA-256) du jeton de la machine, cf. jetons.py. Vide = aucun jeton
+    # remis depuis l'ouverture de la fenêtre : la prochaine demande de script en
+    # recevra un. Le jeton en clair n'est JAMAIS en base.
+    jeton_hash: str = Field(default="")
     # ANCRE D'IDENTITE de la VM : l'UUID SMBIOS que l'hyperviseur lui a genere.
     #
     # `proxmox_vm_id` ne suffit PAS a designer une VM dans le temps : `nextid` rend
