@@ -19,13 +19,15 @@ import pytest
 from jinja2 import Environment, FileSystemLoader
 
 
-def _rendu(data_disk_gb: int = 0) -> str:
+def _rendu(data_disk_gb: int = 0, complet: bool = False) -> str:
     env = Environment(loader=FileSystemLoader("templates"), trim_blocks=True,
                       lstrip_blocks=True, autoescape=False)
     env.filters.setdefault("bash_squote", lambda v: "'" + str(v).replace("'", "'\\''") + "'")
     return env.get_template("firstboot-ubuntu.sh.j2").render(
         machine={"hostname": "srv-01", "mac": "aabbccddeeff", "ou": "", "post_script": ""},
-        profile={"machine_type": "server"}, linux_apps=[], zabbix=None,
+        profile={"machine_type": "server"},
+        linux_apps=[{"name": "Htop", "apt_package": "htop"}] if complet else [],
+        zabbix={"server": "192.0.2.50"} if complet else None,
         data_disk_gb=data_disk_gb, osiris_url="http://osiris.test", ip_attendue="")
 
 
@@ -117,6 +119,23 @@ def test_un_echec_d_installation_de_lvm2_dit_pourquoi():
     """Vu le 25/09 : « lvm2 absent et non installable », et rien d'autre — sur
     une VM sans agent invité, la raison était perdue pour de bon."""
     script = _rendu(10)
-    assert "DPkg::Lock::Timeout=120 lvm2" in script
     assert '_osiris_log "apt lvm2 :' in script
     assert "lvm2 > /dev/null" not in script
+
+
+def test_tout_apt_get_attend_le_verrou_de_dpkg(tmp_path):
+    """Pas seulement lvm2 : les applications du profil, l'agent Zabbix, la
+    jonction AD passent par le même apt, au même moment du démarrage. La
+    fonction doit être définie AVANT le premier appel, et réellement appliquée."""
+    script = _rendu(10, complet=True)
+    definition = script.index("apt-get() {")
+    premier_appel = min(m.start() for m in re.finditer(r"apt-get (update|install)", script))
+    assert definition < premier_appel
+    # Exécutée : la fonction ajoute bien l'option au vrai apt-get
+    faux = tmp_path / "apt-get"
+    faux.write_text('#!/bin/bash\necho "ARGS $*"\n')
+    faux.chmod(0o755)
+    bloc = script[definition:script.index("\n", definition)]
+    r = subprocess.run(["bash", "-c", f"{bloc}\napt-get install -y lvm2"], text=True,
+                       capture_output=True, env={"PATH": f"{tmp_path}:/usr/bin:/bin"})
+    assert "ARGS -o DPkg::Lock::Timeout=120 install -y lvm2" in r.stdout, r.stdout + r.stderr

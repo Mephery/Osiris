@@ -57,6 +57,15 @@ _log() {
     _osiris_log "$1"
 }
 
+# Tout apt-get de ce script attend le verrou de dpkg, jusqu'a deux minutes. Au
+# premier demarrage d'une image cloud, la mise a jour automatique le tient : une
+# installation lancee a ce moment echouait en moins d'une seconde, sans autre
+# raison que la malchance (vu le 25/09 sur lvm2). Une fonction plutot qu'un
+# fichier dans /etc/apt : rien ne reste sur la machine, et les scripts de
+# post-installation, lances en sous-shell, en heritent.
+export DEBIAN_FRONTEND=noninteractive
+apt-get() { command apt-get -o DPkg::Lock::Timeout=120 "$@"; }
+
 echo "[$(ts)] ============================================"
 _log "OSIRIS First Boot - {{ machine.hostname }}"
 echo "[$(ts)] ============================================"
@@ -355,11 +364,9 @@ else
     # VLAN sans depots : on retombe alors sur l'ext4 direct, et on le DIT.
     # La sortie d'apt est gardee : un « non installable » sans la raison ne
     # se diagnostique pas (vu le 25/09, sur une VM sans agent invite ni acces
-    # console). Le verrou peut etre tenu par la mise a jour automatique du
-    # premier demarrage : on l'attend jusqu'a deux minutes.
+    # console). L'attente du verrou vient de la fonction apt-get, plus haut.
     if ! command -v pvcreate > /dev/null 2>&1 \
-       && ! _lvm_apt=$(DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                        -o DPkg::Lock::Timeout=120 lvm2 2>&1); then
+       && ! _lvm_apt=$(apt-get install -y lvm2 2>&1); then
         _osiris_log "apt lvm2 : $(printf '%s' "$_lvm_apt" | tail -3 | tr '\n' ' ')"
     fi
     if command -v pvcreate > /dev/null 2>&1; then
