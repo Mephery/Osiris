@@ -192,3 +192,95 @@ def test_le_smbios_conserve_l_uuid_et_ecrase_le_numero_du_gabarit():
     cfg = {"smbios1": "uuid=11111111-2222-3333-4444-555555555555,serial=Z2FiYXJpdA==,base64=1"}
     assert main._smbios_avec_jeton(cfg, "") == "uuid=11111111-2222-3333-4444-555555555555"
     assert main._smbios_avec_jeton(cfg, "abc").startswith("uuid=11111111-2222-3333-4444-555555555555,serial=")
+
+
+# ── Redéploiement et exigence ─────────────────────────────────────────────────
+
+def _redeployer():
+    with Session(engine) as session:
+        m = session.exec(select(Machine).where(Machine.mac == MAC)).first()
+        main._open_new_deploy_run(m)
+        session.add(m)
+        session.commit()
+
+
+def _exiger():
+    with Session(engine) as session:
+        m = session.exec(select(Machine).where(Machine.mac == MAC)).first()
+        m.jeton_exige = True
+        session.add(m)
+        session.commit()
+
+
+def test_au_redeploiement_le_jeton_presente_est_verifie_puis_remplace(client, linux):
+    ancien = _jeton_du(_script(client).text)
+    _redeployer()
+    nouveau = _jeton_du(_script(client, ancien).text)
+    assert nouveau and nouveau != ancien
+    assert _script(client, ancien).status_code == 403
+    assert _script(client, nouveau).status_code == 200
+
+
+def test_une_machine_qui_exige_son_jeton_refuse_l_absence_meme_en_transition(client, linux):
+    jeton = _jeton_du(_script(client).text)
+    _exiger()
+    assert _script(client).status_code == 403
+    assert client.post(f"/machines/{MAC}/log", params={"msg": "x"}).status_code == 403
+    assert client.post(f"/machines/{MAC}/log", params={"msg": "x"},
+                       headers={jetons.ENTETE: jeton}).status_code == 200
+
+
+def test_un_redeploiement_n_ouvre_pas_la_porte_d_une_machine_qui_exige_son_jeton(client, linux):
+    """L'ancienne règle effaçait le jeton au redéploiement : n'importe qui pouvait
+    alors se faire remettre le suivant. La machine doit prouver qui elle est."""
+    jeton = _jeton_du(_script(client).text)
+    _exiger()
+    _redeployer()
+    assert _script(client).status_code == 403
+    assert _script(client, "invente").status_code == 403
+    assert _jeton_du(_script(client, jeton).text) not in ("", jeton)
+
+
+def _creer_depuis_gabarit(client, admin_headers, monkeypatch, etat):
+    from tests.test_create_vm import _make_hypervisor, _patch_proxmox
+    hv_id = _make_hypervisor()
+    _patch_proxmox(monkeypatch, {})
+
+    async def modeles(h):
+        return [{"vmid": 9005, "name": "debian-12-osiris", "uuid": "u"}]
+    monkeypatch.setattr(main.ProxmoxProvider, "list_all_templates", staticmethod(modeles))
+    monkeypatch.setattr(main, "_annoter_gabarits",
+                        lambda ms: [{**m, "osiris": {"etat": etat, "os": "linux"} if etat else None} for m in ms])
+    async def provision(h, body, vm_id, *a, **k):
+        return {"vm_id": vm_id, "vm_uuid": ""}
+    monkeypatch.setattr(main.ProxmoxProvider, "provision_vm", staticmethod(provision))
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "srv-clone", "client": "Acme", "os": "debian", "node": "pve",
+        "storage": "ceph", "boot_mode": "cloudinit", "template_id": 9005})
+    with Session(engine) as session:
+        return resp, session.exec(select(Machine).where(Machine.hostname == "srv-clone")).first()
+
+
+@pytest.mark.parametrize("etat, exige", [("a_jour", True), ("perime", False), (None, False)])
+def test_seul_un_gabarit_a_jour_rend_le_jeton_obligatoire(client, admin_headers, monkeypatch, etat, exige):
+    resp, fiche = _creer_depuis_gabarit(client, admin_headers, monkeypatch, etat)
+    assert fiche is not None, resp.text
+    assert fiche.jeton_exige is exige
+
+
+def test_le_script_epingle_le_nom_https_sur_l_adresse_d_osiris(tmp_path, monkeypatch):
+    """Les VLAN clients ne résolvent pas le nom d'OSIRIS, et le certificat ne vaut
+    que pour lui : `--resolve` fait les deux, sans dépendre du DNS du client."""
+    monkeypatch.setattr(main, "OSIRIS_BASE_URL", "http://192.0.2.11")
+    script = main._firstboot_linux_content(
+        hostname="srv-01", mac=MAC, ou="", profile_ctx={"machine_type": "server"},
+        linux_apps=[], zabbix=None, osiris_url="https://osiris.example.com", jeton="le-jeton")
+    bloc = script[script.index("_osiris_jeton="):script.index("\n# Garde pour l'agent")]
+    faux = tmp_path / "curl"
+    faux.write_text('#!/bin/bash\necho "CURL $*"\n')
+    faux.chmod(faux.stat().st_mode | stat.S_IEXEC)
+    corps = f'osiris_url="https://osiris.example.com"\n{bloc}\ncurl -s https://osiris.example.com/machines/x/log'
+    r = subprocess.run(["bash", "-c", corps], text=True, capture_output=True,
+                       env={"PATH": f"{tmp_path}:/usr/bin:/bin"})
+    assert "--resolve osiris.example.com:443:192.0.2.11" in r.stdout, r.stdout + r.stderr
+    assert "X-Osiris-Jeton: le-jeton" in r.stdout

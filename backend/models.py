@@ -347,6 +347,12 @@ class Machine(SQLModel, table=True):
     # remis depuis l'ouverture de la fenêtre : la prochaine demande de script en
     # recevra un. Le jeton en clair n'est JAMAIS en base.
     jeton_hash: str = Field(default="")
+    # Un redéploiement ne jette pas le jeton : il le marque « à renouveler ». La
+    # machine le présente encore une fois, il est vérifié puis remplacé.
+    jeton_renouveler: bool = Field(default=False)
+    # VM clonée d'un gabarit scellé avec l'agent actuel, qui sait lire son jeton :
+    # un appel SANS jeton y est refusé, même en mode transition.
+    jeton_exige: bool = Field(default=False)
     # ANCRE D'IDENTITE de la VM : l'UUID SMBIOS que l'hyperviseur lui a genere.
     #
     # `proxmox_vm_id` ne suffit PAS a designer une VM dans le temps : `nextid` rend

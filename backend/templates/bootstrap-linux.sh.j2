@@ -3,8 +3,8 @@
 # OSIRIS - Installation du mecanisme d'amorcage generique (Linux)
 #
 # A executer UNE SEULE FOIS, en root, sur la VM qui servira de template :
-#     curl -sf {{ osiris_url }}/bootstrap/linux | bash
-#     curl -sf {{ osiris_url }}/bootstrap/linux | bash -s -- --seal   # + scellement
+#     curl -sf {{ url_installation }}/bootstrap/linux | bash
+#     curl -sf {{ url_installation }}/bootstrap/linux | bash -s -- --seal   # + scellement
 #
 # Ce qu'il installe ne contient AUCUN identifiant et AUCUNE logique metier :
 # juste « lis ta MAC, demande ton script a OSIRIS, execute-le ». Tout le reste
@@ -16,6 +16,9 @@
 set -euo pipefail
 
 OSIRIS_URL="{{ osiris_url }}"
+# Adresse sur laquelle le nom HTTPS d'OSIRIS est epingle (`curl --resolve`) : les
+# VLAN clients ne resolvent pas forcement ce nom. Vide en HTTP.
+OSIRIS_IP="{{ osiris_ip }}"
 SEAL=0
 for arg in "$@"; do
     case "$arg" in
@@ -30,8 +33,9 @@ done
 echo "[OSIRIS] Serveur : $OSIRIS_URL"
 
 mkdir -p /etc/osiris
-# Seule donnee propre a l'installation : l'URL d'OSIRIS. Ce n'est pas un secret.
-printf 'OSIRIS_URL=%s\n' "$OSIRIS_URL" > /etc/osiris/bootstrap.conf
+# Seules donnees propres a l'installation : l'URL d'OSIRIS et l'adresse sur
+# laquelle son nom est epingle. Ce ne sont pas des secrets.
+printf 'OSIRIS_URL=%s\nOSIRIS_IP=%s\n' "$OSIRIS_URL" "$OSIRIS_IP" > /etc/osiris/bootstrap.conf
 chmod 644 /etc/osiris/bootstrap.conf
 
 cat > /usr/local/sbin/osiris-bootstrap.sh << 'OSIRIS_BOOTSTRAP_EOF'
@@ -47,6 +51,7 @@ exec >> "$LOG" 2>&1
 ts() { date '+%Y-%m-%d %H:%M:%S %Z'; }
 
 OSIRIS_URL=""
+OSIRIS_IP=""
 [ -r /etc/osiris/bootstrap.conf ] && . /etc/osiris/bootstrap.conf
 if [ -z "$OSIRIS_URL" ]; then
     echo "[$(ts)] Aucune URL OSIRIS dans /etc/osiris/bootstrap.conf - abandon."
@@ -122,6 +127,49 @@ info_get() {
     local exe="$1" cle="$2" sortie
     sortie=$("$exe" --cmd "info-get $cle" 2>&1) || true
     printf '%s' "$sortie" | tr -d '\r' | head -n1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# Le jeton de la machine (cf. jetons.py cote serveur) : ce qui prouve a OSIRIS
+# que la demande vient d'ELLE, et non de quiconque connait sa MAC. Il arrive
+# SANS passer par le reseau :
+#   - vSphere : guestinfo.osiris.jeton ;
+#   - Proxmox : le numero de serie SMBIOS, prefixe « osiris-jeton: » — sans ce
+#     prefixe, c'est le vrai numero de serie d'une machine, pas un jeton ;
+#   - et, s'il existe, celui qu'un precedent premier demarrage a garde, qui PRIME.
+# On juge sur la FORME : vmtoolsd repond un message d'erreur quand la cle
+# n'existe pas, et ce message n'est pas un jeton.
+jeton_machine() {
+    local t exe serie
+    # D'abord le fichier : un premier demarrage deja passe y a laisse le jeton
+    # COURANT. Le canal de l'hyperviseur, lui, garde celui de la creation, qu'un
+    # redeploiement a depuis remplace.
+    t=$(cat /var/lib/osiris/jeton 2>/dev/null || true)
+    [[ "$t" =~ ^[A-Za-z0-9_-]{20,}$ ]] && { printf '%s' "$t"; return 0; }
+    exe=$(chemin_vmtoolsd)
+    if [ -n "$exe" ]; then
+        t=$(info_get "$exe" "guestinfo.osiris.jeton")
+        [[ "$t" =~ ^[A-Za-z0-9_-]{20,}$ ]] && { printf '%s' "$t"; return 0; }
+    fi
+    serie=$(cat /sys/class/dmi/id/product_serial 2>/dev/null || true)
+    case "$serie" in
+        osiris-jeton:*) t=${serie#osiris-jeton:}
+                        [[ "$t" =~ ^[A-Za-z0-9_-]{20,}$ ]] && printf '%s' "$t" ;;
+    esac
+    return 0
+}
+
+# Tout appel a OSIRIS : le jeton s'il y en a un, et en HTTPS le nom epingle sur
+# l'adresse d'OSIRIS — le certificat ne vaut que pour le nom, que le VLAN ne
+# resout pas forcement. Aucun repli vers HTTP : bloquer le 443 ne doit pas
+# suffire a faire voyager le script en clair.
+curl_osiris() {
+    local opts=() hote
+    [ -n "${JETON:-}" ] && opts+=(-H "X-Osiris-Jeton: $JETON")
+    case "$OSIRIS_URL" in
+        https://*) hote=${OSIRIS_URL#https://}; hote=${hote%%/*}; hote=${hote%%:*}
+                   [ -n "$OSIRIS_IP" ] && opts+=(--resolve "$hote:443:$OSIRIS_IP") ;;
+    esac
+    curl "${opts[@]}" "$@"
 }
 
 # Ecrit l'adressage POUR DE BON. Le firstboot ne configure pas le reseau : une
@@ -354,6 +402,12 @@ if true; then
 fi
 
 SCRIPT=/run/osiris-firstboot.sh
+JETON=$(jeton_machine)
+if [ -n "$JETON" ]; then
+    echo "[$(ts)] Jeton de la machine present."
+else
+    echo "[$(ts)] Aucun jeton lu (ni guestinfo, ni SMBIOS) : OSIRIS en remettra un dans le script."
+fi
 # 30 tentatives, de quoi laisser le bail DHCP s'etablir et couvrir le cas ou la
 # VM demarre avant que sa fiche existe cote OSIRIS.
 #
@@ -368,11 +422,12 @@ for attempt in $(seq 1 30); do
         # -f, une 404 (fiche absente), une 308 (route non proxifiee) et un serveur
         # injoignable donnaient tous le meme silence, et le journal accusait
         # l'absence de fiche dans les trois cas. Diagnostic fausse pendant 5 min.
-        code=$(curl -s -o "$SCRIPT" -w '%{http_code}' --max-time 20 \
+        code=$(curl_osiris -s -o "$SCRIPT" -w '%{http_code}' --max-time 20 \
                "$OSIRIS_URL/firstboot-linux/$mac" 2>/dev/null || echo 000)
         if [ "$code" = "200" ] && [ -s "$SCRIPT" ]; then
+            # Le script annonce lui-meme le deploiement : il porte le jeton de CE
+            # deploiement, alors que celui lu ici peut dater du precedent.
             echo "[$(ts)] Fiche trouvee pour la MAC $mac - execution du premier demarrage."
-            curl -sf -X POST "$OSIRIS_URL/machines/$mac/status?status=deploying" --max-time 15 || true
             chmod +x "$SCRIPT"
             # PAS `exec`. Avec lui, le script de premier demarrage devient le
             # processus principal de l'unite, et SON code de sortie decide du
@@ -392,6 +447,8 @@ for attempt in $(seq 1 30); do
         case "$code" in
             000) indice="serveur injoignable" ;;
             404) indice="pas de fiche pour cette MAC" ;;
+            403) indice="jeton refuse par OSIRIS" ;;
+            410) indice="deploiement termine : redeployer la machine depuis OSIRIS" ;;
             30*) indice="REDIRECTION : $OSIRIS_URL/firstboot-linux/* n'est pas servi en clair (matcher du reverse proxy ?)" ;;
             *)   indice="reponse inattendue" ;;
         esac
@@ -477,6 +534,8 @@ if [ "$SEAL" -eq 1 ]; then
     rm -f /var/lib/dbus/machine-id
     rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
     rm -f /var/log/osiris-bootstrap.log /var/log/osiris-firstboot.log
+    # Le jeton de la VM de construction : le gabarit ne doit jamais l'emporter.
+    rm -rf /var/lib/osiris
     echo "[OSIRIS] Template scelle. Eteindre la VM, puis la convertir en modele :"
     echo "[OSIRIS]   Proxmox : qm template <vmid>"
     echo "[OSIRIS]   vSphere : clic droit sur la VM > Modele > Convertir en modele"

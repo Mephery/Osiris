@@ -450,13 +450,13 @@ def _bootstrap_rendu():
 def test_l_amorcage_lit_le_code_http_au_lieu_de_le_masquer():
     """`curl -f` rendait 404, 308 et panne réseau indiscernables."""
     script = _bootstrap_rendu()
-    assert "curl -s -o \"$SCRIPT\" -w '%{http_code}'" in script
+    assert "curl_osiris -s -o \"$SCRIPT\" -w '%{http_code}'" in script
     assert "curl -sf -o" not in script
 
 
 def test_chaque_cause_a_son_message():
     script = _bootstrap_rendu()
-    for cause in ("serveur injoignable", "pas de fiche pour cette MAC", "REDIRECTION"):
+    for cause in ("serveur injoignable", "pas de fiche pour cette MAC", "REDIRECTION", "jeton refuse"):
         assert cause in script
 
 

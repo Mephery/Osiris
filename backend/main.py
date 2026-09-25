@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Coline Derycke. See LICENSE.
 import asyncio
 import base64
+import urllib.parse
 import uuid as uuid_lib
 import hashlib
 import io
@@ -139,6 +140,16 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 OSIRIS_BASE_URL = os.environ.get("OSIRIS_BASE_URL", "http://10.0.0.1:8000")
+# Adresse HTTPS d'OSIRIS pour les machines, par son NOM (le certificat ne vaut que
+# pour lui), ex. https://osiris.example.com. Vide = les machines restent en HTTP.
+OSIRIS_URL_HTTPS = os.environ.get("OSIRIS_URL_HTTPS", "").strip().rstrip("/")
+
+
+def _osiris_ip() -> str:
+    """L'adresse IP d'OSIRIS, lue dans OSIRIS_BASE_URL : c'est sur elle qu'on épingle
+    le nom HTTPS (`curl --resolve`), les VLAN clients ne le résolvant pas."""
+    hote = urllib.parse.urlparse(OSIRIS_BASE_URL).hostname or ""
+    return hote if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", hote) else ""
 OSIRIS_IP       = os.environ.get("OSIRIS_IP", "10.0.0.1")
 SSH_PUBKEY      = os.environ.get("OSIRIS_SSH_PUBKEY", "").strip()
 ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL", "admin@osiris.local")
@@ -2031,6 +2042,7 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
             [], profile_ctx.get("vm_data_disk_gb", 0) or 0)),
         compte=compte,
         jeton=jeton,
+        osiris_ip=_osiris_ip(),
         # Variable propre, et NON `machine.ip_cidr` : `machine` est un dict
         # volontairement etroit, et Jinja rend `Undefined` — donc faux — pour une
         # cle absente, sans rien dire. Un `{% if machine.ip_cidr %}` ecrit ici ne
@@ -2115,8 +2127,12 @@ def get_linux_bootstrap():
     enregistrée. C'est ce qui permet de ne stocker aucun identifiant dans le
     template, contrairement à un compte Proxmox dédié.
     """
+    # L'agent gravé parle à OSIRIS en HTTPS dès qu'une adresse HTTPS est configurée,
+    # nom épinglé sur l'IP. L'installation, elle, se lance depuis l'adresse de base.
     content = jinja_env.get_template("bootstrap-linux.sh.j2").render(
-        osiris_url=OSIRIS_BASE_URL,
+        osiris_url=OSIRIS_URL_HTTPS or OSIRIS_BASE_URL,
+        osiris_ip=_osiris_ip() if OSIRIS_URL_HTTPS else "",
+        url_installation=OSIRIS_BASE_URL,
         empreinte=_empreinte_agent("linux"),
     )
     return Response(content=content, media_type="text/plain")
@@ -3335,9 +3351,10 @@ def _open_new_deploy_run(machine: Machine) -> None:
     # leur absence marque la fenêtre où le premier démarrage peut encore venir
     # chercher son script (cf. _exiger_fenetre_de_deploiement).
     machine.smoke_status = ""
-    # Nouveau déploiement, nouveau jeton : l'ancien meurt ici, le prochain script
-    # servi en portera un neuf (cf. jetons.py).
-    machine.jeton_hash = ""
+    # Nouveau déploiement, nouveau jeton — mais l'ancien n'est PAS effacé : la
+    # machine le présente une dernière fois, il est vérifié, puis remplacé dans le
+    # script servi. L'effacer laissait n'importe qui se faire remettre le suivant.
+    machine.jeton_renouveler = True
     _deploy_progress.pop(machine.mac, None)
 
 
@@ -3368,7 +3385,7 @@ def _controler_jeton(session: Session, machine: Machine, presente: Optional[str]
         _log_systeme(session, "jeton_refuse", target_mac=machine.mac, details={"route": route})
         session.commit()
         raise HTTPException(status_code=403, detail="Jeton de machine invalide.")
-    if jetons.obligatoire():
+    if jetons.obligatoire() or machine.jeton_exige:
         raise HTTPException(status_code=403, detail=(
             "Jeton de machine requis : cette machine doit présenter le jeton reçu "
             "dans son script de déploiement."))
@@ -3392,18 +3409,31 @@ def _controler_jeton_mac(clean_mac: str, presente: Optional[str], route: str) ->
 def _jeton_pour_script(session: Session, machine: Machine, presente: Optional[str], route: str) -> str:
     """Le jeton à inscrire dans le script servi ; « » = aucun (transition).
 
-    Première demande de la fenêtre : un jeton neuf est créé et remis — c'est la
-    remise unique. Ensuite, la demande doit le présenter (un agent qui recharge
-    son script après un redémarrage, par exemple)."""
-    if presente:
-        _controler_jeton(session, machine, presente, route)
-        return presente
-    if not machine.jeton_hash:
+    - aucun jeton encore : on en remet un (remise unique) ;
+    - jeton présenté et juste : servi tel quel — ou, si un redéploiement l'a marqué
+      à renouveler, REMPLACÉ par un neuf, remis dans le script ;
+    - jeton présenté mais faux : refusé… sauf pendant un renouvellement d'une
+      machine qui n'exige pas le sien (un poste réinstallé a pu perdre son
+      fichier) : remise unique, comme au premier jour, et consignée ;
+    - pas de jeton : refusé si la machine l'exige, sinon transition (consigné)
+      — ou remise unique pendant un renouvellement."""
+    def remettre() -> str:
         clair, machine.jeton_hash = jetons.nouveau()
+        machine.jeton_renouveler = False
         session.add(machine)
         session.commit()
         return clair
-    _controler_jeton(session, machine, None, route)
+
+    if not machine.jeton_hash:
+        return remettre()
+    juste = bool(presente) and jetons.correspond(presente, machine.jeton_hash)
+    if juste:
+        return remettre() if machine.jeton_renouveler else presente
+    if machine.jeton_renouveler and not machine.jeton_exige and not jetons.obligatoire():
+        _log_systeme(session, "jeton_remis_au_redeploiement", target_mac=machine.mac,
+                     details={"route": route, "jeton_presente": bool(presente)})
+        return remettre()
+    _controler_jeton(session, machine, presente, route)   # 403, ou transition consignée
     return ""
 
 
@@ -5862,6 +5892,19 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     # réseau. Un tiers qui connaît la MAC n'obtient donc rien : l'agent présente
     # le jeton dès sa première demande.
     jeton_clair, jeton_hash = jetons.nouveau()
+    # Clone d'un gabarit scellé avec l'agent ACTUEL : il lit son jeton, il devra
+    # donc toujours le présenter. Un gabarit plus ancien ne le sait pas : sa VM
+    # reste en transition. Lecture impossible = transition : ce contrôle ne doit
+    # jamais empêcher une création.
+    jeton_exige = False
+    if body.boot_mode in ("template", "cloudinit") and body.template_id:
+        try:
+            modeles = _annoter_gabarits(await _provider(h).list_all_templates(h))
+            gabarit = next((m for m in modeles if str(m.get("vmid")) == str(body.template_id)), None)
+            jeton_exige = bool(gabarit and gabarit.get("osiris")
+                               and gabarit["osiris"].get("etat") == "a_jour")
+        except Exception:
+            _hv_log.warning("État du gabarit %s illisible : VM en mode transition", body.template_id)
     user_data = ""
     if body.boot_mode == "cloudinit":
         user_data = _render_cloud_init_user_data(h, body, mac_plain, jeton_clair)
@@ -5895,6 +5938,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                          if body.os != "windows" else ""),
                 compte=json.dumps(body.compte.model_dump()) if body.compte else "",
                 jeton_hash=jeton_hash,
+                jeton_exige=jeton_exige,
                 ip_cidr=body.ip_cidr.strip(),
                 gateway=body.gateway.strip(),
                 dns_servers=body.dns_servers.strip(),

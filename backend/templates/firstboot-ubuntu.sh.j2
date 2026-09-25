@@ -19,16 +19,27 @@ _osiris_mac="{{ machine.mac }}"
 # appels viennent bien d'ELLE, et non de quiconque connait sa MAC. Il n'est
 # ajoute QU'AUX appels vers OSIRIS : le smoke test d'acces internet joint un site
 # exterieur, qui n'a pas a le recevoir. Vide = serveur en mode transition.
+#
+# En HTTPS, le nom d'OSIRIS est EPINGLE sur son adresse (`--resolve`) : les VLAN
+# clients ne resolvent pas forcement ce nom, et le certificat, lui, ne vaut que
+# pour le nom. Aucune dependance au DNS du client, et le certificat reste verifie.
 _osiris_jeton={{ jeton | bash_squote }}
+_osiris_ip={{ osiris_ip | bash_squote }}
 curl() {
-    local _a
-    if [ -n "$_osiris_jeton" ]; then
-        for _a in "$@"; do
-            case "$_a" in
-                "$osiris_url"/*) command curl -H "X-Osiris-Jeton: $_osiris_jeton" "$@"; return ;;
-            esac
-        done
-    fi
+    local _a _h _opts=()
+    for _a in "$@"; do
+        case "$_a" in
+            "$osiris_url"/*)
+                [ -n "$_osiris_jeton" ] && _opts+=(-H "X-Osiris-Jeton: $_osiris_jeton")
+                case "$osiris_url" in
+                    https://*)
+                        _h=${osiris_url#https://}; _h=${_h%%/*}; _h=${_h%%:*}
+                        [ -n "$_osiris_ip" ] && _opts+=(--resolve "$_h:443:$_osiris_ip") ;;
+                esac
+                command curl "${_opts[@]}" "$@"
+                return ;;
+        esac
+    done
     command curl "$@"
 }
 # Garde pour l'agent : s'il doit recharger ce script (redemarrage en cours de
@@ -107,6 +118,10 @@ _apt_update() {
 
 echo "[$(ts)] ============================================"
 _log "OSIRIS First Boot - {{ machine.hostname }}"
+# Annonce du deploiement : c'etait l'agent qui la faisait, mais il ne porte pas
+# forcement le bon jeton (apres un redeploiement, le canal de l'hyperviseur garde
+# l'ancien). Ce script, lui, porte toujours celui de ce deploiement.
+curl -s -X POST "$osiris_url/machines/$_osiris_mac/status?status=deploying" --max-time 15 > /dev/null || true
 echo "[$(ts)] ============================================"
 
 # ── Nom d'hote ────────────────────────────────────────────────────────────────
