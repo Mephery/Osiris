@@ -626,9 +626,16 @@ export default function App() {
   const handleDelete = (mac: string) => {
     const url = `${API_URL}/machines/${mac}${deleteDestroyVm ? '?destroy_proxmox=true' : ''}`
     fetch(url, { method: 'DELETE', headers: authHeader(auth.token) })
-      .then((res) => { if (!res.ok && res.status !== 204) throw new Error('Erreur suppression') })
+      .then(async (res) => {
+        // Le serveur dit pourquoi (VM qui n'a pas pu être détruite, numéro
+        // attribué à une autre VM…) : « Erreur suppression » ne laissait rien à faire.
+        if (!res.ok) {
+          const corps = await res.json().catch(() => ({}))
+          throw new Error(typeof corps.detail === 'string' ? corps.detail : 'Erreur suppression')
+        }
+      })
       .then(() => { setDeletingMac(null); setDeleteDestroyVm(false); fetchAll(auth.token, selectedOrg) })
-      .catch((err) => toast.error(err.message))
+      .catch((err) => toast.error(err.message, { duration: 10000 }))
   }
 
   const handleVmPower = (mac: string, action: string) => {

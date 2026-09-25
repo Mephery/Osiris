@@ -101,7 +101,7 @@ def test_destruction_refusee_quand_le_numero_designe_une_autre_vm(
     vu = _proxmox(monkeypatch, config_vm_etrangere())
     detruites: list = []
 
-    async def fake_destroy(h, node, vm_id, nom_attendu=""):
+    async def fake_destroy(h, node, vm_id, nom_attendu="", strict=False):
         detruites.append(vm_id)
 
     monkeypatch.setattr(main, "_destroy_vm_quietly", fake_destroy)
@@ -320,7 +320,7 @@ def test_creation_refusee_si_lidentifiant_a_ete_pris_entre_temps(
 
     detruites: list = []
 
-    async def fake_destroy(h, node, vm_id, nom_attendu=""):
+    async def fake_destroy(h, node, vm_id, nom_attendu="", strict=False):
         detruites.append(vm_id)
 
     monkeypatch.setattr(main, "_proxmox_get", fake_get)

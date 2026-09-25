@@ -2635,12 +2635,11 @@ async def delete_machine(mac: str, destroy_proxmox: bool = False, current_user: 
         # et un second contrôle par le nom refuserait une VM légitimement renommée.
         nom_attendu = hostname if (h.type or "").lower() == "vsphere" else ""
         # Par le provider : la destruction n'a rien de commun entre un appel
-        # Proxmox et un Destroy_Task vSphere. Si la VM n'existe plus côté
-        # hyperviseur, on supprime quand même la fiche d'OSIRIS.
-        try:
-            await _provider(h).destroy_vm(h, node, vm_id, nom_attendu=nom_attendu)
-        except HTTPException:
-            pass
+        # Proxmox et un Destroy_Task vSphere. Une VM déjà absente n'est pas une
+        # erreur (le provider ne fait alors rien) ; en revanche un échec de
+        # destruction REMONTE et la fiche reste. L'avaler retirait la fiche d'une
+        # VM toujours allumée et affichait « supprimée » : vu le 25/09.
+        await _provider(h).destroy_vm(h, node, vm_id, nom_attendu=nom_attendu, strict=True)
 
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
@@ -4933,8 +4932,8 @@ class ProxmoxProvider:
 
     @staticmethod
     async def destroy_vm(h: Hypervisor, node: str, vm_id: int,
-                         nom_attendu: str = "") -> None:
-        await _destroy_vm_quietly(h, node, vm_id, nom_attendu)
+                         nom_attendu: str = "", strict: bool = False) -> None:
+        await _destroy_vm_quietly(h, node, vm_id, nom_attendu, strict=strict)
 
 
 _PROVIDERS = {
@@ -5260,7 +5259,7 @@ def _rollback_vm_machine(user: User, body, hv_id: int, vm_id: int,
 
 
 async def _destroy_vm_quietly(h: Hypervisor, node: str, vm_id: int,
-                              nom_attendu: str = "") -> None:
+                              nom_attendu: str = "", strict: bool = False) -> None:
     """Détruit une VM après un échec, sans jamais masquer l'erreur d'origine.
 
     Utilisé pour ne pas laisser de VM à moitié configurée sur l'hyperviseur : ses
@@ -5273,6 +5272,10 @@ async def _destroy_vm_quietly(h: Hypervisor, node: str, vm_id: int,
     le numéro appartient à quelqu'un d'autre, et le nettoyage purgeait la VM d'un
     tiers, arrêt franc compris (Proxmox refuse de détruire une VM allumée, mais on
     l'éteint juste avant). Un nom qui ne correspond pas ⇒ on ne touche à rien.
+
+    `strict` : pour une suppression DEMANDÉE, l'échec doit remonter. Silencieux,
+    il laissait la VM tourner sur l'hyperviseur pendant que l'appelant retirait
+    sa fiche et annonçait « supprimée » — une VM orpheline, adresse IP comprise.
     """
     if nom_attendu:
         cfg = await _config_vm(h, node, vm_id)
@@ -5298,14 +5301,28 @@ async def _destroy_vm_quietly(h: Hypervisor, node: str, vm_id: int,
                 _hv_log.exception("Refus de destruction non journalisé (VM %s)", vm_id)
             return
 
+    # L'arrêt est ASYNCHRONE : Proxmox rend la main avec l'identifiant d'une
+    # tâche, la VM tourne encore. Enchaîner le DELETE aussitôt le faisait
+    # refuser (« VM is running - destroy failed ») — vu le 25/09 sur les deux
+    # VM supprimées ce jour-là, restées allumées sans fiche.
     try:
-        await _proxmox_post(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/status/stop")
+        tache = await _proxmox_post(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/status/stop")
+        if isinstance(tache, str) and tache.startswith("UPID:"):
+            await _proxmox_wait_task(h, node, tache)
     except Exception:
         pass   # la VM n'était probablement pas démarrée
     try:
-        await _proxmox_request(h, "DELETE", f"/api2/json/nodes/{node}/qemu/{vm_id}?purge=1")
-        _hv_log.warning("VM %s détruite après échec de sa configuration", vm_id)
+        tache = await _proxmox_request(h, "DELETE", f"/api2/json/nodes/{node}/qemu/{vm_id}?purge=1")
+        if isinstance(tache, str) and tache.startswith("UPID:"):
+            await _proxmox_wait_task(h, node, tache)
+        _hv_log.warning("VM %s détruite", vm_id)
     except Exception as exc:
+        if strict:
+            raise HTTPException(
+                status_code=502,
+                detail=f"La VM {vm_id} n'a pas pu être supprimée de l'hyperviseur "
+                       f"({str(getattr(exc, 'detail', exc))[:200]}). Sa fiche est conservée.",
+            ) from exc
         # Le nettoyage a échoué : on le signale fort, mais on laisse remonter
         # l'erreur d'origine, qui est celle qui intéresse l'appelant.
         _hv_log.error(

@@ -348,7 +348,7 @@ def test_echec_hyperviseur_detruit_la_vm_retire_la_fiche_et_laisse_une_trace(
 
     destroyed: list = []
 
-    async def fake_destroy(h, node, vm_id, nom_attendu=""):
+    async def fake_destroy(h, node, vm_id, nom_attendu="", strict=False):
         destroyed.append((vm_id, nom_attendu))
 
     monkeypatch.setattr(main, "_destroy_vm_quietly", fake_destroy)

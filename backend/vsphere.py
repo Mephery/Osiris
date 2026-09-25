@@ -588,7 +588,7 @@ class VSphereProvider:
 
     @staticmethod
     async def destroy_vm(h: Hypervisor, node: str, vm_id: Any,
-                         nom_attendu: str = "") -> None:
+                         nom_attendu: str = "", strict: bool = False) -> None:
         """Suppression best-effort : ne masque jamais l'erreur d'origine.
 
         `nom_attendu` : même garde-fou que côté Proxmox. vCenter ne recycle pas ses
@@ -621,8 +621,14 @@ class VSphereProvider:
 
         try:
             await _run(work)
-        except Exception:
+        except Exception as exc:
             _log.exception("Impossible de détruire la VM vSphere %s", vm_id)
+            # Suppression demandée : l'échec remonte, la fiche reste (cf. Proxmox)
+            if strict:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"La VM {vm_id} n'a pas pu être supprimée du vCenter "
+                           f"({str(exc)[:200]}). Sa fiche est conservée.") from exc
 
 
 def _metadata(body, mac_plain: str) -> str:
