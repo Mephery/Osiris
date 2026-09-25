@@ -111,3 +111,12 @@ def test_data_passe_par_lvm_avec_repli_dit():
 
 def test_le_swap_est_verifie_par_un_smoke_test():
     assert '_add_test "Swap"' in _rendu()
+
+
+def test_un_echec_d_installation_de_lvm2_dit_pourquoi():
+    """Vu le 25/09 : « lvm2 absent et non installable », et rien d'autre — sur
+    une VM sans agent invité, la raison était perdue pour de bon."""
+    script = _rendu(10)
+    assert "DPkg::Lock::Timeout=120 lvm2" in script
+    assert '_osiris_log "apt lvm2 :' in script
+    assert "lvm2 > /dev/null" not in script

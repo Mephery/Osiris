@@ -353,7 +353,15 @@ else
     # chaud, en ajoutant un disque (pvcreate, vgextend, lvextend -r), sans arret
     # ni copie. lvm2 manque aux images cloud Debian et ne s'installe pas sur un
     # VLAN sans depots : on retombe alors sur l'ext4 direct, et on le DIT.
-    command -v pvcreate > /dev/null 2>&1 || apt-get install -y lvm2 > /dev/null 2>&1 || true
+    # La sortie d'apt est gardee : un « non installable » sans la raison ne
+    # se diagnostique pas (vu le 25/09, sur une VM sans agent invite ni acces
+    # console). Le verrou peut etre tenu par la mise a jour automatique du
+    # premier demarrage : on l'attend jusqu'a deux minutes.
+    if ! command -v pvcreate > /dev/null 2>&1 \
+       && ! _lvm_apt=$(DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                        -o DPkg::Lock::Timeout=120 lvm2 2>&1); then
+        _osiris_log "apt lvm2 : $(printf '%s' "$_lvm_apt" | tail -3 | tr '\n' ' ')"
+    fi
     if command -v pvcreate > /dev/null 2>&1; then
         if ! _lvm_out=$( { pvcreate -q "$_data_disk" && vgcreate -q vg_data "$_data_disk" \
                            && lvcreate -q -y -l 100%FREE -n data vg_data; } 2>&1 ); then
