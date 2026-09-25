@@ -43,7 +43,7 @@ def test_aucun_apt_update_nu(source):
 
 
 def test_le_montage_verifie_avant_de_monter(source):
-    assert "mountpoint -q /data" in source
+    assert 'if mountpoint -q "$mnt"; then' in source
 
 
 def test_l_echec_de_depots_est_DIT(source):

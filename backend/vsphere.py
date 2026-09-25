@@ -855,12 +855,21 @@ def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
                 operation=vim.vm.device.VirtualDeviceSpec.Operation.edit, device=dev))
             break
 
-    if getattr(body, "data_disk_gb", 0):
-        controller = next((d for d in vm.config.hardware.device
-                           if isinstance(d, vim.vm.device.VirtualSCSIController)), None)
+    # Disques supplémentaires, dans l'ORDRE de la liste : c'est cet ordre (unités
+    # SCSI croissantes, donc sdb, sdc…) que le premier démarrage suit pour les
+    # retrouver — vSphere n'expose pas de numéro de série comme Proxmox.
+    tailles = [d.taille_gb for d in (getattr(body, "disques", None) or [])] \
+        or ([body.data_disk_gb] if getattr(body, "data_disk_gb", 0) else [])
+    controller = next((d for d in vm.config.hardware.device
+                       if isinstance(d, vim.vm.device.VirtualSCSIController)), None)
+    if tailles and controller is not None:
         disks = [d for d in vm.config.hardware.device
                  if isinstance(d, vim.vm.device.VirtualDisk)]
-        if controller is not None:
+        unite = max((d.unitNumber for d in disks), default=-1)
+        for i, taille in enumerate(tailles):
+            unite += 1
+            if unite == 7:   # réservée au contrôleur SCSI lui-même
+                unite += 1
             # Pas de `fileName` : vCenter place le disque à côté de la VM. Le
             # renseigner à vide fait échouer le placement (« No host is
             # compatible »), sans jamais dire que c'est le disque en cause.
@@ -870,10 +879,9 @@ def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
                 operation=vim.vm.device.VirtualDeviceSpec.Operation.add,
                 fileOperation=vim.vm.device.VirtualDeviceSpec.FileOperation.create,
                 device=vim.vm.device.VirtualDisk(
-                    capacityInKB=body.data_disk_gb * 1024 * 1024,
+                    capacityInKB=taille * 1024 * 1024,
                     controllerKey=controller.key,
-                    unitNumber=max((d.unitNumber for d in disks), default=-1) + 1,
-                    key=-101, backing=backing)))
+                    unitNumber=unite, key=-101 - i, backing=backing)))
 
     if changes:
         _wait(vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(deviceChange=changes)))

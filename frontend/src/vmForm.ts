@@ -3,6 +3,7 @@
 // Logique pure du formulaire de création de VM (InfrastructureTab), séparée pour
 // rester testable sans monter de composant — et parce qu'un fichier .tsx ne peut
 // exporter que des composants sans casser le Fast Refresh de Vite.
+import { decrireDisque, disqueData, disquesPourServeur, type DisqueForm } from './disquesForm'
 
 /** L'adresse saisie tombe-t-elle dans le réseau du bridge choisi ? `null` si l'une
  *  des deux n'est pas exploitable — on se tait plutôt que d'alarmer à tort.
@@ -34,7 +35,8 @@ export const completerPrefixeCidr = (ipCidr: string, prefixe: number | undefined
  *  vérifient sans simuler tout un cycle de rendu React. Générique sur `T` pour que
  *  le reste des champs du formulaire garde son vrai type plutôt que de s'effacer
  *  derrière un `Record<string, unknown>`. */
-export const buildCreateVmPayload = <T extends { profile_id: unknown; template_id: unknown; organization_id: unknown }>(
+export const buildCreateVmPayload = <T extends { profile_id: unknown; template_id: unknown; organization_id: unknown;
+                                                 os?: string; disques?: DisqueForm[]; data_disk_gb?: number }>(
   vmForm: T,
   vmNode: string,
 ) => ({
@@ -43,6 +45,10 @@ export const buildCreateVmPayload = <T extends { profile_id: unknown; template_i
   profile_id: vmForm.profile_id ? Number(vmForm.profile_id) : null,
   template_id: vmForm.template_id ? Number(vmForm.template_id) : null,
   organization_id: vmForm.organization_id === '' ? null : Number(vmForm.organization_id),
+  // Linux : la liste des disques ; Windows : le disque de données unique. Jamais
+  // les deux — le serveur refuserait la liste sous Windows.
+  disques: vmForm.os === 'windows' ? [] : disquesPourServeur(vmForm.disques ?? []),
+  data_disk_gb: vmForm.os === 'windows' ? (vmForm.data_disk_gb ?? 0) : 0,
 })
 
 /** L'image système déclarée par le profil sera-t-elle ignorée par ce mode d'amorçage ?
@@ -112,12 +118,19 @@ export const profilsPourVm = <P extends { id: number; os: string; resume?: { ale
 
 /** Sélectionne un profil et reprend son gabarit matériel : c'est le profil qui
  *  sait ce que demande ce type de serveur. Les valeurs restent modifiables. */
-export const avecProfil = <F extends { profile_id: string; vcpus: number; ram_mb: number; disk_gb: number; data_disk_gb: number }>(
+export const avecProfil = <F extends { profile_id: string; vcpus: number; ram_mb: number; disk_gb: number; data_disk_gb: number; disques?: DisqueForm[] }>(
   f: F,
   p: { id: number; vm_vcpus?: number; vm_ram_mb?: number; vm_disk_gb?: number; vm_data_disk_gb?: number } | undefined,
-): F => p
-  ? { ...f, profile_id: String(p.id), vcpus: p.vm_vcpus ?? f.vcpus, ram_mb: p.vm_ram_mb ?? f.ram_mb, disk_gb: p.vm_disk_gb ?? f.disk_gb, data_disk_gb: p.vm_data_disk_gb ?? f.data_disk_gb }
-  : { ...f, profile_id: '' }
+): F => {
+  if (!p) return { ...f, profile_id: '' }
+  const data = p.vm_data_disk_gb ?? f.data_disk_gb
+  return {
+    ...f, profile_id: String(p.id), vcpus: p.vm_vcpus ?? f.vcpus, ram_mb: p.vm_ram_mb ?? f.ram_mb,
+    disk_gb: p.vm_disk_gb ?? f.disk_gb, data_disk_gb: data,
+    // Le disque de données du profil devient le premier de la liste (Linux)
+    ...(f.disques !== undefined ? { disques: data ? [disqueData(data)] : [] } : {}),
+  }
+}
 
 export type ModeVm = 'pxe' | 'template' | 'cloudinit'
 
@@ -207,7 +220,7 @@ export const LIBELLE_MODE: Record<ModeVm, string> = {
 /** Le formulaire de création de VM à l'ouverture. Ici plutôt que dans le composant
  *  pour que le test du récapitulatif en dérive ses champs : un champ ajouté ici
  *  sans être montré au récapitulatif fait échouer ce test. */
-export const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
+export const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, disques: [] as DisqueForm[], ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
 
 export type ChargeVm = ReturnType<typeof buildCreateVmPayload<typeof FORMULAIRE_VIDE>>
 
@@ -275,9 +288,13 @@ export const recapVm = (c: ChargeVm, ctx: ContexteRecap): SectionRecap[] => {
             champs: ['ip_cidr', 'gateway', 'dns_servers'] },
     ] },
     { titre: 'Matériel', lignes: [
-      { texte: `${c.vcpus} vCPU · ${tailleRam(c.ram_mb)} RAM · disque ${c.disk_gb} Go`
-          + (c.data_disk_gb ? ` · ${c.data_disk_gb} Go montés sur /data` : ' · pas de disque /data'),
-        champs: ['vcpus', 'ram_mb', 'disk_gb', 'data_disk_gb'] },
+      { texte: `${c.vcpus} vCPU · ${tailleRam(c.ram_mb)} RAM · disque système ${c.disk_gb} Go`,
+        champs: ['vcpus', 'ram_mb', 'disk_gb'] },
+      // Chaque disque sur sa ligne : c'est ici qu'on relit un point de montage
+      ...(c.disques.length
+        ? c.disques.map(d => ({ texte: decrireDisque(d), champs: ['disques', 'data_disk_gb'] as (keyof ChargeVm)[] }))
+        : [{ texte: c.data_disk_gb ? `Disque de données : ${c.data_disk_gb} Go` : 'Pas de disque supplémentaire',
+             champs: ['disques', 'data_disk_gb'] as (keyof ChargeVm)[] }]),
     ] },
     { titre: 'Comment', lignes: [
       { texte: LIBELLE_MODE[c.boot_mode] + (c.iso ? ` · ISO ${c.iso}` : ''), champs: ['boot_mode', 'iso'] },

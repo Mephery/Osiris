@@ -333,6 +333,12 @@ class Machine(SQLModel, table=True):
     # ce VLAN), donc l'hyperviseur ne sait pas dire quelle est la passerelle ni le
     # DNS. Ce que nous avons deploye nous, si.
     vm_bridge: str = Field(default="")
+    # Disques supplémentaires d'une VM Linux, en JSON (cf. disques.py) : taille,
+    # point de montage, libellé, LVM, système de fichiers. C'est CETTE liste que
+    # lit le premier démarrage — il lisait la taille du profil, pas celle
+    # demandée, et un disque ajouté au formulaire n'était jamais formaté.
+    # « » = fiche antérieure à la liste : le profil fait encore foi.
+    disques: str = Field(default="")
     # ANCRE D'IDENTITE de la VM : l'UUID SMBIOS que l'hyperviseur lui a genere.
     #
     # `proxmox_vm_id` ne suffit PAS a designer une VM dans le temps : `nextid` rend

@@ -446,3 +446,60 @@ def test_une_config_vide_n_a_pas_de_lecteur():
 def test_les_valeurs_non_textuelles_ne_cassent_pas_le_balayage():
     """La config Proxmox mele chaines et entiers (cores, memory, onboot)."""
     assert not main._a_un_lecteur_cloudinit({"cores": 2, "memory": 2048, "onboot": 1})
+
+
+# ── Disques supplémentaires (Linux) ──────────────────────────────────────────
+
+def test_chaque_disque_arrive_a_proxmox_et_sur_la_fiche(client, admin_headers, monkeypatch):
+    """La même liste pour l'hyperviseur et pour le premier démarrage : le disque
+    ajouté au formulaire n'est plus jamais créé sans être formaté."""
+    import json
+    from sqlmodel import Session, select
+    from models import Machine, engine
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _patch_proxmox(monkeypatch, captured)
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "srv-db", "client": "Acme", "os": "ubuntu",
+        "node": "pve", "storage": "ceph", "boot_mode": "pxe",
+        "disques": [
+            {"taille_gb": 10, "point_montage": "/data"},
+            {"taille_gb": 50, "point_montage": "/var/lib/mysql", "lvm": False, "systeme_fichiers": "xfs"},
+        ],
+    })
+    assert resp.status_code == 201, resp.text
+    cfg = captured["qemu"]
+    assert cfg["scsi1"].startswith("ceph:10") and cfg["scsi1"].endswith(",serial=data")
+    assert cfg["scsi2"].startswith("ceph:50") and cfg["scsi2"].endswith(",serial=mysql")
+    with Session(engine) as session:
+        fiche = session.exec(select(Machine).where(Machine.hostname == "srv-db")).first()
+    assert [d["libelle"] for d in json.loads(fiche.disques)] == ["data", "mysql"]
+
+
+def test_un_disque_invalide_est_refuse_avant_tout_appel(client, admin_headers, monkeypatch):
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _patch_proxmox(monkeypatch, captured)
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "srv-db", "client": "Acme", "os": "ubuntu",
+        "node": "pve", "storage": "ceph", "boot_mode": "pxe",
+        "disques": [{"taille_gb": 10, "point_montage": "/etc"}],
+    })
+    assert resp.status_code == 422
+    assert "répertoire du système" in resp.json()["detail"]
+    assert "qemu" not in captured, "aucune VM ne doit être créée"
+
+
+def test_les_disques_multiples_sont_refuses_sous_windows(client, admin_headers, monkeypatch, tmp_path):
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch)
+    _patch_proxmox(monkeypatch, captured)
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "SRV-WIN", "client": "Acme", "os": "windows",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+        "disques": [{"taille_gb": 10, "point_montage": "/data"}],
+    })
+    assert resp.status_code == 422
+    assert "Linux" in resp.json()["detail"]

@@ -35,6 +35,7 @@ from jinja2 import Environment, FileSystemLoader
 
 import pyotp
 import qrcode
+from disques import DisqueVm, config_proxmox, disques_de, valider_disques
 from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
 import vpn
 import vsphere
@@ -2002,7 +2003,7 @@ def _osiris_url_for(session: Session, machine: Machine) -> str:
 def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: dict,
                              linux_apps: list, zabbix: Optional[dict],
                              osiris_url: str, post_script: str = "",
-                             ip_attendue: str = "") -> str:
+                             ip_attendue: str = "", disques: Optional[list] = None) -> str:
     """Le script de premier démarrage Linux, rendu à partir d'un contexte explicite.
 
     Volontairement sans accès à la base : le script est aussi embarqué dans le
@@ -2020,9 +2021,10 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
         tv_password=f"{hostname.upper()}{tv_suffix}" if tv_suffix else "",
         linux_apps=linux_apps,
         zabbix=zabbix,
-        # Le disque de données est une décision de PROFIL (« ce type de serveur a
-        # un volume de données séparé »), sa taille une décision de formulaire.
-        data_disk_gb=profile_ctx.get("vm_data_disk_gb", 0),
+        # La liste de la FICHE. `None` = fiche antérieure à la liste : le profil
+        # fait encore foi, avec l'ancien disque unique sur /data.
+        disques=(disques if disques is not None else valider_disques(
+            [], profile_ctx.get("vm_data_disk_gb", 0) or 0)),
         # Variable propre, et NON `machine.ip_cidr` : `machine` est un dict
         # volontairement etroit, et Jinja rend `Undefined` — donc faux — pour une
         # cle absente, sans rien dire. Un `{% if machine.ip_cidr %}` ecrit ici ne
@@ -2054,6 +2056,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         zabbix=zabbix, osiris_url=osiris_url,
         post_script=machine.post_script or "",
         ip_attendue=machine.ip_cidr or "",
+        disques=disques_de(machine.disques) if machine.disques else None,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -5365,9 +5368,12 @@ class VmCreateBody(SQLModel):
     vcpus: int = 2
     ram_mb: int = 2048               # RAM en Mo
     disk_gb: int = 20                # disque système en Go
-    # Second disque, monté sur /data au premier démarrage. 0 = pas de disque de
-    # données. Le formulaire propose par défaut la valeur du profil.
+    # Ancien champ unique : un disque monté sur /data. Encore accepté d'un client
+    # qui ne connaît pas `disques` (il en devient le premier). Windows : seul
+    # champ disponible pour l'instant.
     data_disk_gb: int = 0
+    # Disques supplémentaires d'une VM Linux (cf. disques.py), jusqu'à 4.
+    disques: list[DisqueVm] = []
     # Adressage IP. Vide = DHCP. À renseigner sur les VLAN serveurs, qui n'ont
     # généralement pas de DHCP : sans adresse, la VM démarre et ne rappelle
     # jamais OSIRIS.
@@ -5537,6 +5543,7 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str) -> str:
         zabbix=zabbix, osiris_url=osiris_url,
         post_script=getattr(body, "post_script", "") or "",
         ip_attendue=getattr(body, "ip_cidr", "") or "",
+        disques=[d.model_dump() if hasattr(d, "model_dump") else d for d in (getattr(body, "disques", None) or [])],
     )
 
     return jinja_env.get_template("cloud-init-user-data.j2").render(
@@ -5681,6 +5688,17 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     body.ou = valider_texte_libre(body.ou, "OU")
     _valider_adressage(body)
     _refuser_vm_sans_acces(body)
+    # Disques : Linux seulement pour l'instant. Validés ICI, avant tout appel à
+    # l'hyperviseur, et normalisés une fois : l'hyperviseur, la fiche et le
+    # premier démarrage liront la même liste.
+    if body.os == "windows":
+        if body.disques:
+            raise HTTPException(status_code=422, detail=(
+                "Les disques multiples sont réservés à Linux pour l'instant : "
+                "sous Windows, utiliser le disque de données unique."))
+    else:
+        body.disques = [DisqueVm(**d) for d in valider_disques(body.disques, body.data_disk_gb)]
+        body.data_disk_gb = 0   # la liste fait foi
 
     with Session(engine) as session:
         h = session.get(Hypervisor, hv_id)
@@ -5759,6 +5777,8 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                 proxmox_vm_id=vm_id,
                 proxmox_node=body.node,
                 vm_bridge=body.bridge,
+                disques=(json.dumps([d.model_dump() for d in body.disques])
+                         if body.os != "windows" else ""),
                 ip_cidr=body.ip_cidr.strip(),
                 gateway=body.gateway.strip(),
                 dns_servers=body.dns_servers.strip(),
@@ -6115,14 +6135,14 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
                 "scsihw": "virtio-scsi-pci",
                 "scsi0": f"{body.storage}:{body.disk_gb}{fmt}",
             }
-        if body.data_disk_gb:
-            # Disque de donnees, laisse VIERGE : c'est le premier demarrage qui le
-            # formate et le monte sur /data. Sur le materiel Windows (SATA), il
-            # prend la place suivante sur le meme controleur.
-            if body.os == "windows":
+        # Disques supplémentaires, laissés VIERGES : c'est le premier démarrage
+        # qui les formate et les monte. Sur le matériel Windows (SATA), le disque
+        # de données unique prend la place suivante sur le même contrôleur.
+        if body.os == "windows":
+            if body.data_disk_gb:
                 vm_config["sata1"] = f"{body.storage}:{body.data_disk_gb}{fmt}"
-            else:
-                vm_config["scsi1"] = f"{body.storage}:{body.data_disk_gb}{fmt}"
+        else:
+            vm_config.update(config_proxmox([d.model_dump() for d in body.disques], body.storage, "scsi", fmt))
         if body.iso and "ide2" not in vm_config:
             vm_config["ide2"] = f"{body.iso},media=cdrom"
         _ajouter_pool(h, vm_config)
@@ -6147,10 +6167,12 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
             cfg = {"net0": f"virtio={mac_colons},bridge={body.bridge}", "boot": "order=scsi0"}
         cfg.update({"cores": body.vcpus, "memory": body.ram_mb,
                     "agent": "enabled=1", "onboot": 1})
-        if body.data_disk_gb:
-            # Disque de données vierge : formaté et monté au premier démarrage.
-            cle = "sata1" if body.os == "windows" else "scsi1"
-            cfg[cle] = f"{body.storage}:{body.data_disk_gb}"
+        # Disques vierges : formatés et montés au premier démarrage.
+        if body.os == "windows":
+            if body.data_disk_gb:
+                cfg["sata1"] = f"{body.storage}:{body.data_disk_gb}"
+        else:
+            cfg.update(config_proxmox([d.model_dump() for d in body.disques], body.storage))
         await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config", cfg)
 
         # Un template fabriqué depuis un déploiement PXE traîne le lecteur CD WinPE
@@ -6204,10 +6226,9 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
         )):
             cloud_config["ide2"] = f"{body.storage}:cloudinit"
 
-        if body.data_disk_gb:
-            # Le template n'a qu'un disque : celui-ci s'ajoute, vierge, et sera
-            # formate puis monte sur /data au premier demarrage.
-            cloud_config["scsi1"] = f"{body.storage}:{body.data_disk_gb}"
+        # Le template n'a qu'un disque : ceux-ci s'ajoutent, vierges, et seront
+        # formatés puis montés au premier démarrage.
+        cloud_config.update(config_proxmox([d.model_dump() for d in body.disques], body.storage))
 
         # Adressage : cloud-init applique `ipconfig0` au premier demarrage.
         # Sans lui, Proxmox laisse la carte en DHCP.

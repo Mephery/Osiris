@@ -324,92 +324,133 @@ fi
 unset _root_pw
 {% endif %}
 
-{% if data_disk_gb %}
-# ── Disque de donnees ─────────────────────────────────────────────────────────
-# Le second disque est cree vierge par l'hyperviseur : c'est ici qu'il devient
-# utilisable. On ne touche QUE a un disque sans table de partition ni systeme de
-# fichiers — jamais au disque systeme, jamais a un disque deja formate (on ne
-# veut surtout pas ecraser des donnees lors d'un redeploiement).
-_log "Recherche du disque de donnees ({{ data_disk_gb }} Go attendus)..."
+{% if disques %}
+# ── Disques supplementaires ───────────────────────────────────────────────────
+# Crees VIERGES par l'hyperviseur : c'est ici qu'ils deviennent utilisables. On ne
+# touche QU'A un disque sans table de partition ni systeme de fichiers — jamais au
+# disque systeme, jamais a un disque deja formate (un redeploiement ne doit pas
+# ecraser de donnees). La liste vient de la fiche OSIRIS : taille, point de
+# montage, libelle, LVM, systeme de fichiers.
 _root_src=$(findmnt -no SOURCE / 2>/dev/null)
 _root_disk=$(lsblk -no PKNAME "$_root_src" 2>/dev/null | head -1)
 [ -z "$_root_disk" ] && _root_disk=$(basename "$_root_src" 2>/dev/null)
-_data_disk=""
-# Filtres, dans l'ordre : type "disk", NON amovible, et au moins 1 Go.
-# VMware presente un lecteur de disquettes virtuel /dev/fd0 de 4 Ko que lsblk
-# classe comme un disque, sans partition ni systeme de fichiers — donc le profil
-# exact de ce qu'on cherche, et il passe avant sdb dans l'ordre alphabetique.
-# Sans ce filtre, OSIRIS tentait de formater la disquette.
-# Options separees, et surtout PAS `-dnob` : dans un groupe, le `-o` avale le `b`
-# comme son argument, lsblk repond « unknown column: b » et n'affiche RIEN. La
-# boucle ne tournait donc jamais et /data n'a jamais pu etre configure, sur aucun
-# hyperviseur, depuis le premier jour. Le message « aucun disque vierge trouve »
-# accusait l'hyperviseur d'un defaut qui etait ici.
-for _d in $(lsblk -d -n -b -o NAME,TYPE,RM,SIZE 2>/dev/null \
-            | awk '$2=="disk" && $3==0 && $4 > 1073741824 {print $1}'); do
-    [ "$_d" = "$_root_disk" ] && continue
-    # Vide = ni partition, ni systeme de fichiers, ni membre d'un LVM/RAID
-    if [ -z "$(lsblk -no FSTYPE,PARTTYPE "/dev/$_d" 2>/dev/null | tr -d ' \n')" ]; then
-        _data_disk="/dev/$_d"
-        break
+_disques_pris=" "
+
+# Vide = ni partition, ni systeme de fichiers, ni membre d'un LVM/RAID
+_vierge() { [ -z "$(lsblk -no FSTYPE,PARTTYPE "$1" 2>/dev/null | tr -d ' \n')" ]; }
+
+# Retrouve le disque d'un libelle, puis le formate et le monte.
+# Dans une FONCTION, le piege ERR ne se declenche pas (pas de `set -E`, voulu :
+# l'activer ferait echouer d'autres fonctions sur des commandes benignes). Un
+# echec qui doit rester fatal appelle donc `_on_error` lui-meme.
+# $1 libelle  $2 taille (Go)  $3 point de montage  $4 lvm (1/0)  $5 ext4|xfs
+_preparer_disque() {
+    local lib=$1 taille=$2 mnt=$3 lvm=$4 fs=$5 dev="" _d nom octets ecart
+    if mountpoint -q "$mnt"; then
+        _log "$mnt deja monte - inchange"
+        return 0
     fi
-done
-if [ -z "$_data_disk" ]; then
-    _log "AVERTISSEMENT : aucun disque vierge trouve - /data non configure"
-else
-    _log "Disque de donnees : $_data_disk"
-    # En LVM plutot qu'un ext4 pose a meme le disque : /data s'agrandit alors a
-    # chaud, en ajoutant un disque (pvcreate, vgextend, lvextend -r), sans arret
-    # ni copie. lvm2 manque aux images cloud Debian et ne s'installe pas sur un
-    # VLAN sans depots : on retombe alors sur l'ext4 direct, et on le DIT.
-    # La sortie d'apt est gardee : un « non installable » sans la raison ne
-    # se diagnostique pas (vu le 25/09, sur une VM sans agent invite ni acces
-    # console). L'attente du verrou vient de la fonction apt-get, plus haut.
-    if ! command -v pvcreate > /dev/null 2>&1 \
-       && ! _lvm_apt=$(apt-get install -y lvm2 2>&1); then
-        _osiris_log "apt lvm2 : $(printf '%s' "$_lvm_apt" | tail -3 | tr '\n' ' ')"
+    # 1. Par son numero de serie : Proxmox le pose a la creation (= le libelle).
+    #    Sur, contrairement a /dev/sdb, qui peut changer d'un demarrage a l'autre.
+    dev=$(lsblk -d -n -o NAME,SERIAL 2>/dev/null | awk -v s="$lib" '$2==s {print "/dev/"$1; exit}')
+    if [ -n "$dev" ] && ! _vierge "$dev"; then
+        _log "AVERTISSEMENT : le disque $lib ($dev) n'est pas vierge - on n'y touche pas, $mnt non configure"
+        return 0
     fi
-    if command -v pvcreate > /dev/null 2>&1; then
-        if ! _lvm_out=$( { pvcreate -q "$_data_disk" && vgcreate -q vg_data "$_data_disk" \
-                           && lvcreate -q -y -l 100%FREE -n data vg_data; } 2>&1 ); then
-            _osiris_log "echec LVM sur $_data_disk : ${_lvm_out:-aucune sortie}"
-            false   # declenche le piege, la machine reste en echec
+    # 2. Sinon (vSphere) : le premier disque vierge de la bonne taille, a 1 Go
+    #    pres, dans l'ordre des disques. Filtres : type "disk", NON amovible et
+    #    d'au moins 1 Go (VMware presente un lecteur de disquettes /dev/fd0 de
+    #    4 Ko que lsblk classe « disk », vierge : OSIRIS a tente de le formater
+    #    le 31/07), ni le disque systeme, ni un disque deja attribue.
+    #    Options separees, et surtout PAS `-dnob` : dans un groupe, `-o` avale le
+    #    `b`, lsblk repond « unknown column: b » et n'affiche rien.
+    if [ -z "$dev" ]; then
+        for _d in $(lsblk -d -n -b -o NAME,TYPE,RM,SIZE 2>/dev/null \
+                   | awk '$2=="disk" && $3==0 && $4 > 1073741824 {print $1":"$4}'); do
+            nom=${_d%%:*}; octets=${_d##*:}
+            [ "$nom" = "$_root_disk" ] && continue
+            case "$_disques_pris" in *" $nom "*) continue ;; esac
+            _vierge "/dev/$nom" || continue
+            ecart=$(( octets / 1073741824 - taille ))
+            [ "${ecart#-}" -le 1 ] || continue
+            dev="/dev/$nom"
+            break
+        done
+    fi
+    if [ -z "$dev" ]; then
+        _log "AVERTISSEMENT : disque $lib ($taille Go) introuvable - $mnt non configure"
+        _osiris_log "disques vus : $(lsblk -dno NAME,SIZE,TYPE,SERIAL 2>/dev/null | tr '\n' ' ')"
+        return 0
+    fi
+    _disques_pris="$_disques_pris${dev#/dev/} "
+    _log "Disque $lib : $dev ($taille Go) -> $mnt"
+
+    # Systeme de fichiers : xfs demande xfsprogs, absent de certaines images.
+    # Sans lui, repli sur ext4 — annonce, jamais silencieux.
+    if [ "$fs" = "xfs" ] && ! command -v mkfs.xfs > /dev/null 2>&1 \
+       && ! _fs_apt=$(apt-get install -y xfsprogs 2>&1); then
+        _osiris_log "apt xfsprogs : $(printf '%s' "$_fs_apt" | tail -3 | tr '\n' ' ')"
+    fi
+    if [ "$fs" = "xfs" ] && ! command -v mkfs.xfs > /dev/null 2>&1; then
+        _log "AVERTISSEMENT : xfsprogs non installable - $mnt formate en ext4"
+        fs=ext4
+    fi
+
+    # LVM : le volume s'agrandit alors a chaud (un disque de plus : pvcreate,
+    # vgextend, lvextend -r). Il porte le libelle, et c'est ce que montre
+    # `lsblk` : vg_<libelle>-<libelle>. Les « - » deviennent des « _ » : lsblk
+    # doublerait sinon chaque tiret (vg_my--db-my--db).
+    local cible="$dev"
+    if [ "$lvm" = "1" ]; then
+        # lvm2 manque aux images cloud Debian : installe a la demande. La sortie
+        # d'apt est gardee — un « non installable » sans raison ne se diagnostique
+        # pas (vu le 25/09). L'attente du verrou vient de la fonction apt-get.
+        if ! command -v pvcreate > /dev/null 2>&1 \
+           && ! _lvm_apt=$(apt-get install -y lvm2 2>&1); then
+            _osiris_log "apt lvm2 : $(printf '%s' "$_lvm_apt" | tail -3 | tr '\n' ' ')"
         fi
-        _data_dev=/dev/vg_data/data
-        _log "/data en LVM (vg_data/data) - extensible a chaud"
-    else
-        _data_dev="$_data_disk"
-        _log "AVERTISSEMENT : lvm2 absent et non installable : /data formate sans LVM (non extensible a chaud)"
+        if command -v pvcreate > /dev/null 2>&1; then
+            local vg="vg_${lib//-/_}" lv="${lib//-/_}"
+            if ! _lvm_out=$( { pvcreate -q "$dev" && vgcreate -q "$vg" "$dev" \
+                               && lvcreate -q -y -l 100%FREE -n "$lv" "$vg"; } 2>&1 ); then
+                _osiris_log "echec LVM sur $dev : ${_lvm_out:-aucune sortie}"
+                _on_error "$LINENO" "LVM sur $dev ($lib)"
+                return 1
+            fi
+            cible="/dev/$vg/$lv"
+        else
+            _log "AVERTISSEMENT : lvm2 absent et non installable : $mnt formate sans LVM (non extensible a chaud)"
+        fi
     fi
+
     # La sortie d'erreur de mkfs est capturee et renvoyee a OSIRIS : sans elle,
-    # un echec ici ne produisait que trois lignes « commande fautive » en
-    # cascade, sans jamais dire POURQUOI le formatage avait echoue.
-    if ! _mkfs_out=$(mkfs.ext4 -q -L osiris-data "$_data_dev" 2>&1); then
-        _osiris_log "echec mkfs sur $_data_dev : ${_mkfs_out:-aucune sortie}"
-        _osiris_log "disques vus : $(lsblk -dno NAME,SIZE,TYPE 2>/dev/null | tr '\n' ' ')"
-        _osiris_log "detail : $(lsblk -no NAME,FSTYPE,PARTTYPE,MOUNTPOINT 2>/dev/null | tr '\n' ' ')"
-        false   # declenche le piege, la machine reste en echec
+    # un echec ne produisait que des « commande fautive » en cascade, sans dire
+    # POURQUOI le formatage avait echoue. L'etiquette = le libelle (`lsblk -f`).
+    if ! _mkfs_out=$("mkfs.$fs" -q -L "$lib" "$cible" 2>&1); then
+        _osiris_log "echec mkfs.$fs sur $cible : ${_mkfs_out:-aucune sortie}"
+        _on_error "$LINENO" "mkfs.$fs sur $cible ($lib)"
+        return 1
     fi
-    mkdir -p /data
-    _data_uuid=$(blkid -s UUID -o value "$_data_dev")
-    # Monte par UUID : l'ordre des disques (/dev/sdb) peut changer d'un
-    # demarrage a l'autre, l'UUID non.
-    if ! grep -q "$_data_uuid" /etc/fstab; then
-        printf 'UUID=%s /data ext4 defaults,nofail 0 2\n' "$_data_uuid" >> /etc/fstab
+    if [ -d "$mnt" ] && [ -n "$(ls -A "$mnt" 2>/dev/null)" ]; then
+        _log "AVERTISSEMENT : $mnt n'etait pas vide - son contenu est masque par le disque $lib"
     fi
-    # `mountpoint` D'ABORD : le piege ERR marque la machine en echec des qu'une
-    # commande non testee renvoie non-zero, et `mount` sur un point deja monte
-    # renvoie non-zero. Or un gabarit bien fait porte deja l'entree fstab et son
-    # disque : /data y est monte par systemd AVANT que ce script ne tourne.
-    # Autrement dit, plus le gabarit est complet, plus surement le deploiement
-    # echouait — constate le 17/09 sur le premier clone d'un gabarit propre.
-    if mountpoint -q /data; then
-        _log "/data deja monte ({{ data_disk_gb }} Go) - monte au demarrage"
-    else
-        mount /data
-        _log "/data monte ({{ data_disk_gb }} Go)"
+    mkdir -p "$mnt"
+    local uuid
+    uuid=$(blkid -s UUID -o value "$cible")
+    # Monte par UUID : l'ordre des disques peut changer d'un demarrage a l'autre,
+    # l'UUID non.
+    grep -q "$uuid" /etc/fstab || printf 'UUID=%s %s %s defaults,nofail 0 2\n' "$uuid" "$mnt" "$fs" >> /etc/fstab
+    systemctl daemon-reload 2>/dev/null || true
+    if ! mount "$mnt"; then
+        _on_error "$LINENO" "mount $mnt ($lib)"
+        return 1
     fi
-fi
+    _log "$mnt monte ($taille Go, $fs$([ "$cible" != "$dev" ] && echo ', LVM'))"
+}
+
+{% for d in disques %}
+_preparer_disque {{ d.libelle | bash_squote }} {{ d.taille_gb | int }} {{ d.point_montage | bash_squote }} {{ 1 if d.lvm else 0 }} {{ d.systeme_fichiers | bash_squote }} || true
+{% endfor %}
 {% endif %}
 
 # ── Swap ──────────────────────────────────────────────────────────────────────
@@ -654,15 +695,15 @@ else
 fi
 {% endif %}
 
-{% if data_disk_gb %}
-# Volume de donnees : jusqu'ici son montage n'etait verifie par rien. On en
-# deduisait le succes de l'absence d'erreur, ce qui n'est pas la meme chose.
-if mountpoint -q /data 2>/dev/null; then
-    _add_test "Volume /data" true "$(df -h /data 2>/dev/null | awk 'NR==2{print $2}') disponibles"
+{% for d in disques %}
+# Volume : son montage n'etait verifie par rien, on deduisait le succes de
+# l'absence d'erreur — ce qui n'est pas la meme chose.
+if mountpoint -q {{ d.point_montage | bash_squote }} 2>/dev/null; then
+    _add_test {{ ("Volume " ~ d.point_montage) | bash_squote }} true "$(df -h {{ d.point_montage | bash_squote }} 2>/dev/null | awk 'NR==2{print $2}') disponibles ({{ d.libelle }})"
 else
-    _add_test "Volume /data" false "Non monte"
+    _add_test {{ ("Volume " ~ d.point_montage) | bash_squote }} false "Non monte"
 fi
-{% endif %}
+{% endfor %}
 
 _swap_taille=$(swapon --noheadings --show=SIZE 2>/dev/null | head -1 | tr -d ' ')
 if [ -n "$_swap_taille" ]; then

@@ -19,6 +19,10 @@ import pytest
 from jinja2 import Environment, FileSystemLoader
 
 
+DATA = [{"taille_gb": 10, "point_montage": "/data", "libelle": "data", "lvm": True,
+         "systeme_fichiers": "ext4"}]
+
+
 def _rendu(data_disk_gb: int = 0, complet: bool = False) -> str:
     env = Environment(loader=FileSystemLoader("templates"), trim_blocks=True,
                       lstrip_blocks=True, autoescape=False)
@@ -28,7 +32,7 @@ def _rendu(data_disk_gb: int = 0, complet: bool = False) -> str:
         profile={"machine_type": "server"},
         linux_apps=[{"name": "Htop", "apt_package": "htop"}] if complet else [],
         zabbix={"server": "192.0.2.50"} if complet else None,
-        data_disk_gb=data_disk_gb, osiris_url="http://osiris.test", ip_attendue="")
+        disques=DATA if data_disk_gb else [], osiris_url="http://osiris.test", ip_attendue="")
 
 
 def test_le_script_rendu_reste_du_bash_valide():
@@ -103,12 +107,12 @@ def test_un_disque_trop_plein_n_a_pas_de_swap(tmp_path):
 
 def test_data_passe_par_lvm_avec_repli_dit():
     script = _rendu(10)
-    assert "vgcreate -q vg_data" in script
+    assert 'vgcreate -q "$vg"' in script and "_preparer_disque 'data' 10 '/data' 1 'ext4'" in script
     # Sans lvm2, repli sur l'ext4 direct — mais annoncé, jamais silencieux
     assert re.search(r'_log "AVERTISSEMENT : lvm2 absent', script)
     # Le formatage et le montage visent le volume LVM, pas le disque brut
-    assert 'mkfs.ext4 -q -L osiris-data "$_data_dev"' in script
-    assert 'blkid -s UUID -o value "$_data_dev"' in script
+    assert '"mkfs.$fs" -q -L "$lib" "$cible"' in script
+    assert 'blkid -s UUID -o value "$cible"' in script
 
 
 def test_le_swap_est_verifie_par_un_smoke_test():

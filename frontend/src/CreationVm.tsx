@@ -10,6 +10,8 @@ import { buildCreateVmPayload, champsManquants, completerPrefixeCidr, dansLeRese
          adressesPrises, occupantDe, plagesAdresses, type UsageReseau } from './vmForm'
 import { ResumeProfil } from './ResumeProfil'
 import { ChampEnCours, Spinner } from './Skeleton'
+import { IcoX } from './icons'
+import { MAX_DISQUES, erreursDisques, libelleDepuisMontage, nouveauDisque, type DisqueForm } from './disquesForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
@@ -242,6 +244,8 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const vmSansProfil = !profilEffectif
   const vmInaccessible = vmSansProfil || Boolean(profilEffectif?.resume?.alerte)
   const manquants = champsManquants(vmForm, Boolean(vmHvId), vmNode)
+  // Linux seulement : sous Windows, la liste n'est pas envoyée
+  const disquesInvalides = vmForm.os !== 'windows' && erreursDisques(vmForm.disques).length > 0
   const clone = vmForm.boot_mode !== 'pxe'
   // Stockage et réseau dépendent du nœud : tant qu'il n'est pas connu, ils attendent aussi
   const attenteStockage = stockagesEnCours || (noeudsEnCours && !vmNode)
@@ -295,8 +299,8 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
       }).map(s => (
         <section key={s.titre} className="space-y-0.5">
           <p className={titre}>{s.titre}</p>
-          {s.lignes.map(l => (
-            <p key={l.champs.join()} className={`text-xs ${l.attention ? 'text-amber-400' : 'text-slate-300'}`}>
+          {s.lignes.map((l, i) => (
+            <p key={`${i}-${l.champs.join()}`} className={`text-xs ${l.attention ? 'text-amber-400' : 'text-slate-300'}`}>
               {l.attention && '⚠ '}{l.texte}
             </p>
           ))}
@@ -593,7 +597,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
 
       {/* ── 4. Matériel ───────────────────────────────────────────────────── */}
       {/* Hors des options avancées : on y revient à presque chaque VM, et les
-          disques en plus (nom, taille, LVM, swap) s'y ajouteront. */}
+          disques en plus (nom, taille, LVM) y vivent. */}
       <section className="space-y-2">
         <p className={titre}>4 · Matériel <span className="normal-case font-normal text-slate-600">— repris du profil, modifiable</span></p>
         <div className="grid grid-cols-4 gap-2">
@@ -603,13 +607,62 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
           <label className="flex items-center gap-1 text-[10px] text-slate-500">RAM Mo
             <input type="number" min={512} step={512} value={vmForm.ram_mb} onChange={e => setVmForm(f => ({...f, ram_mb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
           </label>
-          <label className="flex items-center gap-1 text-[10px] text-slate-500">Disque Go
+          <label className="flex items-center gap-1 text-[10px] text-slate-500">Système Go
             <input type="number" min={8} value={vmForm.disk_gb} onChange={e => setVmForm(f => ({...f, disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
           </label>
-          <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Second disque, formaté et monté sur /data au premier démarrage. 0 = aucun.">/data Go
-            <input type="number" min={0} value={vmForm.data_disk_gb} onChange={e => setVmForm(f => ({...f, data_disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-          </label>
+          {/* Windows : un seul disque de données pour l'instant */}
+          {vmForm.os === 'windows' && (
+            <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Disque de données. 0 = aucun.">Données Go
+              <input type="number" min={0} value={vmForm.data_disk_gb} onChange={e => setVmForm(f => ({...f, data_disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+            </label>
+          )}
         </div>
+
+        {/* Linux : les disques supplémentaires, chacun formaté et monté au premier
+            démarrage. Le libellé se retrouve dans `lsblk` (volume LVM) et
+            `lsblk -f` (étiquette) : c'est par lui qu'on reconnaît un disque. */}
+        {vmForm.os !== 'windows' && (
+          <div className="space-y-1.5">
+            {vmForm.disques.length > 0 && (
+              <div className="grid grid-cols-[4.5rem_1fr_7rem_3.5rem_4.5rem_1.5rem] gap-2 text-[10px] text-slate-600">
+                <span>Taille Go</span><span>Point de montage</span><span title="Visible dans lsblk (vg_libellé-libellé) et lsblk -f">Libellé</span>
+                <span title="LVM : agrandissable à chaud en ajoutant un disque">LVM</span><span>Format</span><span />
+              </div>
+            )}
+            {vmForm.disques.map((d, i) => {
+              const maj = (champ: Partial<DisqueForm>) => setVmForm(f => ({
+                ...f, disques: f.disques.map((x, j) => j === i ? { ...x, ...champ } : x),
+              }))
+              return (
+                <div key={i} className="grid grid-cols-[4.5rem_1fr_7rem_3.5rem_4.5rem_1.5rem] gap-2 items-center">
+                  <input type="number" min={1} value={d.taille_gb} onChange={e => maj({ taille_gb: Number(e.target.value) })} className="osiris-input text-xs" />
+                  <input value={d.point_montage} placeholder="/data"
+                    onChange={e => maj({ point_montage: e.target.value, ...(d.libelleTouche ? {} : { libelle: libelleDepuisMontage(e.target.value) }) })}
+                    className="osiris-input text-xs font-mono" />
+                  <input value={d.libelle} maxLength={12} onChange={e => maj({ libelle: e.target.value.toLowerCase(), libelleTouche: true })}
+                    className="osiris-input text-xs font-mono" />
+                  <label className="flex justify-center"><input type="checkbox" checked={d.lvm} onChange={e => maj({ lvm: e.target.checked })} /></label>
+                  <select value={d.systeme_fichiers} onChange={e => maj({ systeme_fichiers: e.target.value as DisqueForm['systeme_fichiers'] })} className="osiris-input text-xs">
+                    <option value="ext4">ext4</option>
+                    <option value="xfs">xfs</option>
+                  </select>
+                  <button type="button" onClick={() => setVmForm(f => ({ ...f, disques: f.disques.filter((_, j) => j !== i) }))}
+                    className="osiris-action-btn osiris-action-btn--danger" title="Retirer ce disque"><IcoX /></button>
+                </div>
+              )
+            })}
+            {erreursDisques(vmForm.disques).map(e => <p key={e} className="text-[10px] text-amber-400">⚠ {e}</p>)}
+            <div className="flex items-center gap-3">
+              {vmForm.disques.length < MAX_DISQUES && (
+                <button type="button" onClick={() => setVmForm(f => ({ ...f, disques: [...f.disques, nouveauDisque(f.disques)] }))}
+                  className="osiris-btn-ghost text-[10px] border border-slate-700 rounded px-2 py-0.5">+ Ajouter un disque</button>
+              )}
+              <p className={aide}>
+                {vmForm.disques.length === 0 ? 'Aucun disque supplémentaire.' : "LVM : agrandissable à chaud. xfs ne se réduit jamais."}
+              </p>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* ── Options avancées ──────────────────────────────────────────────── */}
@@ -689,7 +742,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
         )}
         <div className="flex gap-2">
           <button type="button" onClick={onClose} className="osiris-btn-ghost text-xs px-4 border border-slate-700 rounded">Annuler</button>
-          <button type="submit" disabled={vmInaccessible || manquants.length > 0} className="osiris-btn text-xs px-4 flex-1 disabled:opacity-50">
+          <button type="submit" disabled={vmInaccessible || manquants.length > 0 || disquesInvalides} className="osiris-btn text-xs px-4 flex-1 disabled:opacity-50">
             Vérifier avant de créer →
           </button>
         </div>

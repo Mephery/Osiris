@@ -273,12 +273,14 @@ def test_disque_de_donnees_ne_touche_quun_disque_vierge(client, linux_setup):
         session.add(profile)
         session.commit()
     script = _firstboot(client)
-    assert "mkfs.ext4" in script
+    # Fiche antérieure à la liste : le disque du profil devient un /data en ext4
+    assert "_preparer_disque 'data' 100 '/data' 1 'ext4'" in script
+    assert '"mkfs.$fs"' in script
     # Jamais le disque système, jamais un disque déjà formaté
-    assert '[ "$_d" = "$_root_disk" ] && continue' in script
+    assert '[ "$nom" = "$_root_disk" ] && continue' in script
     assert "FSTYPE,PARTTYPE" in script
     # Monté par UUID : l'ordre des disques change d'un démarrage à l'autre
-    assert "UUID=%s /data ext4" in script
+    assert "printf 'UUID=%s %s %s defaults,nofail 0 2\\n'" in script
 
 
 def test_pas_de_formatage_sans_disque_de_donnees(client, linux_setup):
@@ -429,8 +431,8 @@ def test_le_volume_de_donnees_est_verifie_par_un_smoke_test(client, linux_setup)
         session.add(profile)
         session.commit()
     script = _firstboot(client)
-    assert "mountpoint -q /data" in script
-    assert '_add_test "Volume /data"' in script
+    assert "mountpoint -q '/data'" in script
+    assert "_add_test 'Volume /data'" in script
 
 
 # ── Diagnostic de l'amorçage Linux ─────────────────────────────────────────
@@ -493,7 +495,8 @@ def _firstboot_ubuntu_rendu():
         osiris_url="http://osiris", osiris_ip="10.0.0.1", tv_password="",
         linux_apps=[], zabbix={"server": "10.0.0.2", "hostname": "SRV-TEST",
                                "metadata": "osiris linux hc"},
-        data_disk_gb=10, root_password="",
+        disques=[{"taille_gb": 10, "point_montage": "/data", "libelle": "data", "lvm": True,
+                  "systeme_fichiers": "ext4"}], root_password="",
     )
 
 
@@ -521,7 +524,7 @@ def test_la_fonction_de_log_n_est_pas_recursive():
 
 def test_les_etapes_cles_sont_tracees():
     script = _firstboot_ubuntu_rendu()
-    for etape in ("Application du nom d'hote", "Supervision Zabbix", "Disque de donnees"):
+    for etape in ("Application du nom d'hote", "Supervision Zabbix", "Disque "):
         assert f'_log "{etape}' in script or f'_log "{etape}"' in script
 
 
