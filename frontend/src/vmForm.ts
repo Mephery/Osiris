@@ -289,3 +289,36 @@ export const etapesVm = (c: Pick<ChargeVm, 'boot_mode' | 'os' | 'node'>, gabarit
     suivi,
   ]
 }
+
+/** Les réseaux à proposer, selon que l'opérateur a demandé à tout voir.
+ *
+ *  Le serveur dit pourquoi un réseau n'est pas fait pour une VM (`reserve`) ;
+ *  ici on le range. Le réseau déjà choisi reste toujours visible : décocher la
+ *  case ne doit pas laisser une sélection que l'écran ne montre plus. */
+export const reseauxPourVm = <N extends { iface: string; reserve?: string }>(
+  reseaux: N[],
+  tousVisibles: boolean,
+  choisi: string,
+): { proposes: N[]; reserves: N[]; masques: number } => {
+  const reserves = reseaux.filter(n => n.reserve)
+  return {
+    proposes: reseaux.filter(n => !n.reserve),
+    reserves: tousVisibles ? reserves : reserves.filter(n => n.iface === choisi),
+    masques: tousVisibles ? 0 : reserves.filter(n => n.iface !== choisi).length,
+  }
+}
+
+/** Le stockage à présélectionner : le partagé qui a le plus de place.
+ *
+ *  Partagé d'abord, car un disque local enferme la VM sur son nœud (ni
+ *  migration, ni redémarrage ailleurs s'il tombe). Puis la place libre, ce qui
+ *  répartit les VM entre volumes voisins. Aucun partagé : le seul stockage s'il
+ *  n'y en a qu'un, sinon rien — on ne choisit pas un disque local à la place
+ *  de l'opérateur. */
+export const stockageParDefaut = (
+  stockages: { storage: string; avail_gb: number; shared?: boolean }[],
+): string => {
+  const partages = stockages.filter(s => s.shared).sort((a, b) => b.avail_gb - a.avail_gb)
+  if (partages.length) return partages[0].storage
+  return stockages.length === 1 ? stockages[0].storage : ''
+}

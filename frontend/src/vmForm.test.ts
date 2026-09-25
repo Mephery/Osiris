@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, FORMULAIRE_VIDE, recapVm, etapesVm, type ChargeVm, type ContexteRecap } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, FORMULAIRE_VIDE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut, type ChargeVm, type ContexteRecap } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -337,5 +337,61 @@ describe('etapesVm', () => {
 
   it('parle de WinPE pour un Windows en PXE', () => {
     expect(etapesVm({ boot_mode: 'pxe', os: 'windows', node: 'n1' })[0]).toMatch(/WinPE/)
+  })
+})
+
+describe('reseauxPourVm', () => {
+  const reseaux = [
+    { iface: 'vmbr320', reserve: '' },
+    { iface: 'vmbr13', reserve: 'hyperviseur' },
+    { iface: 'vmbr150', reserve: 'pxe' },
+  ]
+
+  it("propose les réseaux de machines et range les autres derrière la case", () => {
+    const r = reseauxPourVm(reseaux, false, '')
+    expect(r.proposes.map(n => n.iface)).toEqual(['vmbr320'])
+    expect(r.reserves).toEqual([])
+    expect(r.masques).toBe(2)
+  })
+
+  it('montre tout quand la case est cochée', () => {
+    const r = reseauxPourVm(reseaux, true, '')
+    expect(r.reserves.map(n => n.iface)).toEqual(['vmbr13', 'vmbr150'])
+    expect(r.masques).toBe(0)
+  })
+
+  // Décocher la case après avoir choisi vmbr13 ne doit pas laisser une
+  // sélection que la liste ne montre plus.
+  it('garde visible le réseau réservé déjà choisi', () => {
+    const r = reseauxPourVm(reseaux, false, 'vmbr13')
+    expect(r.reserves.map(n => n.iface)).toEqual(['vmbr13'])
+    expect(r.masques).toBe(1)
+  })
+})
+
+describe('stockageParDefaut', () => {
+  it('préfère un stockage partagé, même moins spacieux qu\'un local', () => {
+    expect(stockageParDefaut([
+      { storage: 'local-btrfs', avail_gb: 430, shared: false },
+      { storage: 'ceph', avail_gb: 100, shared: true },
+    ])).toBe('ceph')
+  })
+
+  it('entre deux partagés, prend le plus spacieux', () => {
+    expect(stockageParDefaut([
+      { storage: 'vol01', avail_gb: 1600, shared: true },
+      { storage: 'vol02', avail_gb: 2400, shared: true },
+    ])).toBe('vol02')
+  })
+
+  it('ne choisit pas un disque local à la place de l\'opérateur', () => {
+    expect(stockageParDefaut([
+      { storage: 'local-a', avail_gb: 100, shared: false },
+      { storage: 'local-b', avail_gb: 200, shared: false },
+    ])).toBe('')
+  })
+
+  it('prend le seul stockage quand il n\'y a rien à décider', () => {
+    expect(stockageParDefaut([{ storage: 'local', avail_gb: 100, shared: false }])).toBe('local')
   })
 })

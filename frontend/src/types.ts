@@ -288,6 +288,10 @@ export interface ProxmoxNetwork {
   cidr: string;
   gateway: string;
   comments: string;
+  /** Pourquoi ce réseau n'est pas proposé d'office à une VM ; vide s'il l'est.
+   *  « hyperviseur » : il y a sa propre adresse (Ceph, sauvegarde, gestion) ;
+   *  « pxe » : réseau d'amorçage, reconnu à son libellé. */
+  reserve: '' | 'hyperviseur' | 'pxe';
 }
 
 /** Adressage connu d'un réseau, pour préremplir le formulaire de création.

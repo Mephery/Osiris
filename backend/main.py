@@ -4820,6 +4820,9 @@ class ProxmoxProvider:
                 "avail_gb":  round(s.get("avail", 0) / 1073741824, 1),
                 "total_gb":  round(s.get("total", 0) / 1073741824, 1),
                 "content":   s.get("content", ""),
+                # Partagé (Ceph, NFS…) : la VM pourra changer de nœud. Un
+                # stockage local l'enferme sur celui où elle naît.
+                "shared":    s.get("shared") == 1,
             }
             for s in storages
             if "images" in s.get("content", "")  # ceux qui acceptent des disques VM
@@ -4831,6 +4834,9 @@ class ProxmoxProvider:
         # aucun appel de plus et donne au formulaire de quoi proposer un adressage.
         # Ils sont vides sur la plupart des bridges — un bridge ne porte d'adresse
         # que si le nœud est lui-même sur ce VLAN. Voir `_defauts_reseau`.
+        #
+        # Un bond n'est pas proposé : la carte d'une VM se branche sur un bridge,
+        # jamais directement sur un bond — le choisir ne pouvait qu'échouer.
         networks = await _proxmox_get(h, f"/api2/json/nodes/{node}/network")
         return [
             {
@@ -4840,9 +4846,13 @@ class ProxmoxProvider:
                 "cidr":     n.get("cidr") or "",
                 "gateway":  n.get("gateway") or "",
                 "comments": " ".join((n.get("comments") or "").split()),
+                # Le nœud a sa propre adresse sur ce bridge : c'est un réseau qui
+                # le fait fonctionner (Ceph, sauvegarde, administration), pas un
+                # réseau de machines. Voir `_reserve_reseau`.
+                "hyperviseur": bool(n.get("address") or n.get("cidr")),
             }
             for n in networks
-            if n.get("type") in ("bridge", "bond")
+            if n.get("type") == "bridge"
         ]
 
     @staticmethod
@@ -4932,11 +4942,34 @@ async def get_node_storages(hv_id: int, node: str, _: User = Depends(require_adm
     return await _provider(h).list_storages(h, node)
 
 
+def _reserve_reseau(n: dict) -> str:
+    """Pourquoi un réseau n'est pas proposé d'office à une VM : « » s'il l'est.
+
+    La liste d'un nœud mêle les réseaux des machines et ceux qui font tourner
+    l'hyperviseur. Un nouveau venu prend le premier nom rassurant — et une VM
+    branchée sur le réseau Ceph démarre, n'obtient rien, et reste muette.
+
+    Le tri porte sur ce que FAIT le réseau, jamais sur une liste de noms :
+    - « hyperviseur » : il y a sa propre adresse (bridge adressé sur Proxmox,
+      adaptateur VMkernel sur vSphere) — stockage, sauvegarde, gestion,
+      migration. Un futur réseau de ce genre sera reconnu quel que soit son nom ;
+    - « pxe » : rien dans l'API ne distingue un réseau d'amorçage d'un VLAN
+      client, sauf le libellé que l'exploitant lui a donné. Une VM qui y
+      démarrerait recevrait l'installeur de CE réseau, pas celui d'OSIRIS.
+    Rien n'est retiré : le formulaire les garde derrière une case à cocher."""
+    if n.get("hyperviseur"):
+        return "hyperviseur"
+    if "pxe" in f"{n.get('iface', '')} {n.get('comments', '')}".lower():
+        return "pxe"
+    return ""
+
+
 @app.get("/hypervisors/{hv_id}/nodes/{node}/networks")
 async def get_node_networks(hv_id: int, node: str, _: User = Depends(require_admin)):
     """Réseaux disponibles (bridges Proxmox / port groups vSphere)."""
     h = _get_hypervisor(hv_id)
-    return await _provider(h).list_networks(h, node)
+    return [{**n, "reserve": _reserve_reseau(n)}
+            for n in await _provider(h).list_networks(h, node)]
 
 
 def _defauts_reseau(bridge: dict, deja_deployees: list) -> dict:

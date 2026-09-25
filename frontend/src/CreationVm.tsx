@@ -6,7 +6,7 @@ import type { GabaritOsiris, Hypervisor, NetworkDefaults, Organization, Profile,
 import { authHeader } from './types'
 import { buildCreateVmPayload, champsManquants, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree,
          adressageFixeImpossible, avecProfil, gabaritsPourMode, modeParDefaut, profilsPourVm,
-         FORMULAIRE_VIDE, LIBELLE_MODE, recapVm, etapesVm } from './vmForm'
+         FORMULAIRE_VIDE, LIBELLE_MODE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut } from './vmForm'
 import { ResumeProfil } from './ResumeProfil'
 import { ChampEnCours } from './Skeleton'
 
@@ -42,8 +42,9 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const [vmHvId, setVmHvId]             = useState<number | ''>('')
   const [vmNode, setVmNode]             = useState('')
   const [vmNodes, setVmNodes]           = useState<ProxmoxNode[]>([])
-  const [vmStorages, setVmStorages]     = useState<{storage:string;type:string;avail_gb:number;total_gb:number}[]>([])
+  const [vmStorages, setVmStorages]     = useState<{storage:string;type:string;avail_gb:number;total_gb:number;shared?:boolean}[]>([])
   const [vmNetworks, setVmNetworks]     = useState<ProxmoxNetwork[]>([])
+  const [tousReseaux, setTousReseaux]   = useState(false)
   // Dossiers vSphere. Liste vide sur Proxmox, qui n'en a pas : le champ
   // disparaît alors du formulaire au lieu d'y proposer un choix inexistant.
   const [vmFolders, setVmFolders]       = useState<{ path: string }[]>([])
@@ -86,8 +87,9 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
       .then((s: typeof vmStorages) => {
         if (!toujours(hvId, node)) return
         setVmStorages(s)
-        // Un seul stockage : il n'y a rien à décider, le champ n'a pas à le demander
-        if (s.length === 1) setVmForm(f => ({ ...f, storage: s[0].storage }))
+        // Le partagé le plus spacieux, ou le seul stockage : un bon choix déjà fait
+        const defaut = stockageParDefaut(s)
+        if (defaut) setVmForm(f => ({ ...f, storage: f.storage || defaut }))
       }).catch(() => {})
       .finally(() => { if (toujours(hvId, node)) setStockagesEnCours(false) })
     fetch(`${API_URL}/hypervisors/${hvId}/nodes/${node}/networks`, { headers: h })
@@ -222,6 +224,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const attenteStockage = stockagesEnCours || (noeudsEnCours && !vmNode)
   const attenteReseau   = reseauxEnCours || (noeudsEnCours && !vmNode)
   const gabarits = gabaritsPourMode(vmTemplates, vmForm.boot_mode, vmForm.os)
+  const reseaux  = reseauxPourVm(vmNetworks, tousReseaux, vmForm.bridge)
   const gabaritChoisi = vmTemplates.find(t => String(t.vmid) === String(vmForm.template_id))
 
   const resumeAvance = [
@@ -247,6 +250,9 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
       && "Gabarit scellé avec un agent ancien ou de version inconnue : à resceller.",
     imageDuProfilIgnoree(vmForm.boot_mode, profilEffectif)
       && `L'image « ${profilEffectif?.win_image} » du profil ne sera pas utilisée : le système est celui du gabarit.`,
+    reseauChoisi?.reserve && (reseauChoisi.reserve === 'pxe'
+      ? `« ${reseauChoisi.iface} » est un réseau d'amorçage PXE : la VM pourrait y recevoir un autre installeur que celui d'OSIRIS.`
+      : `« ${reseauChoisi.iface} » est un réseau de l'hyperviseur (stockage, sauvegarde, gestion) : une VM y est rarement à sa place.`),
   ].filter((a): a is string => Boolean(a))
 
   const titre = 'text-[10px] font-semibold uppercase tracking-widest text-slate-500'
@@ -408,14 +414,31 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
             {/* Le commentaire porté par le bridge est le nom du VLAN côté réseau
                 (« ADMIN », « Clients_MUTU »…) : c'est cela que l'exploitant a en
                 tête, pas « vmbr320 ». */}
-            {vmNetworks.map(n => (
+            {reseaux.proposes.map(n => (
               <option key={n.iface} value={n.iface}>
                 {n.iface}{n.comments ? ` — ${n.comments}` : ''}{n.cidr ? ` (${n.cidr})` : ''}
               </option>
             ))}
+            {reseaux.reserves.length > 0 && (
+              <optgroup label="Réseaux de l'hyperviseur et d'amorçage — rarement pour une VM">
+                {reseaux.reserves.map(n => (
+                  <option key={n.iface} value={n.iface}>
+                    {n.iface}{n.comments ? ` — ${n.comments}` : ''} · {n.reserve === 'pxe' ? 'amorçage PXE' : "réseau de l'hyperviseur"}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
           </ChampEnCours>
         </div>
+        {/* Ceph, sauvegarde, gestion, PXE d'une autre équipe : une VM qui y naît
+            démarre et reste muette. Ils ne sont pas retirés, seulement rangés. */}
+        {(reseaux.masques > 0 || tousReseaux) && (
+          <label className="flex items-center gap-1.5 text-[10px] text-slate-500 cursor-pointer w-fit">
+            <input type="checkbox" checked={tousReseaux} onChange={e => setTousReseaux(e.target.checked)} />
+            Afficher aussi les réseaux de l'hyperviseur et d'amorçage{reseaux.masques > 0 ? ` (${reseaux.masques})` : ''}
+          </label>
+        )}
 
         {/* En mode gabarit, l'OS ne vient PAS du profil : il vient de l'image
             clonee. Le profil continue de decider tout le reste (jonction,

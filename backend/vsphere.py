@@ -382,6 +382,8 @@ class VSphereProvider:
                     "avail_gb": round(s.freeSpace / 1073741824, 1),
                     "total_gb": round(s.capacity / 1073741824, 1),
                     "content": "images",
+                    # Vu de plusieurs hôtes (NFS, SAN) : la VM pourra migrer.
+                    "shared": bool(s.multipleHostAccess),
                 })
             return sorted(out, key=lambda d: -d["avail_gb"])
         return await _run(work)
@@ -426,9 +428,25 @@ class VSphereProvider:
     async def list_networks(h: Hypervisor, node: str) -> list[dict]:
         def work():
             si = _connect(h)
+            grappe = _cluster(si, node)
+            # Port groups où un hôte a son adaptateur VMkernel (gestion, vMotion,
+            # stockage) : le réseau de l'hyperviseur lui-même. Standard par nom,
+            # distribué par clé.
+            vmkernel: set = set()
+            for hote in grappe.host:
+                for vnic in (hote.config.network.vnic if hote.config else []):
+                    if vnic.portgroup:
+                        vmkernel.add(vnic.portgroup)
+                    port = getattr(vnic.spec, "distributedVirtualPort", None)
+                    if port:
+                        vmkernel.add(port.portgroupKey)
             out = []
-            for net in _cluster(si, node).network:
+            for net in grappe.network:
                 distributed = isinstance(net, vim.dvs.DistributedVirtualPortgroup)
+                # Le port group d'uplink porte les cartes physiques du switch
+                # distribué : aucune VM ne peut s'y brancher.
+                if distributed and getattr(net.config, "uplink", False):
+                    continue
                 # Un port group ne porte aucune adresse : vSphere ne décrit que la
                 # commutation, pas le plan d'adressage. Champs présents mais vides,
                 # pour que le formulaire traite les deux hyperviseurs de la même
@@ -440,6 +458,8 @@ class VSphereProvider:
                     "cidr": "",
                     "gateway": "",
                     "comments": "port group distribué" if distributed else "port group standard",
+                    "hyperviseur": net.name in vmkernel
+                                   or getattr(net, "key", None) in vmkernel,
                 })
             return sorted(out, key=lambda n: n["iface"])
         return await _run(work)
