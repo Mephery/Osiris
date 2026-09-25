@@ -10,6 +10,18 @@
 # existants.
 https://osiris.example.local {
     tls /etc/caddy/certs/osiris-le.crt /etc/caddy/certs/osiris-le.key
+    # ── Rappels des machines, en HTTPS ────────────────────────────────────────
+    # Les memes routes que le bloc HTTP plus bas, et elles SEULES : ouvertes a
+    # tous les reseaux (les VLAN clients d'un autre site ne sont pas dans la
+    # plage interne), comme en HTTP. Declarees AVANT le refus interne, qui leur
+    # renverrait sinon un 403 ; l'interface et l'API d'administration restent
+    # reservees au reseau interne. Sans ce bloc, une machine passee en HTTPS
+    # recevait la page de l'interface (200 + HTML) a la place de son script.
+    @machines path /boot* /cloud-init/* /static/* /machines/* /winpe-script/* /winpe-auto /unattend.xml* /firstboot-ubuntu/* /firstboot-debian/* /firstboot-linux/* /firstboot-windows/* /bootstrap/* /preseed/* /capture/*
+    handle @machines {
+        reverse_proxy localhost:8000
+    }
+
     # ── Acces reserve au reseau interne ───────────────────────────────────────
     # L'interface et l'API d'administration ne doivent repondre qu'au bureau. Les
     # rappels des machines, eux, passent par le bloc HTTP plus bas et restent
