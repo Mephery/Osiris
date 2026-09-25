@@ -813,6 +813,21 @@ def delete_organization(org_id: int, current_user: User = Depends(require_admin)
         org = session.get(Organization, org_id)
         if not org:
             raise HTTPException(status_code=404, detail="Organisation introuvable")
+        # La base refuse de supprimer une organisation encore référencée : l'API
+        # rendait alors un 500 opaque, et l'interface, qui ne le vérifiait pas,
+        # annonçait « Organisation supprimée » sur une organisation toujours là.
+        # On dit ce qui la retient, pour que l'opérateur sache quoi détacher.
+        rattaches = [
+            (len(session.exec(select(modele.id).where(modele.organization_id == org_id)).all()), nom)
+            for modele, nom in ((Machine, "machine(s)"), (DomainConfig, "domaine(s) AD"),
+                                (VpnTunnel, "tunnel(s) VPN"), (Hypervisor, "hyperviseur(s)"))
+        ]
+        rattaches = [f"{n} {nom}" for n, nom in rattaches if n]
+        if rattaches:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{org.name} est encore rattachée à : {', '.join(rattaches)}. "
+                       "Les détacher ou les supprimer d'abord.")
         _log(session, current_user, "delete_org", details={"name": org.name, "slug": org.slug})
         session.delete(org)
         session.commit()

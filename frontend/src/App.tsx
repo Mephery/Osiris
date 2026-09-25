@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Toaster, toast } from 'sonner'
 import './App.css'
 import type {
-  AuthState, Organization, OrganizationPatch, Machine, Profile, Application,
+  AuthState, Organization, Machine, Profile, Application,
   DeploymentEvent, Hypervisor, OsImage, SnapshotEntry, LiveEvent, VpnTunnel,
   DomainConfig, DriverPack, SmokeTest,
 } from './types'
@@ -22,6 +22,7 @@ import { DriversTab } from './DriversTab'
 import { InfrastructureTab } from './InfrastructureTab'
 import { SettingsModal } from './SettingsModal'
 import { ProfilesSection } from './ProfilesSection'
+import { OrganisationsSection } from './OrganisationsSection'
 import { SkeletonRows } from './Skeleton'
 import { MachineDetailPanel } from './MachineDetailPanel'
 import { ResumeProfil } from './ResumeProfil'
@@ -44,34 +45,6 @@ function loadAuth(): AuthState | null {
 function saveAuth(a: AuthState | null) {
   if (a) localStorage.setItem(AUTH_KEY, JSON.stringify(a))
   else localStorage.removeItem(AUTH_KEY)
-}
-
-/** Saisie du mot de passe BIOS d'une organisation.
- *  Validation EXPLICITE (bouton ou Entrée) et non au `onBlur` des autres champs :
- *  le champ se vide après envoi, donc sans bouton on ne sait pas si c'est parti. */
-function BiosPasswordField({ isSet, onSave }: { isSet: boolean; onSave: (v: string) => void }) {
-  const [value, setValue] = useState('')
-  const submit = () => { if (value) { onSave(value); setValue('') } }
-  return (
-    <div className="flex gap-2 flex-1">
-      <input
-        type="password"
-        autoComplete="new-password"
-        value={value}
-        onChange={e => setValue(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); submit() } }}
-        placeholder={isSet ? 'Mot de passe BIOS (défini — saisir pour remplacer)' : 'Mot de passe BIOS (non défini)'}
-        className="osiris-input text-[10px] font-mono flex-1 min-w-0"
-      />
-      <button
-        type="button"
-        onClick={submit}
-        disabled={!value}
-        title="Enregistrer le mot de passe BIOS"
-        className="osiris-btn text-xs px-3 flex-shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
-      >✓</button>
-    </div>
-  )
 }
 
 export default function App() {
@@ -144,8 +117,6 @@ export default function App() {
   const [showCsvHint, setShowCsvHint]   = useState(false)
   const [csvHintDismiss, setCsvHintDismiss] = useState(false)
   const csvFileRef = useRef<HTMLInputElement>(null)
-  const [newOrgName, setNewOrgName]     = useState('')
-  const [newOrgSlug, setNewOrgSlug]     = useState('')
   const [users, setUsers]               = useState<{ id: number; email: string; role: string }[]>([])
   const [newUserEmail, setNewUserEmail] = useState('')
   const [newUserPass, setNewUserPass]   = useState('')
@@ -473,17 +444,7 @@ export default function App() {
     )
   }
 
-  const handlePatchOrg = (id: number, patch: OrganizationPatch, label: string) => {
-    if (!auth) return
-    fetch(`${API_URL}/organizations/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
-      body: JSON.stringify(patch),
-    })
-      .then(r => r.ok ? r.json() : Promise.reject())
-      .then(() => { fetchOrgs(auth.token); toast.success(`${label} enregistré`) })
-      .catch(() => toast.error(`Erreur enregistrement ${label.toLowerCase()}`))
-  }
+
 
 
   useEffect(() => {
@@ -771,26 +732,6 @@ export default function App() {
     })
   }
 
-  // ── Admin : créer org ───────────────────────────────────────────────────────
-
-  const handleCreateOrg = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-    fetch(`${API_URL}/organizations`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
-      body: JSON.stringify({ name: newOrgName, slug: newOrgSlug }),
-    })
-      .then((res) => res.json())
-      .then(() => { setNewOrgName(''); setNewOrgSlug(''); fetchOrgs(auth.token); toast.success('Organisation créée') })
-      .catch(() => toast.error('Erreur création organisation'))
-  }
-
-  const handleDeleteOrg = (id: number) => {
-    fetch(`${API_URL}/organizations/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
-      .then(() => { fetchOrgs(auth.token); toast.success('Organisation supprimée') })
-      .catch(() => toast.error('Erreur suppression organisation'))
-  }
-
   const handleDeleteUser = (id: number) => {
     fetch(`${API_URL}/users/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
       .then(() => { fetchUsers(auth.token); toast.success('Utilisateur supprimé') })
@@ -1015,60 +956,7 @@ export default function App() {
 
             {/* Organisations */}
             {adminSubTab === 'orgs' && (
-            <div className="osiris-table-wrap p-5 space-y-4">
-              <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Organisations clients</h2>
-              <ul className="space-y-2">
-                {orgs.map(org => (
-                  <li key={org.id} className="border-b border-slate-800/50 pb-2 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="text-white font-medium text-sm">{org.name}</span>
-                      <div className="flex items-center gap-3">
-                        <span className="font-mono text-xs text-slate-600">{org.slug}</span>
-                        <button onClick={() => handleDeleteOrg(org.id)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <input
-                        placeholder="Webhook URL (Teams, Slack, Discord…)"
-                        defaultValue={org.webhook_url}
-                        onBlur={e => { if (e.target.value !== org.webhook_url) handlePatchOrg(org.id, { webhook_url: e.target.value }, 'Webhook') }}
-                        className="osiris-input text-[10px] font-mono flex-1"
-                      />
-                    </div>
-                    <div className="flex gap-2">
-                      <input
-                        placeholder="Collecteur Zabbix (ex: 192.0.2.130) — vide = pas de supervision"
-                        defaultValue={org.zabbix_server}
-                        onBlur={e => { if (e.target.value !== org.zabbix_server) handlePatchOrg(org.id, { zabbix_server: e.target.value }, 'Collecteur Zabbix') }}
-                        className="osiris-input text-[10px] font-mono flex-1"
-                      />
-                    </div>
-                    <div className="flex gap-2">
-                      <input
-                        placeholder="Préfixe MAC imposé (ex: 02aabbcc) — vide = MAC inchangée"
-                        defaultValue={org.mac_prefix}
-                        onBlur={e => { if (e.target.value !== org.mac_prefix) handlePatchOrg(org.id, { mac_prefix: e.target.value }, 'Préfixe MAC') }}
-                        className="osiris-input text-[10px] font-mono flex-1"
-                      />
-                      {/* Champ en ecriture seule : l'API ne renvoie jamais le mot de passe.
-                          Ne rien saisir ne change rien, la valeur en base est conservee. */}
-                      <BiosPasswordField
-                        isSet={org.has_bios_password}
-                        onSave={v => handlePatchOrg(org.id, { bios_password: v }, 'Mot de passe BIOS')}
-                      />
-                    </div>
-                  </li>
-                ))}
-                {orgs.length === 0 && <li className="text-slate-700 text-xs font-mono">Aucune organisation</li>}
-              </ul>
-              <form onSubmit={handleCreateOrg} className="space-y-2 pt-2">
-                <input required placeholder="Nom de l'organisation" value={newOrgName} onChange={e => setNewOrgName(e.target.value)} className="osiris-input text-xs w-full" />
-                <div className="flex gap-2">
-                  <input required placeholder="slug (ex: acme-corp)" value={newOrgSlug} onChange={e => setNewOrgSlug(e.target.value)} className="osiris-input text-xs flex-1 min-w-0 font-mono" />
-                  <button type="submit" className="osiris-btn text-xs px-3 flex-shrink-0">+</button>
-                </div>
-              </form>
-            </div>
+              <OrganisationsSection token={auth.token} orgs={orgs} onChange={() => fetchOrgs(auth.token)} />
             )}
 
             {/* Utilisateurs */}
