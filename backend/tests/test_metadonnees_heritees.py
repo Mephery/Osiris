@@ -149,3 +149,26 @@ def test_le_motif_n_attrape_PAS_le_reste(monkeypatch):
                  if l.strip().startswith("name:"))
     for carte in ("lo", "wlan0", "wlp3s0", "docker0", "virbr0"):
         assert not fnmatch.fnmatch(carte, motif), f"« {motif} » attrape {carte}"
+
+
+# ── Le jeton de la machine, même piège ────────────────────────────────────────
+
+def test_le_jeton_est_depose_dans_guestinfo(monkeypatch):
+    """vSphere : le jeton passe par la config de la VM, jamais par le réseau."""
+    ecrits = _capturer_avec(monkeypatch, "le-jeton")
+    assert ecrits["guestinfo.osiris.jeton"] == "le-jeton"
+
+
+def test_le_jeton_herite_du_gabarit_est_ecrase(monkeypatch):
+    """Un clone hérite de l'extraConfig de son gabarit, donc du jeton de la VM
+    qui a servi à le fabriquer : sans jeton, la clé est VIDÉE, pas omise."""
+    ecrits = _capturer_avec(monkeypatch, "")
+    assert ecrits.get("guestinfo.osiris.jeton", None) == ""
+
+
+def _capturer_avec(monkeypatch, jeton: str) -> dict:
+    import vsphere as v
+    orig = v._finish
+    monkeypatch.setattr(v, "_finish",
+                        lambda vm, net, body, ud, rud, *a: orig(vm, net, body, ud, rud, jeton))
+    return _capturer(monkeypatch, _body())

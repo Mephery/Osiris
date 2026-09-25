@@ -166,16 +166,29 @@ def test_le_jeton_ne_part_que_vers_osiris(tmp_path, client, linux):
 
 # ── Création d'une VM ─────────────────────────────────────────────────────────
 
-def test_sur_proxmox_le_jeton_attend_la_premiere_demande(client, admin_headers, monkeypatch):
-    """Le cloud-init n'arrive pas dans une VM Proxmox : un jeton créé d'avance ne
-    lui parviendrait jamais, et la remise unique ne se ferait plus."""
+def test_le_jeton_nait_avec_la_vm_et_passe_par_le_smbios(client, admin_headers, monkeypatch):
+    """Proxmox n'a pas de guestinfo : le numéro de série SMBIOS est le canal que
+    l'invité lit sans réseau. Le jeton n'y transite donc jamais — et l'UUID,
+    ancre d'identité de la fiche, n'est pas perdu au passage."""
+    import base64
     from tests.test_create_vm import _make_hypervisor, _patch_proxmox
     hv_id = _make_hypervisor()
-    _patch_proxmox(monkeypatch, {})
+    capture: dict = {}
+    _patch_proxmox(monkeypatch, capture)
     resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
         "hostname": "srv-jeton", "client": "Acme", "os": "debian", "node": "pve",
         "storage": "ceph", "boot_mode": "pxe"})
     assert resp.status_code == 201, resp.text
+    smbios = dict(x.split("=", 1) for x in capture["qemu"]["smbios1"].split(","))
+    assert smbios["base64"] == "1" and len(smbios["uuid"]) == 36
+    serie = base64.b64decode(smbios["serial"]).decode()
+    assert serie.startswith(main.PREFIXE_JETON_SMBIOS)
     with Session(engine) as session:
         fiche = session.exec(select(Machine).where(Machine.hostname == "srv-jeton")).first()
-    assert fiche.jeton_hash == ""
+    assert fiche.jeton_hash == jetons.empreinte(serie[len(main.PREFIXE_JETON_SMBIOS):])
+
+
+def test_le_smbios_conserve_l_uuid_et_ecrase_le_numero_du_gabarit():
+    cfg = {"smbios1": "uuid=11111111-2222-3333-4444-555555555555,serial=Z2FiYXJpdA==,base64=1"}
+    assert main._smbios_avec_jeton(cfg, "") == "uuid=11111111-2222-3333-4444-555555555555"
+    assert main._smbios_avec_jeton(cfg, "abc").startswith("uuid=11111111-2222-3333-4444-555555555555,serial=")

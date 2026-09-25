@@ -226,7 +226,7 @@ def test_la_ligne_est_ecrite_sous_la_MAC_ATTRIBUEE_par_l_hyperviseur(
             return "00505600beef"          # MAC provisoire, jetée par le clone
 
         @staticmethod
-        async def provision_vm(h, body, vm_id, mac_colons, mac_plain, user_data, render):
+        async def provision_vm(h, body, vm_id, mac_colons, mac_plain, user_data, render, jeton=""):
             return {"vm_id": 259107, "mac": MAC_FINALE,
                     "vm_uuid": "42010000-0000-4000-8000-000000000001"}
 

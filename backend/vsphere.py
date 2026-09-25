@@ -598,7 +598,7 @@ class VSphereProvider:
     @staticmethod
     async def provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
                            mac_plain: str, user_data: str = "",
-                           render_user_data=None) -> Optional[dict]:
+                           render_user_data=None, jeton: str = "") -> Optional[dict]:
         """
         Clone le template, injecte la configuration cloud-init et démarre la VM.
         Retourne `{"vm_id": …, "mac": …}` — les deux étant décidés par vCenter.
@@ -665,7 +665,7 @@ class VSphereProvider:
                                                              getattr(body, "folder", "")),
                                              name=body.hostname, spec=clone))
             try:
-                return _finish(vm, network, body, user_data, render_user_data)
+                return _finish(vm, network, body, user_data, render_user_data, jeton)
             except Exception:
                 # Le clone EXISTE : si la suite échoue, c'est à NOUS de le
                 # détruire. L'appelant, lui, ne connaît pas encore l'identifiant
@@ -837,7 +837,7 @@ def guestinfo_reseau(body) -> list[tuple[str, str]]:
             ("guestinfo.osiris.dns", dns)]
 
 
-def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
+def _finish(vm, network, body, user_data: str, render_user_data, jeton: str = "") -> dict:
     """
     Rebranche la carte, ajoute le disque de données, injecte le cloud-init et
     démarre le clone. Tout se joue ici et pas dans la spécification de clone :
@@ -934,6 +934,13 @@ def _finish(vm, network, body, user_data: str, render_user_data) -> dict:
         _wait(vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(extraConfig=[
             vim.option.OptionValue(key=cle, value=valeur) for cle, valeur in reseau
         ])))
+
+    # ── Jeton de la machine ──
+    # Lu par l'agent dans guestinfo : il ne transite jamais par le réseau.
+    # TOUJOURS écrit, vide s'il n'y en a pas : un clone hérite de l'extraConfig
+    # de son gabarit, donc du jeton de la VM qui a servi à le fabriquer.
+    _wait(vm.ReconfigVM_Task(spec=vim.vm.ConfigSpec(extraConfig=[
+        vim.option.OptionValue(key="guestinfo.osiris.jeton", value=jeton or "")])))
 
     # Le disque système du template est rarement à la bonne taille.
     _grow_system_disk(vm, body.disk_gb)

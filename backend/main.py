@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Coline Derycke. See LICENSE.
 import asyncio
 import base64
+import uuid as uuid_lib
 import hashlib
 import io
 import ipaddress
@@ -4428,6 +4429,26 @@ def _uuid_smbios(cfg: dict | None) -> str:
     return m.group(1).lower() if m else ""
 
 
+PREFIXE_JETON_SMBIOS = "osiris-jeton:"
+
+
+def _smbios_avec_jeton(cfg: dict | None, jeton: str) -> str:
+    """La ligne `smbios1` d'une VM Proxmox qui porte son jeton en numéro de série.
+
+    Proxmox n'a pas de guestinfo : le numéro de série SMBIOS est le seul canal
+    de l'hyperviseur vers la VM que l'invité lit sans réseau
+    (/sys/class/dmi/id/product_serial, root seul). Le préfixe empêche l'agent de
+    prendre le vrai numéro de série d'une machine pour un jeton.
+
+    L'UUID est CONSERVÉ : c'est l'ancre d'identité de la fiche (`vm_uuid`). Un
+    numéro de série hérité du gabarit est écrasé — vide s'il n'y a pas de jeton."""
+    uuid_vm = _uuid_smbios(cfg) or str(uuid_lib.uuid4())
+    if not jeton:
+        return f"uuid={uuid_vm}"
+    serie = base64.b64encode((PREFIXE_JETON_SMBIOS + jeton).encode()).decode()
+    return f"uuid={uuid_vm},serial={serie},base64=1"
+
+
 async def _config_vm(h: Hypervisor, node: str, vm_id: int) -> Optional[dict]:
     """Config d'une VM, ou None si l'hyperviseur n'en connaît aucune sous ce numéro."""
     try:
@@ -5017,8 +5038,8 @@ class ProxmoxProvider:
     @staticmethod
     async def provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
                            mac_plain: str, user_data: str = "",
-                           render_user_data=None) -> Optional[dict]:
-        await _provision_vm(h, body, vm_id, mac_colons, mac_plain, user_data)
+                           render_user_data=None, jeton: str = "") -> Optional[dict]:
+        await _provision_vm(h, body, vm_id, mac_colons, mac_plain, user_data, jeton)
         # Identifiant et MAC étaient connus d'avance ; l'UUID, non — c'est Proxmox
         # qui le génère. On le relit pour l'ancrer dans la fiche : sans lui, toute
         # vérification ultérieure retombe sur le nom, bien plus fragile.
@@ -5836,16 +5857,13 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
 
     # Le user-data cloud-init est rendu ici, pour les deux hyperviseurs : Proxmox
     # le dépose en snippet, vSphere l'injecte en guestinfo. Même contenu.
-    # Sur vSphere, le jeton naît avec la VM : le script embarqué dans le cloud-init
-    # (livré par guestinfo) le porte déjà, sans qu'il transite par le réseau. Sur
-    # Proxmox, ce cloud-init n'arrive PAS dans la VM (cf. snippets) : un jeton créé
-    # ici n'y parviendrait jamais et bloquerait la remise unique — l'agent le
-    # recevra dans le premier script servi.
+    # Le jeton naît avec la VM et lui parvient par l'hyperviseur — guestinfo sur
+    # vSphere, numéro de série SMBIOS sur Proxmox —, sans jamais transiter par le
+    # réseau. Un tiers qui connaît la MAC n'obtient donc rien : l'agent présente
+    # le jeton dès sa première demande.
+    jeton_clair, jeton_hash = jetons.nouveau()
     user_data = ""
-    jeton_clair, jeton_hash = ("", "")
     if body.boot_mode == "cloudinit":
-        if (h.type or "proxmox").lower() == "vsphere":
-            jeton_clair, jeton_hash = jetons.nouveau()
         user_data = _render_cloud_init_user_data(h, body, mac_plain, jeton_clair)
 
     # ── Fiche + audit AVANT le moindre appel à l'hyperviseur ───────────────────
@@ -5911,6 +5929,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
         created = await provider.provision_vm(
             h, body, vm_id, mac_colons, mac_plain, user_data,
             lambda mac: _render_cloud_init_user_data(h, body, mac, jeton_clair),
+            jeton=jeton_clair,
         )
         if created:
             # vSphere décide de l'identifiant ET de la MAC au moment du clone.
@@ -6171,7 +6190,7 @@ async def _verifier_identifiant_libre(h: Hypervisor, node: str, vm_id: int) -> N
 
 
 async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
-                        mac_plain: str, user_data: str = "") -> None:
+                        mac_plain: str, user_data: str = "", jeton: str = "") -> None:
     """Crée et démarre la VM côté Proxmox (PXE : VM vierge ; cloud-init : clone de template)."""
     import urllib.parse
 
@@ -6243,6 +6262,7 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
             vm_config.update(config_proxmox([d.model_dump() for d in body.disques], body.storage, "scsi", fmt))
         if body.iso and "ide2" not in vm_config:
             vm_config["ide2"] = f"{body.iso},media=cdrom"
+        vm_config["smbios1"] = _smbios_avec_jeton(None, jeton)
         _ajouter_pool(h, vm_config)
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu", vm_config)
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
@@ -6271,6 +6291,10 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
                 cfg["sata1"] = f"{body.storage}:{body.data_disk_gb}"
         else:
             cfg.update(config_proxmox([d.model_dump() for d in body.disques], body.storage))
+        # Le jeton, par le seul canal que l'invité lit sans réseau ; l'UUID du clone
+        # est conservé, le numéro de série du gabarit écrasé.
+        cfg["smbios1"] = _smbios_avec_jeton(
+            await _proxmox_get(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config"), jeton)
         await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config", cfg)
 
         # Un template fabriqué depuis un déploiement PXE traîne le lecteur CD WinPE
@@ -6319,10 +6343,12 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
         # et le clone est detruit dans la foulee. Un template porte son lecteur des
         # qu'il a ete regenere une fois (un simple `qm set --ipconfig0` materialise
         # l'image), donc supposer qu'il n'en a pas ne tient pas.
-        if not _a_un_lecteur_cloudinit(await _proxmox_get(
-            h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config"
-        )):
+        conf_clone = await _proxmox_get(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config")
+        if not _a_un_lecteur_cloudinit(conf_clone):
             cloud_config["ide2"] = f"{body.storage}:cloudinit"
+        # Le jeton en numéro de série SMBIOS (cf. `_smbios_avec_jeton`) : le
+        # cloud-init de Proxmox n'arrive pas dans la VM, ce canal-là si.
+        cloud_config["smbios1"] = _smbios_avec_jeton(conf_clone, jeton)
 
         # Le template n'a qu'un disque : ceux-ci s'ajoutent, vierges, et seront
         # formatés puis montés au premier démarrage.
