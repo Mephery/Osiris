@@ -339,6 +339,10 @@ class Machine(SQLModel, table=True):
     # demandée, et un disque ajouté au formulaire n'était jamais formaté.
     # « » = fiche antérieure à la liste : le profil fait encore foi.
     disques: str = Field(default="")
+    # Compte d'une personne précise sur CETTE VM (cf. comptes.py), en JSON : nom,
+    # clé SSH, sudo. Relu par le premier démarrage, y compris lors d'un
+    # redéploiement. « » = aucun.
+    compte: str = Field(default="")
     # ANCRE D'IDENTITE de la VM : l'UUID SMBIOS que l'hyperviseur lui a genere.
     #
     # `proxmox_vm_id` ne suffit PAS a designer une VM dans le temps : `nextid` rend

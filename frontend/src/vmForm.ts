@@ -4,6 +4,7 @@
 // rester testable sans monter de composant — et parce qu'un fichier .tsx ne peut
 // exporter que des composants sans casser le Fast Refresh de Vite.
 import { decrireDisque, disqueData, disquesPourServeur, type DisqueForm } from './disquesForm'
+import { COMPTE_VIDE, comptePourServeur, decrireCompte, type CompteForm } from './compteForm'
 
 /** L'adresse saisie tombe-t-elle dans le réseau du bridge choisi ? `null` si l'une
  *  des deux n'est pas exploitable — on se tait plutôt que d'alarmer à tort.
@@ -36,7 +37,7 @@ export const completerPrefixeCidr = (ipCidr: string, prefixe: number | undefined
  *  le reste des champs du formulaire garde son vrai type plutôt que de s'effacer
  *  derrière un `Record<string, unknown>`. */
 export const buildCreateVmPayload = <T extends { profile_id: unknown; template_id: unknown; organization_id: unknown;
-                                                 os?: string; disques?: DisqueForm[]; data_disk_gb?: number }>(
+                                                 os?: string; disques?: DisqueForm[]; data_disk_gb?: number; compte?: CompteForm }>(
   vmForm: T,
   vmNode: string,
 ) => ({
@@ -49,6 +50,8 @@ export const buildCreateVmPayload = <T extends { profile_id: unknown; template_i
   // les deux — le serveur refuserait la liste sous Windows.
   disques: vmForm.os === 'windows' ? [] : disquesPourServeur(vmForm.disques ?? []),
   data_disk_gb: vmForm.os === 'windows' ? (vmForm.data_disk_gb ?? 0) : 0,
+  // Linux seulement ; null quand rien n'est saisi
+  compte: vmForm.os === 'windows' ? null : comptePourServeur(vmForm.compte),
 })
 
 /** L'image système déclarée par le profil sera-t-elle ignorée par ce mode d'amorçage ?
@@ -220,7 +223,7 @@ export const LIBELLE_MODE: Record<ModeVm, string> = {
 /** Le formulaire de création de VM à l'ouverture. Ici plutôt que dans le composant
  *  pour que le test du récapitulatif en dérive ses champs : un champ ajouté ici
  *  sans être montré au récapitulatif fait échouer ce test. */
-export const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, disques: [] as DisqueForm[], ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
+export const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, disques: [] as DisqueForm[], compte: COMPTE_VIDE as CompteForm, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
 
 export type ChargeVm = ReturnType<typeof buildCreateVmPayload<typeof FORMULAIRE_VIDE>>
 
@@ -272,6 +275,7 @@ export const recapVm = (c: ChargeVm, ctx: ContexteRecap): SectionRecap[] => {
           : `${os} : installé par le réseau`,
         champs: ['os', 'template_id'] },
       { texte: profil, champs: ['profile_id'], attention: !ctx.profil },
+      { texte: decrireCompte(c.compte), champs: ['compte'] },
     ] },
     { titre: 'Où', lignes: [
       { texte: `${ctx.hyperviseur} › ${c.node} · stockage ${ctx.stockage ?? c.storage} · réseau ${ctx.reseau ?? c.bridge}`,

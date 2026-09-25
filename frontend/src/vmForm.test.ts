@@ -334,7 +334,7 @@ describe('recapVm', () => {
   // le récapitulatif ne le montre pas.
   it.each(['template', 'cloudinit', 'pxe'] as const)('montre chaque champ envoyé (mode %s)', mode => {
     const rempli = Object.fromEntries(Object.entries(FORMULAIRE_VIDE).map(([k, v]) =>
-      [k, Array.isArray(v) ? [disqueData(5)] : typeof v === 'number' ? 3 : k === 'organization_id' ? 1 : k === 'template_id' || k === 'profile_id' ? '9' : 'x'])) as unknown as typeof FORMULAIRE_VIDE
+      [k, Array.isArray(v) ? [disqueData(5)] : typeof v === 'object' && v !== null ? { nom: 'x', cle_ssh: 'ssh-ed25519 x', sudo: true } : typeof v === 'number' ? 3 : k === 'organization_id' ? 1 : k === 'template_id' || k === 'profile_id' ? '9' : 'x'])) as unknown as typeof FORMULAIRE_VIDE
     const charge = buildCreateVmPayload({ ...rempli, boot_mode: mode }, 'n1')
     const manquants = Object.keys(charge).filter(k => !champsMontres(charge).has(k as keyof ChargeVm))
     expect(manquants).toEqual([])

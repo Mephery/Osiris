@@ -12,6 +12,7 @@ import { ResumeProfil } from './ResumeProfil'
 import { ChampEnCours, Spinner } from './Skeleton'
 import { IcoX } from './icons'
 import { MAX_DISQUES, erreursDisques, libelleDepuisMontage, nouveauDisque, type DisqueForm } from './disquesForm'
+import { erreurCompte } from './compteForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
@@ -246,6 +247,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const manquants = champsManquants(vmForm, Boolean(vmHvId), vmNode)
   // Linux seulement : sous Windows, la liste n'est pas envoyée
   const disquesInvalides = vmForm.os !== 'windows' && erreursDisques(vmForm.disques).length > 0
+  const compteInvalide = vmForm.os !== 'windows' ? erreurCompte(vmForm.compte, profilEffectif?.default_user ?? '') : ''
   const clone = vmForm.boot_mode !== 'pxe'
   // Stockage et réseau dépendent du nœud : tant qu'il n'est pas connu, ils attendent aussi
   const attenteStockage = stockagesEnCours || (noeudsEnCours && !vmNode)
@@ -259,6 +261,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
     vmFolders.length > 0 && (vmForm.folder || 'dossier racine'),
     vmForm.ou && `OU ${vmForm.ou}`,
     vmForm.post_script.trim() && 'script post-install',
+    vmForm.os !== 'windows' && vmForm.compte.nom.trim() && `compte ${vmForm.compte.nom.trim()}`,
   ].filter(Boolean).join(' · ')
 
   // Ce qui part au serveur, et ce que montre le récapitulatif : UN seul objet.
@@ -712,6 +715,30 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
               <input placeholder="OU Active Directory (optionnel)" value={vmForm.ou} onChange={e => setVmForm(f => ({...f, ou: e.target.value}))} className={`osiris-input text-xs font-mono ${vmFolders.length > 0 ? '' : 'col-span-2'}`} />
             </div>
 
+            {/* Une personne précise sur CETTE VM (un développeur du client…), en plus
+                du compte d'administration du profil. Clé obligatoire : la
+                connexion SSH par mot de passe est désactivée. */}
+            {vmForm.os !== 'windows' && (
+              <div className="space-y-1">
+                <p className={aide}>Compte d'une personne sur cette VM — optionnel</p>
+                <div className="flex gap-2 items-center">
+                  <input placeholder="Nom (ex : jdupont)" value={vmForm.compte.nom}
+                    onChange={e => setVmForm(f => ({ ...f, compte: { ...f.compte, nom: e.target.value.toLowerCase() } }))}
+                    className="osiris-input text-xs font-mono w-40" />
+                  <label className="flex items-center gap-1.5 text-[10px] text-slate-500 cursor-pointer"
+                    title="sudo sans mot de passe : le compte n'en a pas, accès par clé uniquement">
+                    <input type="checkbox" checked={vmForm.compte.sudo}
+                      onChange={e => setVmForm(f => ({ ...f, compte: { ...f.compte, sudo: e.target.checked } }))} />
+                    administrateur (sudo)
+                  </label>
+                </div>
+                <textarea rows={2} value={vmForm.compte.cle_ssh} placeholder="Clé SSH publique (contenu du fichier .pub : ssh-ed25519 AAAA… commentaire)"
+                  onChange={e => setVmForm(f => ({ ...f, compte: { ...f.compte, cle_ssh: e.target.value } }))}
+                  className="osiris-input text-[10px] font-mono w-full resize-y" />
+                {compteInvalide && <p className="text-[10px] text-amber-400">⚠ {compteInvalide}.</p>}
+              </div>
+            )}
+
             <div className="space-y-1">
               <textarea rows={3} value={vmForm.post_script}
                 onChange={e => setVmForm(f => ({...f, post_script: e.target.value}))}
@@ -742,7 +769,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
         )}
         <div className="flex gap-2">
           <button type="button" onClick={onClose} className="osiris-btn-ghost text-xs px-4 border border-slate-700 rounded">Annuler</button>
-          <button type="submit" disabled={vmInaccessible || manquants.length > 0 || disquesInvalides} className="osiris-btn text-xs px-4 flex-1 disabled:opacity-50">
+          <button type="submit" disabled={vmInaccessible || manquants.length > 0 || disquesInvalides || Boolean(compteInvalide)} className="osiris-btn text-xs px-4 flex-1 disabled:opacity-50">
             Vérifier avant de créer →
           </button>
         </div>

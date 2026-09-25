@@ -297,6 +297,43 @@ _log "Acces SSH par cle ouvert pour {{ profile.default_user }}"
 {% endif %}
 {% endif %}
 
+{% if compte %}
+# ── Compte de la personne de cette VM ─────────────────────────────────────────
+# En plus du compte d'administration du profil, et sur CETTE machine seulement :
+# le developpeur d'un client, par exemple. Acces par cle uniquement, comme
+# l'administration : pas de mot de passe, donc un sudo — s'il est demande — sans
+# mot de passe, sans quoi il serait inutilisable.
+_compte={{ compte.nom | bash_squote }}
+if id -u "$_compte" > /dev/null 2>&1 && [ "$(id -u "$_compte")" -lt 1000 ]; then
+    # Un compte systeme de l'image (uid < 1000) : y poser une cle l'ouvrirait
+    _log "AVERTISSEMENT : $_compte est un compte systeme de l'image - on n'y touche pas"
+else
+    if ! id -u "$_compte" > /dev/null 2>&1; then
+        if useradd -m -s /bin/bash "$_compte"; then
+            _log "Compte $_compte cree"
+        else
+            _on_error "$LINENO" "useradd $_compte"
+        fi
+    fi
+    _compte_home=$(getent passwd "$_compte" | cut -d: -f6)
+    mkdir -p "$_compte_home/.ssh"
+    chmod 700 "$_compte_home/.ssh"
+    printf '%s\n' {{ compte.cle_ssh | bash_squote }} > "$_compte_home/.ssh/authorized_keys"
+    chmod 600 "$_compte_home/.ssh/authorized_keys"
+    chown -R "$_compte:$_compte" "$_compte_home/.ssh"
+{% if compte.sudo %}
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$_compte" > /etc/sudoers.d/osiris-compte
+    chmod 440 /etc/sudoers.d/osiris-compte
+{% else %}
+    # Redeploiement apres avoir retire sudo : le droit ne doit pas survivre
+    rm -f /etc/sudoers.d/osiris-compte
+{% endif %}
+    dpkg -s openssh-server > /dev/null 2>&1 || apt-get install -y openssh-server 2>&1 | tail -1
+    systemctl enable --now ssh > /dev/null 2>&1 || systemctl enable --now sshd > /dev/null 2>&1 || true
+    _log "Acces SSH par cle ouvert pour $_compte ({{ 'avec' if compte.sudo else 'sans' }} sudo)"
+fi
+{% endif %}
+
 {% if profile.set_root_password %}
 # ── Mot de passe root de secours ──────────────────────────────────────────────
 # Acces CONSOLE de secours, pour le jour ou le reseau ou SSH est tombe. Root
@@ -692,6 +729,14 @@ if timeout 3 bash -c "</dev/tcp/{{ zabbix.server }}/10051" 2>/dev/null; then
     _add_test "Collecteur Zabbix joignable" true "{{ zabbix.server }}:10051"
 else
     _add_test "Collecteur Zabbix joignable" false "TCP 10051 ferme vers {{ zabbix.server }} (regle pare-feu ?)"
+fi
+{% endif %}
+
+{% if compte %}
+if [ -s "$(getent passwd {{ compte.nom | bash_squote }} | cut -d: -f6)/.ssh/authorized_keys" ]; then
+    _add_test {{ ("Compte " ~ compte.nom) | bash_squote }} true "cle SSH posee{{ ', sudo' if compte.sudo else '' }}"
+else
+    _add_test {{ ("Compte " ~ compte.nom) | bash_squote }} false "absent ou sans cle"
 fi
 {% endif %}
 

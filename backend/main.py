@@ -35,6 +35,7 @@ from jinja2 import Environment, FileSystemLoader
 
 import pyotp
 import qrcode
+from comptes import CompteVm, valider_compte
 from disques import DisqueVm, config_proxmox, disques_de, valider_disques
 from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
 import vpn
@@ -2003,7 +2004,8 @@ def _osiris_url_for(session: Session, machine: Machine) -> str:
 def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: dict,
                              linux_apps: list, zabbix: Optional[dict],
                              osiris_url: str, post_script: str = "",
-                             ip_attendue: str = "", disques: Optional[list] = None) -> str:
+                             ip_attendue: str = "", disques: Optional[list] = None,
+                             compte: Optional[dict] = None) -> str:
     """Le script de premier démarrage Linux, rendu à partir d'un contexte explicite.
 
     Volontairement sans accès à la base : le script est aussi embarqué dans le
@@ -2025,6 +2027,7 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
         # fait encore foi, avec l'ancien disque unique sur /data.
         disques=(disques if disques is not None else valider_disques(
             [], profile_ctx.get("vm_data_disk_gb", 0) or 0)),
+        compte=compte,
         # Variable propre, et NON `machine.ip_cidr` : `machine` est un dict
         # volontairement etroit, et Jinja rend `Undefined` — donc faux — pour une
         # cle absente, sans rien dire. Un `{% if machine.ip_cidr %}` ecrit ici ne
@@ -2057,6 +2060,7 @@ def _render_linux_firstboot(mac: str) -> Response:
         post_script=machine.post_script or "",
         ip_attendue=machine.ip_cidr or "",
         disques=disques_de(machine.disques) if machine.disques else None,
+        compte=json.loads(machine.compte) if machine.compte else None,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -5374,6 +5378,8 @@ class VmCreateBody(SQLModel):
     data_disk_gb: int = 0
     # Disques supplémentaires d'une VM Linux (cf. disques.py), jusqu'à 4.
     disques: list[DisqueVm] = []
+    # Compte d'une personne précise sur cette VM Linux (cf. comptes.py). Optionnel.
+    compte: Optional[CompteVm] = None
     # Adressage IP. Vide = DHCP. À renseigner sur les VLAN serveurs, qui n'ont
     # généralement pas de DHCP : sans adresse, la VM démarre et ne rappelle
     # jamais OSIRIS.
@@ -5544,6 +5550,7 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str) -> str:
         post_script=getattr(body, "post_script", "") or "",
         ip_attendue=getattr(body, "ip_cidr", "") or "",
         disques=[d.model_dump() if hasattr(d, "model_dump") else d for d in (getattr(body, "disques", None) or [])],
+        compte=body.compte.model_dump() if getattr(body, "compte", None) else None,
     )
 
     return jinja_env.get_template("cloud-init-user-data.j2").render(
@@ -5699,6 +5706,13 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     else:
         body.disques = [DisqueVm(**d) for d in valider_disques(body.disques, body.data_disk_gb)]
         body.data_disk_gb = 0   # la liste fait foi
+    # Compte de la VM : Linux seulement, et jamais le compte d'administration du
+    # profil (sa clé écraserait celles de l'équipe).
+    if body.os == "windows" and body.compte and (body.compte.nom.strip() or body.compte.cle_ssh.strip()):
+        raise HTTPException(status_code=422, detail="Le compte de la VM est réservé à Linux pour l'instant.")
+    if body.os != "windows":
+        compte = valider_compte(body.compte, _resolve_profile_for_vm(body).default_user or "")
+        body.compte = CompteVm(**compte) if compte else None
 
     with Session(engine) as session:
         h = session.get(Hypervisor, hv_id)
@@ -5779,6 +5793,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                 vm_bridge=body.bridge,
                 disques=(json.dumps([d.model_dump() for d in body.disques])
                          if body.os != "windows" else ""),
+                compte=json.dumps(body.compte.model_dump()) if body.compte else "",
                 ip_cidr=body.ip_cidr.strip(),
                 gateway=body.gateway.strip(),
                 dns_servers=body.dns_servers.strip(),
