@@ -455,37 +455,51 @@ class VSphereProvider:
             grappe = _cluster(si, node)
             # Port groups où un hôte a son adaptateur VMkernel (gestion, vMotion,
             # stockage) : le réseau de l'hyperviseur lui-même. Standard par nom,
-            # distribué par clé.
+            # distribué par clé. Lectures GROUPÉES : parcourir `hote.config` attribut
+            # par attribut coûtait 5 s sur un cluster de quelques hôtes.
             vmkernel: set = set()
-            for hote in grappe.host:
-                for vnic in (hote.config.network.vnic if hote.config else []):
+            for hote in _proprietes(si, list(grappe.host), vim.HostSystem, ["config.network.vnic"]):
+                for vnic in hote.get("config.network.vnic") or []:
                     if vnic.portgroup:
                         vmkernel.add(vnic.portgroup)
                     port = getattr(vnic.spec, "distributedVirtualPort", None)
                     if port:
                         vmkernel.add(port.portgroupKey)
+            reseaux = list(grappe.network)
+            distribues = [n for n in reseaux if isinstance(n, vim.dvs.DistributedVirtualPortgroup)]
+            ids = {n._moId for n in distribues}
+            lus = _proprietes(si, distribues, vim.dvs.DistributedVirtualPortgroup, ["name", "key", "config.uplink"]) \
+                + _proprietes(si, [n for n in reseaux if n._moId not in ids], vim.Network, ["name"])
             out = []
-            for net in grappe.network:
-                distributed = isinstance(net, vim.dvs.DistributedVirtualPortgroup)
+            for net in lus:
+                distributed = net["_obj"]._moId in ids
                 # Le port group d'uplink porte les cartes physiques du switch
                 # distribué : aucune VM ne peut s'y brancher.
-                if distributed and getattr(net.config, "uplink", False):
+                if distributed and net.get("config.uplink"):
                     continue
                 # Un port group ne porte aucune adresse : vSphere ne décrit que la
                 # commutation, pas le plan d'adressage. Champs présents mais vides,
                 # pour que le formulaire traite les deux hyperviseurs de la même
                 # façon — la proposition viendra alors des déploiements passés.
                 out.append({
-                    "iface": net.name,
+                    "iface": net["name"],
                     "type": "dvportgroup" if distributed else "portgroup",
                     "address": "",
                     "cidr": "",
                     "gateway": "",
                     "comments": "port group distribué" if distributed else "port group standard",
-                    "hyperviseur": net.name in vmkernel
-                                   or getattr(net, "key", None) in vmkernel,
+                    "hyperviseur": net["name"] in vmkernel or net.get("key") in vmkernel,
                 })
             return sorted(out, key=lambda n: n["iface"])
+        return await _run(work)
+
+    @staticmethod
+    async def reseaux_utilises(h: Hypervisor) -> set[str]:
+        """Les port groups où au moins une VM (hors gabarit) est branchée."""
+        def work():
+            si = _connect(h)
+            nets = _proprietes(si, _all(si, vim.Network), vim.Network, ["name", "vm"])
+            return {n["name"] for n in nets if n.get("vm")}
         return await _run(work)
 
     @staticmethod

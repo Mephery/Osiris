@@ -92,3 +92,19 @@ def test_le_stockage_dit_s_il_est_partage(client, admin_headers, hv_id):
     resp = client.get(f"/hypervisors/{hv_id}/nodes/pve1/storages", headers=admin_headers)
     assert resp.status_code == 200, resp.text
     assert {s["storage"]: s["shared"] for s in resp.json()} == {"ceph_partage": True, "local-btrfs": False}
+
+
+
+def test_un_reseau_de_l_hyperviseur_ou_vivent_des_vm_est_propose():
+    """Vu le 25/09 : sur un cluster, le réseau d'administration porte le nœud ET
+    six VM. Le masquer cachait le réseau le plus utilisé."""
+    admin = {"iface": "vmbr0.248", "comments": "ADMIN", "hyperviseur": True}
+    assert main._reserve_reseau(admin, {"vmbr0.248"}) == ""
+    assert main._reserve_reseau(admin, set()) == "hyperviseur"
+
+
+def test_la_liste_des_reseaux_tient_compte_des_vm_branchees(client, admin_headers, hv_id, monkeypatch):
+    async def utilises(h):
+        return {"vmbr13"}
+    monkeypatch.setattr(main.ProxmoxProvider, "reseaux_utilises", staticmethod(utilises))
+    assert _reseaux(client, admin_headers, hv_id)["vmbr13"]["reserve"] == ""

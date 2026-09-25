@@ -4904,6 +4904,12 @@ class ProxmoxProvider:
         return await _inventaire_proxmox(h)
 
     @staticmethod
+    async def reseaux_utilises(h: Hypervisor) -> set[str]:
+        """Les ponts où au moins une VM est branchée. La configuration suffit :
+        l'agent de chaque VM ne dirait rien de plus, et coûterait l'essentiel."""
+        return {c["reseau"] for vm in await _inventaire_proxmox(h, avec_agent=False) for c in vm["cartes"]}
+
+    @staticmethod
     async def list_templates(h: Hypervisor, node: str) -> list[dict]:
         vms = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu")
         return [
@@ -5024,7 +5030,7 @@ def _ip_declaree(valeur: str) -> str:
     return ip if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ip) else ""
 
 
-async def _inventaire_proxmox(h: Hypervisor) -> list[dict]:
+async def _inventaire_proxmox(h: Hypervisor, avec_agent: bool = True) -> list[dict]:
     """Toutes les VM et conteneurs du cluster, avec chaque carte réseau et ses IPv4.
 
     Lecture seule. Par carte, deux sources :
@@ -5058,7 +5064,7 @@ async def _inventaire_proxmox(h: Hypervisor) -> list[dict]:
                 for ip in (_ip_declaree(carte.get("ip", "")), _ip_declaree(str(cfg.get(f"ipconfig{idx}", "")))):
                     if ip:
                         ips[idx].setdefault(ip, "configuration")
-            if genre == "qemu" and v.get("status") == "running" and cartes:
+            if avec_agent and genre == "qemu" and v.get("status") == "running" and cartes:
                 try:
                     rep = await _proxmox_get(h, f"{base}/agent/network-get-interfaces")
                     for itf in (rep or {}).get("result", []):
@@ -5103,7 +5109,7 @@ def _adresses_du_reseau(inventaire: list[dict], reseau: str) -> dict:
     return {"adresses": adresses, "sans_adresse": sorted(sans)}
 
 
-def _reserve_reseau(n: dict) -> str:
+def _reserve_reseau(n: dict, utilises: set | frozenset = frozenset()) -> str:
     """Pourquoi un réseau n'est pas proposé d'office à une VM : « » s'il l'est.
 
     La liste d'un nœud mêle les réseaux des machines et ceux qui font tourner
@@ -5112,13 +5118,16 @@ def _reserve_reseau(n: dict) -> str:
 
     Le tri porte sur ce que FAIT le réseau, jamais sur une liste de noms :
     - « hyperviseur » : il y a sa propre adresse (bridge adressé sur Proxmox,
-      adaptateur VMkernel sur vSphere) — stockage, sauvegarde, gestion,
-      migration. Un futur réseau de ce genre sera reconnu quel que soit son nom ;
+      adaptateur VMkernel sur vSphere) ET aucune VM n'y vit — stockage,
+      sauvegarde, migration. Un futur réseau de ce genre sera reconnu quel que
+      soit son nom. La seconde condition vient de l'inventaire : sur un cluster,
+      le réseau d'administration porte à la fois le nœud et six VM (vu le
+      25/09) — le masquer cachait le réseau le plus utilisé ;
     - « pxe » : rien dans l'API ne distingue un réseau d'amorçage d'un VLAN
       client, sauf le libellé que l'exploitant lui a donné. Une VM qui y
       démarrerait recevrait l'installeur de CE réseau, pas celui d'OSIRIS.
     Rien n'est retiré : le formulaire les garde derrière une case à cocher."""
-    if n.get("hyperviseur"):
+    if n.get("hyperviseur") and n.get("iface") not in utilises:
         return "hyperviseur"
     if "pxe" in f"{n.get('iface', '')} {n.get('comments', '')}".lower():
         return "pxe"
@@ -5154,8 +5163,9 @@ async def get_network_usage(hv_id: int, bridge: str, _: User = Depends(require_a
 async def get_node_networks(hv_id: int, node: str, _: User = Depends(require_admin)):
     """Réseaux disponibles (bridges Proxmox / port groups vSphere)."""
     h = _get_hypervisor(hv_id)
-    return [{**n, "reserve": _reserve_reseau(n)}
-            for n in await _provider(h).list_networks(h, node)]
+    reseaux = await _provider(h).list_networks(h, node)
+    utilises = await _provider(h).reseaux_utilises(h) if any(n.get("hyperviseur") for n in reseaux) else set()
+    return [{**n, "reserve": _reserve_reseau(n, utilises)} for n in reseaux]
 
 
 def _defauts_reseau(bridge: dict, deja_deployees: list) -> dict:
