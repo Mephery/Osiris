@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, gabaritParDefaut, FORMULAIRE_VIDE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut, adressesPrises, occupantDe, type ChargeVm, type ContexteRecap } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, gabaritParDefaut, FORMULAIRE_VIDE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut, adressesPrises, occupantDe, plagesAdresses, type ChargeVm, type ContexteRecap } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -460,5 +460,26 @@ describe('adresses déjà prises', () => {
     expect(occupantDe('192.0.2.10', prises)).toBe('web-01')
     expect(occupantDe('192.0.2.11', prises)).toBeNull()
     expect(occupantDe('', prises)).toBeNull()
+  })
+})
+
+describe('plagesAdresses', () => {
+  const prises = ['192.0.2.10', '192.0.2.11', '192.0.2.12', '192.0.2.14', '192.0.2.241', '198.51.100.5']
+    .map((ip, i) => ({ ip, vm: `vm-${i}` }))
+
+  it('écrit le préfixe une fois et regroupe les suites en plages', () => {
+    expect(plagesAdresses(prises).map(g => [g.prefixe, g.plages.map(p => p.texte)])).toEqual([
+      ['192.0.2', ['10–12', '14', '241']],
+      ['198.51.100', ['5']],
+    ])
+  })
+
+  it('garde le nom de chaque VM pour le survol', () => {
+    expect(plagesAdresses(prises)[0].plages[0].vms).toEqual(['192.0.2.10 vm-0', '192.0.2.11 vm-1', '192.0.2.12 vm-2'])
+  })
+
+  it("ne confond pas l'ordre des chaînes et celui des nombres", () => {
+    const desordre = ['192.0.2.100', '192.0.2.9', '192.0.2.10'].map(ip => ({ ip, vm: '' }))
+    expect(plagesAdresses(desordre)[0].plages.map(p => p.texte)).toEqual(['9–10', '100'])
   })
 })

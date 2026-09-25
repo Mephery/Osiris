@@ -367,3 +367,35 @@ export const adressesPrises = (usage: UsageReseau | null, occupeesOsiris: string
 /** Qui occupe déjà cette adresse, ou null. */
 export const occupantDe = (ip: string, prises: { ip: string; vm: string }[]): string | null =>
   (ip && prises.find(p => p.ip === ip)?.vm) || null
+
+/** Les adresses prises, regroupées pour se lire d'un coup d'œil : le préfixe
+ *  commun une seule fois, puis des plages de derniers octets.
+ *  [.10, .11, .12, .14, .241] → [{ prefixe: '192.0.2', plages: ['10–12', '14', '241'] }].
+ *  Dix-huit adresses complètes à la suite faisaient un mur que personne ne lit
+ *  (vu le 25/09) ; c'est pourtant là qu'on cherche un trou. */
+export const plagesAdresses = (prises: { ip: string; vm: string }[]):
+    { prefixe: string; plages: { texte: string; vms: string[] }[] }[] => {
+  const parPrefixe = new Map<string, { octet: number; ip: string; vm: string }[]>()
+  for (const p of prises) {
+    const i = p.ip.lastIndexOf('.')
+    const liste = parPrefixe.get(p.ip.slice(0, i)) ?? []
+    liste.push({ octet: Number(p.ip.slice(i + 1)), ip: p.ip, vm: p.vm })
+    parPrefixe.set(p.ip.slice(0, i), liste)
+  }
+  return [...parPrefixe].map(([prefixe, adresses]) => {
+    adresses.sort((a, b) => a.octet - b.octet)
+    const plages: { texte: string; vms: string[] }[] = []
+    let debut = 0
+    for (let i = 1; i <= adresses.length; i++) {
+      if (i === adresses.length || adresses[i].octet !== adresses[i - 1].octet + 1) {
+        const [a, b] = [adresses[debut], adresses[i - 1]]
+        plages.push({
+          texte: a === b ? `${a.octet}` : `${a.octet}–${b.octet}`,
+          vms: adresses.slice(debut, i).map(x => `${x.ip} ${x.vm}`),
+        })
+        debut = i
+      }
+    }
+    return { prefixe, plages }
+  })
+}

@@ -7,7 +7,7 @@ import { authHeader } from './types'
 import { buildCreateVmPayload, champsManquants, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree,
          adressageFixeImpossible, avecProfil, gabaritsPourMode, gabaritParDefaut, modeParDefaut, profilsPourVm,
          FORMULAIRE_VIDE, LIBELLE_MODE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut,
-         adressesPrises, occupantDe, type UsageReseau } from './vmForm'
+         adressesPrises, occupantDe, plagesAdresses, type UsageReseau } from './vmForm'
 import { ResumeProfil } from './ResumeProfil'
 import { ChampEnCours, Spinner } from './Skeleton'
 
@@ -559,12 +559,17 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
             {usageEnCours ? (
               <p className="text-slate-600 flex items-center gap-1.5"><Spinner cls="w-3 h-3" /> Lecture des adresses déjà utilisées sur ce réseau…</p>
             ) : (
-              <p className="text-slate-500" title="Lu sur toutes les VM de l'hyperviseur (agent invité ou configuration). Une machine hors de l'hyperviseur n'y figure pas.">
-                Déjà utilisées sur ce réseau{prises.length ? ` (${prises.length})` : ''} :{' '}
-                {prises.length === 0 ? 'aucune connue' : prises.map((p, i) => (
-                  <span key={p.ip}>{i > 0 && ', '}<span className="font-mono text-slate-400" title={p.vm}>{p.ip}</span></span>
-                ))}
-              </p>
+              prises.length === 0 ? (
+                <p className="text-slate-500">Aucune adresse connue sur ce réseau.</p>
+              ) : plagesAdresses(prises).map(g => (
+                <p key={g.prefixe} className="text-slate-500" title="Lu sur toutes les VM de l'hyperviseur (agent invité ou configuration). Une machine hors de l'hyperviseur n'y figure pas. Survoler une plage pour voir ses VM.">
+                  Déjà utilisées sur <span className="font-mono text-slate-400">{g.prefixe}.x</span>
+                  {' '}({g.plages.reduce((n, p) => n + p.vms.length, 0)}) :{' '}
+                  {g.plages.map((p, i) => (
+                    <span key={p.texte}>{i > 0 && <span className="text-slate-700"> · </span>}<span className="font-mono text-slate-300 cursor-help" title={p.vms.join('\n')}>{p.texte}</span></span>
+                  ))}
+                </p>
+              ))
             )}
             {!usageEnCours && usage && usage.sans_adresse.length > 0 && (
               <p className="text-slate-600">
