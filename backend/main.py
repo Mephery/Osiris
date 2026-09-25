@@ -4896,6 +4896,10 @@ class ProxmoxProvider:
         ]
 
     @staticmethod
+    async def adresses_sur_reseau(h: Hypervisor, pont: str) -> dict:
+        return await _adresses_proxmox(h, pont)
+
+    @staticmethod
     async def list_templates(h: Hypervisor, node: str) -> list[dict]:
         vms = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu")
         return [
@@ -4982,6 +4986,98 @@ async def get_node_storages(hv_id: int, node: str, _: User = Depends(require_adm
     return await _provider(h).list_storages(h, node)
 
 
+def _options_carte(valeur: str) -> dict:
+    """« virtio=02:AB:…,bridge=vmbr320,firewall=1 » → {"virtio": "02:ab:…", "bridge": …}.
+    La première clé d'une carte QEMU est son modèle, valant la MAC ; celle d'un
+    conteneur est `name`, la MAC y est `hwaddr`."""
+    opts = {}
+    for morceau in (valeur or "").split(","):
+        cle, _, val = morceau.partition("=")
+        opts[cle.strip()] = val.strip()
+    return opts
+
+
+def _cartes_sur_pont(cfg: dict, pont: str) -> dict[str, dict]:
+    """Les cartes d'une VM ou d'un conteneur branchées sur `pont`, par indice
+    (« net0 » → "0"), avec leur MAC et, pour un conteneur, l'IP déclarée."""
+    cartes = {}
+    for cle, valeur in (cfg or {}).items():
+        if not re.fullmatch(r"net\d+", cle):
+            continue
+        opts = _options_carte(str(valeur))
+        if opts.get("bridge") != pont:
+            continue
+        mac = opts.get("hwaddr") or next(
+            (v for k, v in opts.items() if re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", v.lower())), "")
+        cartes[cle[3:]] = {"mac": mac.lower(), "ip": opts.get("ip", "")}
+    return cartes
+
+
+def _ip_declaree(valeur: str) -> str:
+    """« ip=192.0.2.10/24,gw=… » → « 192.0.2.10 » ; « dhcp », vide → « »."""
+    ip = _options_carte(valeur).get("ip", "") if "=" in (valeur or "") else valeur or ""
+    ip = ip.split("/")[0].strip()
+    return ip if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ip) else ""
+
+
+async def _adresses_proxmox(h: Hypervisor, pont: str) -> dict:
+    """Les adresses IPv4 utilisées sur un pont, lues sur TOUTES les VM du cluster.
+
+    OSIRIS ne connaissait que ses propres fiches : « déjà prises par OSIRIS »
+    taisait les dizaines de VM posées à la main sur le même réseau, et choisir
+    une adresse revenait à parier. Deux sources, par VM :
+    - l'agent invité (ce que la VM porte VRAIMENT), restreint à la carte branchée
+      sur ce pont — reconnue à sa MAC, pour ne pas compter le 172.17.0.1 d'un
+      Docker ou l'adresse d'une autre carte ;
+    - la configuration (`ipconfigN` cloud-init, `ip=` d'un conteneur) : ce qui
+      est DÉCLARÉ, seule source quand l'agent manque ou que la VM est éteinte.
+    Une VM branchée ici dont on ne sait rien est listée à part : l'absence
+    d'adresse connue ne veut pas dire adresse libre."""
+    import asyncio
+    ressources = await _proxmox_get(h, "/api2/json/cluster/resources?type=vm") or []
+    limite = asyncio.Semaphore(8)
+
+    async def lire(v: dict) -> Optional[dict]:
+        genre = v.get("type", "qemu")
+        base = f"/api2/json/nodes/{v.get('node')}/{genre}/{v.get('vmid')}"
+        async with limite:
+            try:
+                cfg = await _proxmox_get(h, f"{base}/config")
+            except Exception:
+                return None
+            cartes = _cartes_sur_pont(cfg, pont)
+            if not cartes:
+                return None
+            ips: dict[str, str] = {}
+            for idx, carte in cartes.items():
+                for ip in (_ip_declaree(carte["ip"]), _ip_declaree(str(cfg.get(f"ipconfig{idx}", "")))):
+                    if ip:
+                        ips.setdefault(ip, "configuration")
+            if genre == "qemu" and v.get("status") == "running":
+                try:
+                    rep = await _proxmox_get(h, f"{base}/agent/network-get-interfaces")
+                    macs = {c["mac"] for c in cartes.values()}
+                    for itf in (rep or {}).get("result", []):
+                        if (itf.get("hardware-address") or "").lower() not in macs:
+                            continue
+                        for a in itf.get("ip-addresses", []):
+                            if a.get("ip-address-type") == "ipv4":
+                                ips[a["ip-address"]] = "agent"
+                except Exception:
+                    pass   # pas d'agent : on garde ce qui est déclaré
+            return {"vm": cfg.get("name") or cfg.get("hostname") or f"VM {v.get('vmid')}",
+                    "vmid": v.get("vmid"), "ips": ips}
+
+    lues = [r for r in await asyncio.gather(*(lire(v) for v in ressources
+                                              if not v.get("template"))) if r]
+    return {
+        "adresses": sorted(({"ip": ip, "vm": r["vm"], "source": src}
+                            for r in lues for ip, src in r["ips"].items()),
+                           key=lambda a: tuple(int(o) for o in a["ip"].split("."))),
+        "sans_adresse": sorted(r["vm"] for r in lues if not r["ips"]),
+    }
+
+
 def _reserve_reseau(n: dict) -> str:
     """Pourquoi un réseau n'est pas proposé d'office à une VM : « » s'il l'est.
 
@@ -5002,6 +5098,16 @@ def _reserve_reseau(n: dict) -> str:
     if "pxe" in f"{n.get('iface', '')} {n.get('comments', '')}".lower():
         return "pxe"
     return ""
+
+
+@app.get("/hypervisors/{hv_id}/network-usage")
+async def get_network_usage(hv_id: int, bridge: str, _: User = Depends(require_admin)):
+    """Adresses déjà utilisées sur un réseau, d'après l'hyperviseur (toutes VM).
+
+    Lecture seule. Séparé de `network-defaults` : lire chaque VM prend quelques
+    secondes, et la passerelle ne doit pas les attendre."""
+    h = _get_hypervisor(hv_id)
+    return await _provider(h).adresses_sur_reseau(h, bridge)
 
 
 @app.get("/hypervisors/{hv_id}/nodes/{node}/networks")

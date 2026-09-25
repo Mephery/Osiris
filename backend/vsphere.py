@@ -125,6 +125,28 @@ def _all(si, kind) -> list:
         view.Destroy()
 
 
+def _proprietes(si, objets: list, kind, chemins: list[str]) -> list[dict]:
+    """Les propriétés de plusieurs objets en UNE requête (PropertyCollector).
+
+    Lire `vm.name`, puis `vm.guest.net`… fait un aller-retour par attribut et
+    par objet : 17 s pour un port group de trente VM. Ici, un seul échange.
+    Rend un dict par objet : {"_obj": objet, chemin: valeur, …}."""
+    if not objets:
+        return []
+    spec = vmodl.query.PropertyCollector.FilterSpec(
+        objectSet=[vmodl.query.PropertyCollector.ObjectSpec(obj=o) for o in objets],
+        propSet=[vmodl.query.PropertyCollector.PropertySpec(type=kind, pathSet=chemins)],
+    )
+    collecteur = si.content.propertyCollector
+    resultat = collecteur.RetrievePropertiesEx([spec], vmodl.query.PropertyCollector.RetrieveOptions())
+    lus = []
+    while resultat:
+        for objet in resultat.objects:
+            lus.append({"_obj": objet.obj, **{p.name: p.val for p in objet.propSet}})
+        resultat = collecteur.ContinueRetrievePropertiesEx(resultat.token) if resultat.token else None
+    return lus
+
+
 def _vm_moref(vm_id: int) -> str:
     """Reconstruit l'identifiant vSphere à partir de la partie numérique."""
     return f"vm-{vm_id}"
@@ -464,6 +486,30 @@ class VSphereProvider:
                                    or getattr(net, "key", None) in vmkernel,
                 })
             return sorted(out, key=lambda n: n["iface"])
+        return await _run(work)
+
+    @staticmethod
+    async def adresses_sur_reseau(h: Hypervisor, reseau: str) -> dict:
+        """Adresses IPv4 des VM branchées sur ce port group, lues par VMware Tools.
+
+        Même contrat que côté Proxmox. Seule la carte branchée sur CE port group
+        compte ; une VM sans Tools (ou éteinte) n'en dit rien et part dans
+        `sans_adresse` — inconnue ne veut pas dire libre."""
+        def work():
+            si = _connect(h)
+            adresses, sans = [], []
+            # Le port group connaît ses VM : pas besoin de parcourir tout le datacenter
+            vms = [vm for net in _all(si, vim.Network) if net.name == reseau for vm in net.vm]
+            for vm in _proprietes(si, vms, vim.VirtualMachine, ["name", "config.template", "guest.net"]):
+                if vm.get("config.template"):
+                    continue
+                ips = sorted({ip for nic in (vm.get("guest.net") or []) if nic.network == reseau
+                              for ip in (nic.ipAddress or []) if "." in ip and ":" not in ip})
+                if not ips:
+                    sans.append(vm["name"])
+                adresses += [{"ip": ip, "vm": vm["name"], "source": "agent"} for ip in ips]
+            adresses.sort(key=lambda a: tuple(int(o) for o in a["ip"].split(".")))
+            return {"adresses": adresses, "sans_adresse": sorted(sans)}
         return await _run(work)
 
     @staticmethod

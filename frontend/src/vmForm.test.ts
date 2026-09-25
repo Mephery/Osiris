@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, gabaritParDefaut, FORMULAIRE_VIDE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut, type ChargeVm, type ContexteRecap } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, gabaritParDefaut, FORMULAIRE_VIDE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut, adressesPrises, occupantDe, type ChargeVm, type ContexteRecap } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -431,5 +431,34 @@ describe('stockageParDefaut', () => {
 
   it('prend le seul stockage quand il n\'y a rien à décider', () => {
     expect(stockageParDefaut([{ storage: 'local', avail_gb: 100, shared: false }])).toBe('local')
+  })
+})
+
+describe('adresses déjà prises', () => {
+  const usage = {
+    adresses: [
+      { ip: '192.0.2.10', vm: 'web-01', source: 'agent' },
+      { ip: '192.0.2.9', vm: 'dns-01', source: 'configuration' },
+    ],
+    sans_adresse: ['muette'],
+  }
+
+  it("réunit l'hyperviseur et les fiches OSIRIS, sans doublon, dans l'ordre des adresses", () => {
+    expect(adressesPrises(usage, ['192.0.2.10', '192.0.2.241'])).toEqual([
+      { ip: '192.0.2.9', vm: 'dns-01' },
+      { ip: '192.0.2.10', vm: 'web-01' },
+      { ip: '192.0.2.241', vm: 'fiche OSIRIS' },
+    ])
+  })
+
+  it("garde les fiches OSIRIS quand l'hyperviseur n'a pas répondu", () => {
+    expect(adressesPrises(null, ['192.0.2.241'])).toEqual([{ ip: '192.0.2.241', vm: 'fiche OSIRIS' }])
+  })
+
+  it("nomme la VM qui occupe l'adresse saisie", () => {
+    const prises = adressesPrises(usage, [])
+    expect(occupantDe('192.0.2.10', prises)).toBe('web-01')
+    expect(occupantDe('192.0.2.11', prises)).toBeNull()
+    expect(occupantDe('', prises)).toBeNull()
   })
 })

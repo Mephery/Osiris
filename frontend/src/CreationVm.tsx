@@ -6,9 +6,10 @@ import type { GabaritOsiris, Hypervisor, NetworkDefaults, Organization, Profile,
 import { authHeader } from './types'
 import { buildCreateVmPayload, champsManquants, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree,
          adressageFixeImpossible, avecProfil, gabaritsPourMode, gabaritParDefaut, modeParDefaut, profilsPourVm,
-         FORMULAIRE_VIDE, LIBELLE_MODE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut } from './vmForm'
+         FORMULAIRE_VIDE, LIBELLE_MODE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut,
+         adressesPrises, occupantDe, type UsageReseau } from './vmForm'
 import { ResumeProfil } from './ResumeProfil'
-import { ChampEnCours } from './Skeleton'
+import { ChampEnCours, Spinner } from './Skeleton'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
@@ -49,6 +50,10 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   // disparaît alors du formulaire au lieu d'y proposer un choix inexistant.
   const [vmFolders, setVmFolders]       = useState<{ path: string }[]>([])
   const [vmNetDef, setVmNetDef]         = useState<NetworkDefaults | null>(null)
+  // Adresses déjà utilisées sur le réseau choisi, lues sur TOUTES les VM de
+  // l'hyperviseur — plus seulement les fiches d'OSIRIS
+  const [usage, setUsage]               = useState<UsageReseau | null>(null)
+  const [usageEnCours, setUsageEnCours] = useState(false)
   const [vmTemplates, setVmTemplates]   = useState<ProxmoxTemplate[]>([])
   // Une liste vide pendant qu'elle charge s'affichait « Aucun modèle sur cet
   // hyperviseur » : douze secondes sur un vCenter, de quoi croire ses gabarits
@@ -79,7 +84,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
 
   const chargerRessources = (hvId: number, node: string) => {
     choixCourant.current = { hv: hvId, noeud: node }
-    setVmStorages([]); setVmNetworks([]); setVmNetDef(null)
+    setVmStorages([]); setVmNetworks([]); setVmNetDef(null); setUsage(null)
     const h = authHeader(token)
     setStockagesEnCours(true); setReseauxEnCours(true)
     fetch(`${API_URL}/hypervisors/${hvId}/nodes/${node}/storages`, { headers: h })
@@ -99,7 +104,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
 
   const choisirHyperviseur = (hvId: number) => {
     choixCourant.current = { hv: hvId, noeud: '' }
-    setVmHvId(hvId); setVmNode(''); setVmStorages([]); setVmNetworks([]); setVmNodes([]); setVmNetDef(null)
+    setVmHvId(hvId); setVmNode(''); setVmStorages([]); setVmNetworks([]); setVmNodes([]); setVmNetDef(null); setUsage(null)
     setVmFolders([])
     setVmForm(f => ({ ...f, storage: '', bridge: '', folder: '', template_id: '', iso: '',
                       boot_mode: modeParDefaut(typeDe(hvId), f.os) }))
@@ -137,7 +142,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
 
   const choisirNoeud = (node: string) => {
     setVmNode(node)
-    setVmStorages([]); setVmNetworks([]); setVmNetDef(null)
+    setVmStorages([]); setVmNetworks([]); setVmNetDef(null); setUsage(null)
     setVmForm(f => ({ ...f, storage: '', bridge: '' }))
     if (vmHvId) chargerRessources(Number(vmHvId), node)
   }
@@ -150,7 +155,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const choisirReseau = (bridge: string) => {
     choixReseau.current = bridge
     setVmForm(f => ({ ...f, bridge }))
-    setVmNetDef(null)
+    setVmNetDef(null); setUsage(null)
     if (!vmHvId || !vmNode || !bridge) return
     fetch(`${API_URL}/hypervisors/${vmHvId}/nodes/${vmNode}/network-defaults?bridge=${encodeURIComponent(bridge)}`,
           { headers: authHeader(token) })
@@ -166,6 +171,17 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
         }))
       })
       .catch(() => {})
+    // À part : lire chaque VM prend quelques secondes, la passerelle n'attend pas
+    const hvId = Number(vmHvId)
+    setUsageEnCours(true)
+    fetch(`${API_URL}/hypervisors/${hvId}/network-usage?bridge=${encodeURIComponent(bridge)}`,
+          { headers: authHeader(token) })
+      .then(r => r.ok ? r.json() : null)
+      .then((u: UsageReseau | null) => {
+        if (toujours(hvId) && choixReseau.current === bridge) setUsage(u)
+      })
+      .catch(() => {})
+      .finally(() => { if (toujours(hvId) && choixReseau.current === bridge) setUsageEnCours(false) })
   }
 
   // L'adresse est saisie par l'opérateur — OSIRIS n'en propose jamais. Mais quand le
@@ -211,7 +227,8 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const adresseSaisie = vmForm.ip_cidr.split('/')[0].trim()
   const horsReseau    = !!(vmNetDef?.reseau && vmForm.ip_cidr
                            && dansLeReseau(vmForm.ip_cidr, vmNetDef.reseau) === false)
-  const dejaPrise     = !!(adresseSaisie && vmNetDef?.occupees.includes(adresseSaisie))
+  const prises        = adressesPrises(usage, vmNetDef?.occupees ?? [])
+  const occupant      = occupantDe(adresseSaisie, prises)
   const provenance    = vmNetDef
     ? [...new Set(Object.values(vmNetDef.origines))]
         .map(o => o === 'bridge' ? "lu sur l'hyperviseur" : 'repris des déploiements précédents')
@@ -251,7 +268,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   // une première fois ou non, ils se relisent au moment de valider.
   const aVerifier = [
     horsReseau && `${adresseSaisie} est hors de ${vmNetDef?.reseau} : la VM démarrerait sans pouvoir joindre personne.`,
-    dejaPrise && `${adresseSaisie} est déjà l'adresse d'une machine enregistrée dans OSIRIS.`,
+    occupant && `${adresseSaisie} est déjà utilisée par ${occupant}.`,
     clone && gabaritChoisi?.osiris && gabaritChoisi.osiris.etat !== 'a_jour'
       && "Gabarit scellé avec un agent ancien ou de version inconnue : à resceller.",
     imageDuProfilIgnoree(vmForm.boot_mode, profilEffectif)
@@ -513,10 +530,11 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
 
         {/* Passerelle et DNS sont des propriétés du RÉSEAU, pas de la machine :
             les retaper de mémoire à chaque déploiement n'apporte rien qu'un
-            risque de faute de frappe. L'adresse, elle, reste saisie à la main —
-            OSIRIS ne voit que ses propres fiches et ne peut affirmer qu'une
-            adresse est libre. On dit donc ce qu'on sait pris, jamais ce qu'on
-            croit disponible. */}
+            risque de faute de frappe. L'adresse, elle, reste saisie à la main :
+            même en lisant toutes les VM de l'hyperviseur, OSIRIS ne voit pas une
+            machine physique ou un autre cluster, et ne peut affirmer qu'une
+            adresse est libre. On dit ce qu'on sait pris, jamais ce qu'on croit
+            disponible. */}
         {vmNetDef && (
           <div className="text-[10px] space-y-0.5 border-l-2 border-slate-800 pl-2">
             {vmNetDef.reseau ? (
@@ -531,9 +549,26 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
                 Réseau encore inconnu d'OSIRIS : tout est à saisir, cette fois seulement — le prochain déploiement reprendra ces valeurs.
               </p>
             )}
-            {vmNetDef.occupees.length > 0 && (
-              <p className="text-slate-600" title="OSIRIS ignore les machines posées à la main : cette liste dit ce qui est pris, jamais ce qui est libre.">
-                Déjà prises par OSIRIS : <span className="font-mono">{vmNetDef.occupees.join(', ')}</span>
+          </div>
+        )}
+
+        {/* Ce qui est pris, jamais ce qui est libre : une machine hors de
+            l'hyperviseur (physique, autre cluster) n'apparaît pas ici. */}
+        {vmForm.bridge && (usageEnCours || prises.length > 0 || usage) && (
+          <div className="text-[10px] space-y-0.5 border-l-2 border-slate-800 pl-2">
+            {usageEnCours ? (
+              <p className="text-slate-600 flex items-center gap-1.5"><Spinner cls="w-3 h-3" /> Lecture des adresses déjà utilisées sur ce réseau…</p>
+            ) : (
+              <p className="text-slate-500" title="Lu sur toutes les VM de l'hyperviseur (agent invité ou configuration). Une machine hors de l'hyperviseur n'y figure pas.">
+                Déjà utilisées sur ce réseau{prises.length ? ` (${prises.length})` : ''} :{' '}
+                {prises.length === 0 ? 'aucune connue' : prises.map((p, i) => (
+                  <span key={p.ip}>{i > 0 && ', '}<span className="font-mono text-slate-400" title={p.vm}>{p.ip}</span></span>
+                ))}
+              </p>
+            )}
+            {!usageEnCours && usage && usage.sans_adresse.length > 0 && (
+              <p className="text-slate-600">
+                Adresse inconnue pour {usage.sans_adresse.length} VM (éteinte, DHCP ou sans agent) : {usage.sans_adresse.join(', ')}. Elles peuvent en occuper une.
               </p>
             )}
           </div>
@@ -544,9 +579,9 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
             ⚠ {adresseSaisie} est hors de {vmNetDef?.reseau} : la VM démarrerait sans pouvoir joindre personne. À vérifier — un VLAN peut légitimement porter plusieurs réseaux.
           </p>
         )}
-        {dejaPrise && (
+        {occupant && (
           <p className="text-[10px] text-amber-400">
-            ⚠ {adresseSaisie} est déjà l'adresse d'une machine enregistrée dans OSIRIS.
+            ⚠ {adresseSaisie} est déjà utilisée par {occupant}.
           </p>
         )}
       </section>

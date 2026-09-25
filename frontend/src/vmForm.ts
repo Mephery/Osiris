@@ -344,3 +344,26 @@ export const stockageParDefaut = (
   if (partages.length) return partages[0].storage
   return stockages.length === 1 ? stockages[0].storage : ''
 }
+
+/** Ce que l'hyperviseur sait des adresses d'un réseau (GET …/network-usage). */
+export interface UsageReseau {
+  adresses: { ip: string; vm: string; source: string }[]
+  /** VM branchées sur ce réseau dont aucune adresse n'est connue : éteintes,
+   *  en DHCP, sans agent. Inconnue ne veut pas dire libre. */
+  sans_adresse: string[]
+}
+
+/** Les adresses prises sur ce réseau : celles lues sur l'hyperviseur, plus les
+ *  fiches d'OSIRIS qu'il ne voit pas (une VM éteinte en DHCP, par exemple).
+ *  Triées dans l'ordre des adresses, pas des chaînes (« .9 » avant « .10 »). */
+export const adressesPrises = (usage: UsageReseau | null, occupeesOsiris: string[]): { ip: string; vm: string }[] => {
+  const prises = new Map<string, string>()
+  for (const a of usage?.adresses ?? []) if (!prises.has(a.ip)) prises.set(a.ip, a.vm)
+  for (const ip of occupeesOsiris) if (!prises.has(ip)) prises.set(ip, 'fiche OSIRIS')
+  const rang = (ip: string) => ip.split('.').reduce((acc, o) => acc * 256 + Number(o), 0)
+  return [...prises].map(([ip, vm]) => ({ ip, vm })).sort((a, b) => rang(a.ip) - rang(b.ip))
+}
+
+/** Qui occupe déjà cette adresse, ou null. */
+export const occupantDe = (ip: string, prises: { ip: string; vm: string }[]): string | null =>
+  (ip && prises.find(p => p.ip === ip)?.vm) || null
