@@ -9,6 +9,7 @@ import type {
   DomainConfig, DriverPack, SmokeTest,
 } from './types'
 import { IMAGE_STATUS, EMPTY_FORM, authHeader } from './types'
+import { lireReponse } from './api'
 import {
   IcoOsiris, IcoRefresh, IcoSearch, IcoPencil, IcoX, IcoChevRight, IcoGear,
   IcoSun, IcoMoon,
@@ -213,12 +214,12 @@ export default function App() {
       headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
       body: JSON.stringify({ notes }),
     })
-      .then(r => { if (!r.ok) throw new Error() })
+      .then(r => lireReponse(r, 'Sauvegarde des notes refusée'))
       .then(() => {
         setMachines(prev => prev.map(m => m.mac === mac ? { ...m, notes } : m))
         toast.success('Notes sauvegardees')
       })
-      .catch(() => toast.error('Erreur lors de la sauvegarde'))
+      .catch((e: Error) => toast.error(e.message))
   }
 
   // ── Recherche + filtres ────────────────────────────────────────────────────
@@ -287,12 +288,14 @@ export default function App() {
       if (newDomainConfig.join_password) body.join_password = newDomainConfig.join_password
       if (newDomainConfig.wifi_password) body.wifi_password = newDomainConfig.wifi_password
       fetch(`${API_URL}/domain-configs/${editingDcId}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-        .then(r => { if (r.ok) { fetchDomainConfigs(auth.token); cancelEditDomainConfig(); toast.success('Configuration AD mise à jour') } else throw new Error() })
-        .catch(() => toast.error('Erreur'))
+        .then(r => lireReponse(r, 'Mise à jour refusée'))
+        .then(() => { fetchDomainConfigs(auth.token); cancelEditDomainConfig(); toast.success('Configuration AD mise à jour') })
+        .catch((e: Error) => toast.error(e.message))
     } else {
       fetch(`${API_URL}/domain-configs`, { method: 'POST', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify(newDomainConfig) })
-        .then(r => { if (r.ok) { fetchDomainConfigs(auth.token); setNewDomainConfig(EMPTY_DOMAIN_CONFIG); toast.success('Configuration AD ajoutée') } else throw new Error() })
-        .catch(() => toast.error('Erreur'))
+        .then(r => lireReponse(r, 'Création refusée'))
+        .then(() => { fetchDomainConfigs(auth.token); setNewDomainConfig(EMPTY_DOMAIN_CONFIG); toast.success('Configuration AD ajoutée') })
+        .catch((e: Error) => toast.error(e.message))
     }
   }
 
@@ -433,13 +436,13 @@ export default function App() {
         headers: { 'Content-Type': 'text/csv', ...authHeader(auth.token) },
         body: text,
       })
-        .then(r => r.ok ? r.json() : Promise.reject('Erreur'))
+        .then(r => lireReponse<{ created: number; skipped: number; errors?: string[] }>(r, 'Import refusé'))
         .then(res => {
           fetchAll(auth.token, selectedOrg)
           const msg = `${res.created} machine(s) importée(s)${res.skipped ? `, ${res.skipped} ignorée(s)` : ''}${res.errors?.length ? `, ${res.errors.length} erreur(s)` : ''}`
           if (res.errors?.length) toast.error(msg); else toast.success(msg)
         })
-        .catch(() => toast.error('Erreur lors de l\'import'))
+        .catch((e: Error) => toast.error(e.message))
         .finally(() => { setCsvImporting(false); e.target.value = '' })
     )
   }
@@ -644,8 +647,9 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
       body: JSON.stringify({ action }),
-    }).then(r => { if (!r.ok) throw new Error(); toast.success(`VM : ${action} envoyé`) })
-      .catch(() => toast.error('Erreur commande VM'))
+    }).then(r => lireReponse(r, 'Commande VM refusée'))
+      .then(() => toast.success(`VM : ${action} envoyé`))
+      .catch((e: Error) => toast.error(e.message))
       .finally(() => {
         setVmPowerLoading(prev => ({ ...prev, [mac]: false }))
         // Refresh statut après 3s
@@ -688,8 +692,9 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
       body: JSON.stringify({ name: newSnapName.trim(), description: newSnapDesc.trim() }),
-    }).then(r => { if (!r.ok) throw new Error(); toast.success('Snapshot créé'); setNewSnapName(''); setNewSnapDesc(''); fetchSnapshots(mac) })
-      .catch(() => toast.error('Erreur création snapshot'))
+    }).then(r => lireReponse(r, 'Création du snapshot refusée'))
+      .then(() => { toast.success('Snapshot créé'); setNewSnapName(''); setNewSnapDesc(''); fetchSnapshots(mac) })
+      .catch((e: Error) => toast.error(e.message))
       .finally(() => setSnapshotCreating(false))
   }
 
@@ -701,8 +706,9 @@ export default function App() {
         onClick: () => {
           fetch(`${API_URL}/machines/${mac}/snapshots/${encodeURIComponent(name)}/rollback`, {
             method: 'POST', headers: authHeader(auth.token),
-          }).then(r => { if (!r.ok) throw new Error(); toast.success('Rollback en cours…'); setTimeout(() => fetchVmStatus(mac), 5000) })
-            .catch(() => toast.error('Erreur rollback'))
+          }).then(r => lireReponse(r, 'Rollback refusé'))
+            .then(() => { toast.success('Rollback en cours…'); setTimeout(() => fetchVmStatus(mac), 5000) })
+            .catch((e: Error) => toast.error(e.message))
         },
       },
     })
@@ -711,8 +717,9 @@ export default function App() {
   const handleDeleteSnapshot = (mac: string, name: string) => {
     fetch(`${API_URL}/machines/${mac}/snapshots/${encodeURIComponent(name)}`, {
       method: 'DELETE', headers: authHeader(auth.token),
-    }).then(r => { if (!r.ok) throw new Error(); toast.success('Snapshot supprimé'); fetchSnapshots(mac) })
-      .catch(() => toast.error('Erreur suppression snapshot'))
+    }).then(r => lireReponse(r, 'Suppression du snapshot refusée'))
+      .then(() => { toast.success('Snapshot supprimé'); fetchSnapshots(mac) })
+      .catch((e: Error) => toast.error(e.message))
   }
 
   // ── Redéploiement machine ───────────────────────────────────────────────────
@@ -728,7 +735,7 @@ export default function App() {
         onClick: () => {
           setRedeployingMac(mac)
           fetch(`${API_URL}/machines/${mac}/redeploy-now`, { method: 'POST', headers: authHeader(auth.token) })
-            .then((res) => { if (!res.ok) throw new Error('Le redéploiement a été refusé') })
+            .then((res) => lireReponse(res, 'Le redéploiement a été refusé'))
             .then(() => { fetchAll(auth.token); toast.success(`${hostname} — en attente de déploiement`) })
             .catch((err) => toast.error(err.message))
             .finally(() => setRedeployingMac(null))
@@ -741,8 +748,9 @@ export default function App() {
 
   const handleDeleteUser = (id: number) => {
     fetch(`${API_URL}/users/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
+      .then(r => lireReponse(r, 'Suppression refusée'))
       .then(() => { fetchUsers(auth.token); toast.success('Utilisateur supprimé') })
-      .catch(() => toast.error('Erreur suppression utilisateur'))
+      .catch((e: Error) => toast.error(e.message))
   }
 
   // ── Admin : créer utilisateur ───────────────────────────────────────────────
@@ -758,10 +766,7 @@ export default function App() {
       // POURQUOI un mot de passe est refusé. Sans lui, on retente en boucle des
       // variantes qui échouent toutes pour la même raison invisible — exactement
       // le genre de mur que la politique de mot de passe est censée éviter.
-      .then(async (res) => {
-        if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Erreur création') }
-        return res.json()
-      })
+      .then((res) => lireReponse(res, 'Création refusée'))
       .then(() => { setNewUserEmail(''); setNewUserPass(''); fetchUsers(auth.token); toast.success('Utilisateur créé') })
       .catch((err) => toast.error(err.message))
   }
@@ -778,7 +783,7 @@ export default function App() {
         category: newAppCategory, icon: newAppIcon,
       }),
     })
-      .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
+      .then((res) => lireReponse(res, 'Création refusée'))
       .then(() => {
         setNewAppName(''); setNewAppWingetId(''); setNewAppAptPackage(''); setNewAppIcon('📦')
         fetchApps(auth.token); toast.success('Application ajoutée')
@@ -792,15 +797,16 @@ export default function App() {
       headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
       body: JSON.stringify(patch),
     })
-      .then((res) => { if (!res.ok) throw new Error('Erreur enregistrement'); return res.json() })
+      .then((res) => lireReponse(res, 'Enregistrement refusé'))
       .then(() => { fetchApps(auth.token); toast.success('Application mise à jour') })
       .catch((err) => toast.error(err.message))
   }
 
   const handleDeleteApp = (id: number) => {
     fetch(`${API_URL}/apps/${id}`, { method: 'DELETE', headers: authHeader(auth.token) })
+      .then(r => lireReponse(r, 'Suppression refusée'))
       .then(() => { fetchApps(auth.token); toast.success('Application supprimée') })
-      .catch(() => toast.error('Erreur suppression application'))
+      .catch((e: Error) => toast.error(e.message))
   }
 
   const handleCreateImage = (e: React.FormEvent<HTMLFormElement>) => {
@@ -810,15 +816,16 @@ export default function App() {
       headers: { 'Content-Type': 'application/json', ...authHeader(auth!.token) },
       body: JSON.stringify(newImage),
     })
-      .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
+      .then((res) => lireReponse(res, 'Création refusée'))
       .then(() => { setNewImage({ name: '', version: '', os: 'ubuntu', iso_url: '', wim_name: '' }); fetchImages(auth!.token); toast.success('Image ajoutée — téléchargement en cours') })
       .catch((err) => toast.error(err.message))
   }
 
   const handleDeleteImage = (id: number) => {
     fetch(`${API_URL}/images/${id}`, { method: 'DELETE', headers: authHeader(auth!.token) })
+      .then(r => lireReponse(r, 'Suppression refusée'))
       .then(() => { fetchImages(auth!.token); toast.success('Image supprimée') })
-      .catch(() => toast.error('Erreur suppression image'))
+      .catch((e: Error) => toast.error(e.message))
   }
 
   // ── Sélection en lot ──────────────────────────────────────────────────────
@@ -845,8 +852,7 @@ export default function App() {
             headers: { ...authHeader(auth!.token), 'Content-Type': 'application/json' },
             body: JSON.stringify({ macs: Array.from(selectedMacs), status: 'pending' }),
           }).then(async r => {
-            if (!r.ok) throw new Error('Le redéploiement en lot a été refusé')
-            const { updated } = await r.json()
+            const { updated } = await lireReponse<{ updated: string[] }>(r, 'Le redéploiement en lot a été refusé')
             toast.success(`${updated.length} machine${updated.length > 1 ? 's' : ''} en attente de déploiement`)
             setSelectedMacs(new Set())
             fetchAll(auth!.token)
@@ -1172,7 +1178,7 @@ export default function App() {
                     </div>
                     <div className="flex items-center gap-1.5">
                       <button onClick={() => startEditDomainConfig(dc)} className="osiris-action-btn" title="Modifier"><IcoPencil /></button>
-                      <button onClick={() => fetch(`${API_URL}/domain-configs/${dc.id}`, { method: 'DELETE', headers: authHeader(auth.token) }).then(r => { if (r.ok) { fetchDomainConfigs(auth.token); if (editingDcId === dc.id) cancelEditDomainConfig() } })} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
+                      <button onClick={() => fetch(`${API_URL}/domain-configs/${dc.id}`, { method: 'DELETE', headers: authHeader(auth.token) }).then(r => lireReponse(r, 'Suppression refusée')).then(() => { fetchDomainConfigs(auth.token); if (editingDcId === dc.id) cancelEditDomainConfig(); toast.success('Configuration AD supprimée') }).catch((e: Error) => toast.error(e.message))} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                     </div>
                   </div>
                 ))}
@@ -1571,8 +1577,8 @@ export default function App() {
             onFetchBitlockerKey={() => fetchBitlockerKey(machine.mac)}
             lapsPassword={lapsData[machine.mac]}
             onFetchLapsPassword={() => fetchLapsPassword(machine.mac)}
-            onSaveUserName={(name) => fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_name: name }) }).then(r => { if (r.ok) fetchAll(auth.token) })}
-            onSaveUserEmail={(email) => fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_email: email }) }).then(r => { if (r.ok) fetchAll(auth.token) })}
+            onSaveUserName={(name) => fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_name: name }) }).then(r => lireReponse(r, 'Enregistrement refusé')).then(() => fetchAll(auth.token)).catch((e: Error) => toast.error(e.message))}
+            onSaveUserEmail={(email) => fetch(`${API_URL}/machines/${machine.mac}`, { method: 'PATCH', headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' }, body: JSON.stringify({ user_email: email }) }).then(r => lireReponse(r, 'Enregistrement refusé')).then(() => fetchAll(auth.token)).catch((e: Error) => toast.error(e.message))}
             onSaveNotes={(notes) => saveNotes(machine.mac, notes)}
             onClose={() => setDetailMac(null)}
             vm={machine.proxmox_vm_id ? {

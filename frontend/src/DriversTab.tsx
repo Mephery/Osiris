@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import type { DriverPack } from './types'
 import { authHeader } from './types'
 import { IcoRefresh, IcoSearch, IcoDownload, IcoCheck, IcoChevDown, IcoChevRight } from './icons'
+import { lireReponse } from './api'
 import { SkeletonRows } from './Skeleton'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
@@ -52,8 +53,9 @@ export function DriversTab({ token }: { token: string }) {
   const handleDownloadPack = (id: number) => {
     setDownloadingPack(id)
     fetch(`${API_URL}/drivers/${id}/download`, { method: 'POST', headers: authHeader(token) })
-      .then(() => {})
-      .catch(() => {})
+      .then(r => lireReponse(r, 'Téléchargement refusé'))
+      .then(() => toast.success('Téléchargement du pack lancé'))
+      .catch((e: Error) => toast.error(e.message))
       .finally(() => setDownloadingPack(null))
   }
 

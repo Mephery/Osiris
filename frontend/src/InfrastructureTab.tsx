@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import type { ClusterStorage, Hypervisor, ProxmoxNode, ProxmoxTemplate } from './types'
 import { authHeader } from './types'
 import { IcoX } from './icons'
+import { lireReponse } from './api'
 import { Spinner } from './Skeleton'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
@@ -36,8 +37,8 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
       body: JSON.stringify(newHv),
-    }).then(r => { if (r.ok) { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '' }); toast.success('Hyperviseur ajouté') } else throw new Error() })
-      .catch(() => toast.error('Erreur création hyperviseur'))
+    }).then(r => lireReponse(r, 'Création refusée')).then(() => { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '' }); toast.success('Hyperviseur ajouté') })
+      .catch((e: Error) => toast.error(e.message))
   }
 
   const startEditHv = (h: Hypervisor) => {
@@ -70,7 +71,9 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
 
   const handleDeleteHv = (id: number) => {
     fetch(`${API_URL}/hypervisors/${id}`, { method: 'DELETE', headers: authHeader(token) })
-      .then(r => { if (r.ok) { onRefreshHypervisors(); toast.success('Hyperviseur supprimé') } })
+      .then(r => lireReponse(r, 'Suppression refusée'))
+      .then(() => { onRefreshHypervisors(); toast.success('Hyperviseur supprimé') })
+      .catch((e: Error) => toast.error(e.message))
   }
 
   const chargerGabarits = (id: number) => {
@@ -97,12 +100,11 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
     setHvTesting(prev => ({ ...prev, [id]: true }))
     setHvTestResult(prev => ({ ...prev, [id]: null }))
     fetch(`${API_URL}/hypervisors/${id}/test`, { method: 'POST', headers: authHeader(token) })
-      .then(async r => {
-        const data = await r.json()
-        if (r.ok) setHvTestResult(prev => ({ ...prev, [id]: { ok: true, ...data } }))
-        else setHvTestResult(prev => ({ ...prev, [id]: { ok: false, error: data.detail ?? 'Erreur inconnue' } }))
-      })
-      .catch(() => setHvTestResult(prev => ({ ...prev, [id]: { ok: false, error: 'Impossible de joindre OSIRIS' } })))
+      .then(r => lireReponse<Record<string, unknown>>(r, 'Test refusé'))
+      .then(data => setHvTestResult(prev => ({ ...prev, [id]: { ok: true, ...data } })))
+      .catch((e: Error) => setHvTestResult(prev => ({ ...prev, [id]: { ok: false,
+        // Un fetch qui rejette sans réponse : c'est OSIRIS lui-même qu'on ne joint pas
+        error: e instanceof TypeError ? 'Impossible de joindre OSIRIS' : e.message } })))
       .finally(() => setHvTesting(prev => ({ ...prev, [id]: false })))
   }
 

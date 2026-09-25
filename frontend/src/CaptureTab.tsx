@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import type { Machine } from './types'
 import { authHeader } from './types'
 import { IcoRefresh, IcoCheck, IcoX } from './icons'
+import { lireReponse } from './api'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
@@ -58,18 +59,20 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
     if (!captureMac || !captureWim) return
     fetch(`${API_URL}/capture/register?mac=${encodeURIComponent(captureMac)}&wim_name=${encodeURIComponent(captureWim)}`,
       { method: 'POST', headers: authHeader(token) })
-      .then(r => { if (!r.ok) throw new Error('Erreur'); return r.json() })
+      .then(r => lireReponse(r, "Enregistrement en mode capture refusé"))
       .then(() => {
         fetchCaptures()
         setCaptureStep(4)
         toast.success('Machine enregistrée en mode capture — démarrez-la en PXE !')
       })
-      .catch(() => toast.error('Erreur lors de l\'enregistrement'))
+      .catch((e: Error) => toast.error(e.message))
   }
 
   const handleDeleteCapture = (mac: string) => {
     fetch(`${API_URL}/capture/${mac}`, { method: 'DELETE', headers: authHeader(token) })
+      .then(r => lireReponse(r, 'Suppression refusée'))
       .then(() => { fetchCaptures(); toast.success('Job de capture supprimé') })
+      .catch((e: Error) => toast.error(e.message))
   }
 
   return (

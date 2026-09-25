@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { toast } from 'sonner'
 import type { Profile, Application, WimFile, DomainConfig, Organization } from './types'
 import { authHeader } from './types'
+import { lireReponse } from './api'
 import { IcoX, IcoPencil } from './icons'
 import { APP_LOGOS } from './appIconMap'
 import { ResumeProfil } from './ResumeProfil'
@@ -94,7 +95,7 @@ export function ProfilesSection({ token, profiles, apps, domainConfigs, organiza
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
       body: JSON.stringify(newProfile),
     })
-      .then((res) => { if (!res.ok) throw new Error('Erreur création'); return res.json() })
+      .then((res) => lireReponse(res, 'Création refusée'))
       .then(() => {
         setNewProfile(EMPTY_PROFILE)
         onProfilesChanged()
@@ -105,14 +106,16 @@ export function ProfilesSection({ token, profiles, apps, domainConfigs, organiza
 
   const handleDeleteProfile = (id: number) => {
     fetch(`${API_URL}/profiles/${id}`, { method: 'DELETE', headers: authHeader(token) })
-      .then(r => { if (r.ok) { onProfilesChanged(); toast.success('Profil supprimé') } })
-      .catch(() => toast.error('Erreur suppression profil'))
+      .then(r => lireReponse(r, 'Suppression refusée'))
+      .then(() => { onProfilesChanged(); toast.success('Profil supprimé') })
+      .catch((e: Error) => toast.error(e.message))
   }
 
   const handleCloneProfile = (id: number) => {
     fetch(`${API_URL}/profiles/${id}/clone`, { method: 'POST', headers: authHeader(token) })
-      .then(r => { if (r.ok) { onProfilesChanged(); toast.success('Profil duplique') } else throw new Error() })
-      .catch(() => toast.error('Erreur duplication profil'))
+      .then(r => lireReponse(r, 'Duplication refusée'))
+      .then(() => { onProfilesChanged(); toast.success('Profil duplique') })
+      .catch((e: Error) => toast.error(e.message))
   }
 
   const handlePatchProfile = (id: number, patch: Partial<Profile>) => {
@@ -121,8 +124,9 @@ export function ProfilesSection({ token, profiles, apps, domainConfigs, organiza
       headers: { ...authHeader(token), 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     })
-      .then(r => { if (r.ok) { onProfilesChanged(); toast.success('Profil mis à jour') } })
-      .catch(() => toast.error('Erreur mise à jour profil'))
+      .then(r => lireReponse(r, 'Mise à jour refusée'))
+      .then(() => { onProfilesChanged(); toast.success('Profil mis à jour') })
+      .catch((e: Error) => toast.error(e.message))
   }
 
   return (

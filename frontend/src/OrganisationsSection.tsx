@@ -5,15 +5,10 @@ import { toast } from 'sonner'
 import type { Organization, OrganizationPatch } from './types'
 import { authHeader } from './types'
 import { IcoPencil } from './icons'
+import { lireReponse } from './api'
 import { brouillonDe, changementsOrg, slugDepuisNom, type BrouillonOrg } from './orgForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
-
-/** L'erreur que l'API explique, plutôt qu'un « Erreur » générique. */
-const detailDe = async (r: Response, repli: string): Promise<never> => {
-  const corps = await r.json().catch(() => ({}))
-  throw new Error(typeof corps.detail === 'string' ? corps.detail : repli)
-}
 
 /** Administration → Organisations.
  *
@@ -50,7 +45,7 @@ export function OrganisationsSection({ token, orgs, onChange }: {
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
       body: JSON.stringify(patch),
     })
-      .then(r => r.ok ? r.json() : detailDe(r, 'Enregistrement refusé'))
+      .then(r => lireReponse(r, 'Enregistrement refusé'))
       .then(() => { toast.success(`${patch.name ?? o.name} enregistrée`); fermer(); onChange() })
       .catch((e: Error) => toast.error(e.message))
       .finally(() => setEnvoi(false))
@@ -59,7 +54,7 @@ export function OrganisationsSection({ token, orgs, onChange }: {
   const supprimer = (o: Organization) => {
     if (!window.confirm(`Supprimer définitivement l'organisation « ${o.name} » ?`)) return
     fetch(`${API_URL}/organizations/${o.id}`, { method: 'DELETE', headers: authHeader(token) })
-      .then(r => r.ok ? null : detailDe(r, 'Suppression refusée'))
+      .then(r => lireReponse(r, 'Suppression refusée'))
       .then(() => { toast.success(`${o.name} supprimée`); fermer(); onChange() })
       .catch((e: Error) => toast.error(e.message, { duration: 10000 }))
   }
@@ -72,7 +67,7 @@ export function OrganisationsSection({ token, orgs, onChange }: {
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
       body: JSON.stringify({ name: nouveauNom.trim(), slug: nouveauSlug }),
     })
-      .then(r => r.ok ? r.json() : detailDe(r, 'Création refusée'))
+      .then(r => lireReponse<Organization>(r, 'Création refusée'))
       .then((o: Organization) => {
         toast.success(`${o.name} créée`)
         setNouveauNom(''); setNouveauSlug(''); setSlugTouche(false)
