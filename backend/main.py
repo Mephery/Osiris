@@ -43,6 +43,7 @@ from disques import DisqueVm, config_proxmox, disques_de, valider_disques
 from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
 import vpn
 import vsphere
+import zabbix
 from auth import (
     hash_password, verify_password, create_token, valider_force_mot_de_passe,
     get_current_user, get_current_user_optional, require_admin
@@ -2119,6 +2120,41 @@ def _zabbix_context(machine: Machine, org: Optional[Organization],
     }
 
 
+def _zabbix_register_machine(mac: str) -> None:
+    """Tâche de fond : (re)crée l'hôte de la machine dans Zabbix quand elle est
+    déployée — même logique de collecteur que `_zabbix_context` (l'hyperviseur
+    l'emporte sur l'organisation). No-op si Zabbix n'est pas configuré, la machine
+    non supervisée, ou sans collecteur connu.
+
+    L'agent finit de toute façon par se signaler ; ceci ne fait qu'ANTICIPER la
+    création de l'hôte et lui poser le BON proxy + un inventaire, sans dépendre
+    d'une action d'auto-enregistrement côté Zabbix ni d'un réglage à la main.
+    """
+    if not zabbix.zabbix_configure():
+        return
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+        if not machine or not machine.supervised:
+            return
+        org = session.get(Organization, machine.organization_id) if machine.organization_id else None
+        hyperviseur = (session.get(Hypervisor, machine.hypervisor_id)
+                       if machine.hypervisor_id else None)
+        collecteur = ((hyperviseur.zabbix_server if hyperviseur else "") or
+                      (org.zabbix_server if org else "")).strip()
+        if not collecteur:
+            return
+        hostname = machine.hostname
+        result = zabbix.register_deployed_host(
+            hostname=hostname,
+            os_type=machine.os,
+            collector=collecteur,
+            org_name=org.name if org else "",
+            hw_model=machine.hw_model,
+            ip=(machine.ip_cidr or "").split("/")[0],
+        )
+    _hv_log.info("Zabbix : hôte %s → %s", hostname, result)
+
+
 @app.get("/bootstrap/linux")
 def get_linux_bootstrap():
     """
@@ -3292,6 +3328,11 @@ def report_machine_status(request: Request, mac: str, status: str, background_ta
     )
     if webhook_url:
         background_tasks.add_task(_send_webhook, webhook_url, machine_snapshot, status)
+    # Déploiement terminé → crée/maj l'hôte dans Zabbix (bon proxy + inventaire).
+    # En tâche de fond : un appel d'API lent ou en échec ne doit pas retarder la
+    # réponse à la machine, ni casser le déploiement. Idempotent (posté 2× à la fin).
+    if status == "deployed":
+        background_tasks.add_task(_zabbix_register_machine, clean_mac)
     return {"detail": "Statut mis à jour"}
 
 
