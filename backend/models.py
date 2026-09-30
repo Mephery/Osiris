@@ -418,6 +418,14 @@ class DriverPack(SQLModel, table=True):
     # Lenovo = Machine Type ("20s6,20s7"). Permet de désigner le bon pack sans passer
     # par le nom commercial — c'est une lettre qui sépare un T15 d'un T15g.
     hw_ids: str = Field(default="", index=True)
+    # « Réseau seul » : n'injecter hors-ligne QUE les pilotes réseau de ce pack,
+    # pas le pack entier. Le pack HP complet (22H2) injecté dans une image récente
+    # (Windows 11 24H2/25H2) fige la passe PnP de sysprep — « SPPNP … Waiting for
+    # device installation to start, Total = 0 » en boucle, puis « l'ordinateur a
+    # redémarré de manière inattendue » (constaté sur EliteBook 840 G9 le 29/09).
+    # Injecter seulement la carte réseau suffit au firstboot pour joindre OSIRIS ;
+    # le reste des pilotes arrive ensuite en ligne (Windows Update / inbox).
+    network_only: bool = Field(default=False)
     catalog_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

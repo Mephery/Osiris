@@ -114,6 +114,24 @@ REM Materiel virtuel : les pilotes sont inbox. Injecter le dossier complet ici
 REM coutait des heures de DISM pour du materiel qui n'existe pas.
 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=VM+:+pilotes+constructeurs+inutiles+(materiel+virtuel+standard)" >nul 2>&1
 echo [OSIRIS] VM - injection de drivers ignoree ^(pilotes inbox^)
+{% elif net_driver_infs is not none %}
+REM Pack marque "reseau seul" : on n'injecte QUE les pilotes reseau (Class=Net,
+REM sans co-installeur), un .inf a la fois. Injecter le pack COMPLET fige la passe
+REM PnP de sysprep — "SYSPRP SPPNP ... Waiting for device installation to start,
+REM Total = 0" en boucle puis "l'ordinateur a redemarre de maniere inattendue" —
+REM sur les images Windows 11 recentes (24H2/25H2), constate sur EliteBook 840 G9
+REM le 2026-09-29. La carte reseau suffit au firstboot pour joindre OSIRIS ; le
+REM reste des pilotes arrive ensuite en ligne (Windows Update / inbox).
+REM Chemins ENTRE guillemets : les .inf reseau peuvent vivre dans un dossier a
+REM espace ("HP Inc\..."), et un .inf ne finit jamais par "\", donc pas de risque
+REM que le \ echappe le guillemet fermant (contrairement a un dossier).
+echo [OSIRIS] Injection des pilotes reseau seul ^({{ net_driver_infs | length }}^)...
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Injection+pilotes+reseau+seul+({{ net_driver_infs | length }})+-+reste+via+Windows+Update" >nul 2>&1
+{% for inf in net_driver_infs %}
+if exist "Z:\{{ inf }}" dism /Image:W:\ /Add-Driver /Driver:"Z:\{{ inf }}" /ForceUnsigned
+{% endfor %}
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Pilotes+reseau+injectes+(reste+via+Windows+Update)" >nul 2>&1
+echo [OSIRIS] Pilotes reseau injectes ^(le reste viendra par Windows Update^)
 {% else %}
 echo [OSIRIS] Recherche de drivers constructeurs sur le partage...
 REM Chemin SANS guillemets : model_key n'a jamais d'espace, et un chemin quote

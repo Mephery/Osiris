@@ -3717,6 +3717,17 @@ def _build_winpe_script(mac: str) -> Response:
     # Si la machine a un pack explicite ET telecharge : injection ciblee de ce seul pack.
     driver_dir = _resolve_driver_dir(machine)
 
+    # Pack marque "reseau seul" : on ne passe au template que la liste des pilotes
+    # reseau (Class=Net, sans co-installeur), qu'il injectera un a un au lieu du
+    # dossier entier — le pack complet fige la passe sysprep sur certains modeles
+    # recents (cf. DriverPack.network_only). None = injection normale du dossier.
+    net_driver_infs = None
+    if driver_dir and driver_dir != "drivers":
+        with Session(engine) as dsession:
+            pack = _resolve_driver_pack(dsession, machine)
+            if pack and pack.network_only:
+                net_driver_infs = _network_driver_infs(pack)
+
     profile_ctx = _profile_for_template(profile, session)
     valider_hostname(machine.hostname)
     locale = profile_ctx["locale"].replace("_", "-")[:5]
@@ -3729,6 +3740,7 @@ def _build_winpe_script(mac: str) -> Response:
         win_index=profile_ctx["win_index"],
         locale=locale,
         driver_dir=driver_dir,
+        net_driver_infs=net_driver_infs,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -3792,33 +3804,42 @@ def _pack_for_model_name(session: Session, name: str) -> Optional[DriverPack]:
          if p.model_key.startswith(key) or key.startswith(p.model_key)), None)
 
 
-def _resolve_driver_dir(machine: Machine) -> str:
-    """Chemin du dossier de drivers a injecter, relatif au partage SMB (Z:), en
-    notation Windows (backslashes). '' = ne rien injecter ; 'drivers' = tout le
-    dossier (fallback historique) ; 'drivers\\<vendor>\\<key>' = pack cible.
+def _resolve_driver_pack(session: Session, machine: Machine) -> Optional[DriverPack]:
+    """Le pack de pilotes retenu pour cette machine, ou None (VM / rien trouve).
 
     Une VM ne recoit RIEN : son materiel est virtuel et standard (SATA + e1000 ont
     ete choisis exactement pour ca, les pilotes sont *inbox*). Aucun pack Dell/HP/
-    Lenovo ne peut correspondre a « Standard PC (Q35 + ICH9, 2009) », donc sans ce
-    court-circuit on retombe sur le fallback et DISM injecte les ~36 GB du dossier
-    entier — 2046 fichiers .inf a travers SMB, des heures de travail pour du
+    Lenovo ne peut correspondre a « Standard PC (Q35 + ICH9, 2009) ».
+    """
+    if machine.proxmox_vm_id:
+        return None
+    return (
+        session.get(DriverPack, machine.driver_pack_id)
+        if machine.driver_pack_id
+        # Aucun pack choisi a la main : plutot que de deverser les ~36 GB du
+        # dossier entier, on tente d'abord l'identifiant materiel remonte par
+        # WinPE, puis son nom commercial — c'est ce que vaut `hw_sysid` chez
+        # Dell et HP. `hw_model` en dernier : il n'est renseigne qu'au firstboot,
+        # donc absent du tout premier deploiement.
+        else (_pack_for_sysid(session, machine.hw_sysid)
+              or _pack_for_model_name(session, machine.hw_sysid)
+              or _pack_for_model_name(session, machine.hw_model))
+    )
+
+
+def _resolve_driver_dir(machine: Machine) -> str:
+    """Chemin du dossier de drivers a injecter, relatif au partage SMB (Z:), en
+    notation Windows (backslashes). '' = ne rien injecter (VM) ; 'drivers' = tout
+    le dossier (fallback historique) ; 'drivers\\<vendor>\\<key>' = pack cible.
+
+    Sans court-circuit VM, on retombe sur le fallback et DISM injecte les ~36 GB du
+    dossier entier — 2046 fichiers .inf a travers SMB, des heures de travail pour du
     materiel qui n'existera jamais. Constate sur SRV-WIN-ISO le 2026-08-05.
     """
     if machine.proxmox_vm_id:
         return ""
     with Session(engine) as session:
-        pack = (
-            session.get(DriverPack, machine.driver_pack_id)
-            if machine.driver_pack_id
-            # Aucun pack choisi a la main : plutot que de deverser les ~36 GB du
-            # dossier entier, on tente d'abord l'identifiant materiel remonte par
-            # WinPE, puis son nom commercial — c'est ce que vaut `hw_sysid` chez
-            # Dell et HP. `hw_model` en dernier : il n'est renseigne qu'au firstboot,
-            # donc absent du tout premier deploiement.
-            else (_pack_for_sysid(session, machine.hw_sysid)
-                  or _pack_for_model_name(session, machine.hw_sysid)
-                  or _pack_for_model_name(session, machine.hw_model))
-        )
+        pack = _resolve_driver_pack(session, machine)
     if not pack or pack.status != "ready" or not pack.local_path:
         return "drivers"
     share = WIN_SHARE_PATH.rstrip("/")
@@ -3826,6 +3847,60 @@ def _resolve_driver_dir(machine: Machine) -> str:
         return "drivers"
     rel = pack.local_path[len(share):].lstrip("/")
     return rel.replace("/", "\\") or "drivers"
+
+
+# GUID de la classe « Net » (cartes reseau, filaires ET Wi-Fi), tel qu'il apparait
+# dans la section [Version] d'un .inf : ClassGuid={4d36e972-...}.
+_NET_CLASS_GUID = "{4d36e972-e325-11ce-bfc1-08002be10318}"
+_CLASS_NET_RE = re.compile(r'(?im)^\s*Class\s*=\s*Net\b')
+
+
+def _inf_text(path: str) -> str:
+    """Lit un .inf en tolerant l'UTF-16 (BOM) comme l'ANSI/latin-1 : les deux
+    encodages se croisent dans un meme pack constructeur."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return raw.decode("utf-16")
+        except Exception:
+            pass
+    return raw.decode("latin-1", errors="ignore")
+
+
+def _network_driver_infs(pack: DriverPack) -> list[str]:
+    """Chemins (relatifs au partage Z:, en backslashs) des pilotes RESEAU d'un pack.
+
+    « Reseau » = Class=Net (Ethernet ET Wi-Fi), et SANS co-installeur. Le
+    co-installeur est justement ce qui fige la passe PnP de sysprep quand il est
+    incompatible avec le build Windows (cf. `DriverPack.network_only`) : on l'ecarte
+    donc, meme sur un pilote reseau. Il reste assez de pilotes reseau « nus » pour
+    que le firstboot atteigne OSIRIS ; le reste des pilotes vient ensuite en ligne.
+    """
+    root = pack.local_path
+    if not root or not os.path.isdir(root):
+        return []
+    share = WIN_SHARE_PATH.rstrip("/")
+    infs: list[str] = []
+    for dirpath, _, files in os.walk(root):
+        for name in files:
+            if not name.lower().endswith(".inf"):
+                continue
+            full = os.path.join(dirpath, name)
+            try:
+                txt = _inf_text(full)
+            except OSError:
+                continue
+            low = txt.lower()
+            if not (_CLASS_NET_RE.search(txt) or _NET_CLASS_GUID in low):
+                continue
+            if "coinstallers32" in low:      # co-installeur = risque sysprep
+                continue
+            if not full.startswith(share):
+                continue
+            rel = full[len(share):].lstrip("/").replace("/", "\\")
+            infs.append(rel)
+    return sorted(infs)
 
 
 @app.get("/winpe-script/{mac}")
