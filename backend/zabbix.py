@@ -28,6 +28,28 @@ ZABBIX_API_TOKEN = os.environ.get("ZABBIX_API_TOKEN", "")
 # Groupe d'hôtes où atterrissent les machines déployées. Un sous-groupe par
 # organisation est créé dessous (« <groupe>/<org> ») quand l'orga est connue.
 ZABBIX_DEPLOYED_GROUP   = os.environ.get("ZABBIX_DEPLOYED_GROUP", "")
+# Sous-groupe « <groupe>/<org> » par organisation ? Défaut NON (groupe plat) :
+# créer un sous-groupe exige `hostgroup.create`, que le jeton étroit `s_osiris`
+# n'a pas — et le groupe plat, lui, préexiste et suffit. À activer seulement si
+# le jeton a le droit de créer des groupes.
+ZABBIX_SUBGROUP_BY_ORG  = os.environ.get("ZABBIX_SUBGROUP_BY_ORG", "").strip().lower() in ("1", "true", "yes", "oui")
+
+
+def _parse_proxy_map(raw: str) -> dict:
+    """« ip=nom,ip2=nom2 » → {ip: nom}. Fait le pont entre le `zabbix_server`
+    (une IP, dont l'agent a besoin en `Server=`) et le NOM du proxy attendu par
+    l'API — l'API n'expose pas toujours l'adresse d'un proxy actif, donc on ne
+    peut pas déduire le nom de l'IP autrement."""
+    out = {}
+    for pair in raw.split(","):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            if k.strip() and v.strip():
+                out[k.strip()] = v.strip()
+    return out
+
+
+ZABBIX_PROXY_MAP        = _parse_proxy_map(os.environ.get("ZABBIX_PROXY_MAP", ""))
 ZABBIX_TEMPLATE_LINUX   = os.environ.get("ZABBIX_TEMPLATE_LINUX", "Linux by Zabbix agent active")
 ZABBIX_TEMPLATE_WINDOWS = os.environ.get("ZABBIX_TEMPLATE_WINDOWS", "Windows by Zabbix agent active")
 
@@ -74,22 +96,28 @@ def _proxy_fields(collector: str) -> dict:
     """
     if not collector:
         return {}
-    # `zabbix_server` peut être un NOM de proxy ou une IP (le champ sert d'abord de
-    # `Server=` à l'agent, où l'on met souvent l'IP). On tente donc les deux : le
-    # nom/host du proxy, et l'IP/DNS de son interface (proxy passif).
-    proxies = _call("proxy.get", {"output": ["proxyid", "host", "name"],
-                                  "selectInterface": ["ip", "dns"]})
-    def _candidates(p):
-        itf = p.get("interface") or {}
-        return (p.get("host"), p.get("name"), itf.get("ip"), itf.get("dns"))
-    match = next((p for p in proxies if collector in _candidates(p)), None)
-    if not match:
-        _log.warning("Zabbix : proxy %r introuvable, hôte supervisé par le serveur", collector)
-        return {}
-    pid = match["proxyid"]
-    if _api_major() >= 7:
-        return {"monitored_by": 1, "proxyid": pid}   # 1 = proxy
-    return {"proxy_hostid": pid}
+    # Valeurs acceptées pour retrouver le proxy : le `collector` tel quel (utile si
+    # c'est déjà un nom) ET son nom traduit par le mapping IP→nom. Le schéma du
+    # proxy a changé en 7.0/8.0 : `host` + interface (proxy passif) est devenu
+    # `name` + `address`, et `proxy_hostid` est devenu `proxyid` (+ `monitored_by`).
+    accept = {collector, ZABBIX_PROXY_MAP.get(collector, collector)}
+    major = _api_major()
+    if major >= 7:
+        proxies = _call("proxy.get", {"output": ["proxyid", "name", "address"]})
+        match = next((p for p in proxies if accept & {p.get("name"), p.get("address")}), None)
+        if match:
+            return {"monitored_by": 1, "proxyid": match["proxyid"]}   # 1 = proxy
+    else:
+        proxies = _call("proxy.get", {"output": ["proxyid", "host"],
+                                      "selectInterface": ["ip", "dns"]})
+        def _cand(p):
+            itf = p.get("interface") or {}
+            return {p.get("host"), itf.get("ip"), itf.get("dns")}
+        match = next((p for p in proxies if accept & _cand(p)), None)
+        if match:
+            return {"proxy_hostid": match["proxyid"]}
+    _log.warning("Zabbix : proxy %r introuvable, hôte supervisé par le serveur", collector)
+    return {}
 
 
 def _get_or_create_group(name: str) -> str:
@@ -126,7 +154,8 @@ def register_deployed_host(*, hostname: str, os_type: str, collector: str,
     if not zabbix_configure():
         return "skip:non-configure"
     try:
-        group_name = f"{ZABBIX_DEPLOYED_GROUP}/{org_name}" if org_name else ZABBIX_DEPLOYED_GROUP
+        group_name = (f"{ZABBIX_DEPLOYED_GROUP}/{org_name}"
+                      if ZABBIX_SUBGROUP_BY_ORG and org_name else ZABBIX_DEPLOYED_GROUP)
         groupid = _get_or_create_group(group_name)
         tmpl_name = ZABBIX_TEMPLATE_WINDOWS if os_type == "windows" else ZABBIX_TEMPLATE_LINUX
         templateid = _template_id(tmpl_name)
@@ -138,16 +167,27 @@ def register_deployed_host(*, hostname: str, os_type: str, collector: str,
                           "hardware": hw_model,
                           "notes": f"Déployé par OSIRIS{(' — ' + org_name) if org_name else ''}"},
         }
-        common.update(_proxy_fields(collector))
-        if templateid:
-            common["templates"] = [{"templateid": templateid}]
+        proxy = _proxy_fields(collector)
+        if collector and not proxy:
+            # Un collecteur est déclaré mais on ne sait pas le rattacher à un proxy :
+            # créer l'hôte « supervisé par le serveur » le rendrait MUET (l'agent
+            # actif parle à son proxy, qui ne connaîtrait pas cet hôte). On préfère
+            # ne rien créer et laisser une trace — il suffit d'ajouter la
+            # correspondance dans ZABBIX_PROXY_MAP pour le site concerné.
+            _log.warning("Zabbix : proxy introuvable pour %r → hôte %s NON créé "
+                         "(ajouter %r à ZABBIX_PROXY_MAP)", collector, hostname, collector)
+            return "skip:proxy-inconnu"
+        common.update(proxy)
 
         existing = _host_id(hostname)
         if existing:
+            # On ne re-passe PAS `templates` en mise à jour : re-lier un modèle déjà
+            # présent déclenche un « System error » (constaté en Zabbix 8.0), et le
+            # modèle a de toute façon été posé à la création (ou par l'agent).
             _call("host.update", {"hostid": existing, **common})
             return "updated"
 
-        _call("host.create", {
+        create = {
             "host": hostname,
             "interfaces": [{
                 "type": 1, "main": 1,           # 1 = agent
@@ -156,7 +196,10 @@ def register_deployed_host(*, hostname: str, os_type: str, collector: str,
                 "port": "10050",
             }],
             **common,
-        })
+        }
+        if templateid:
+            create["templates"] = [{"templateid": templateid}]
+        _call("host.create", create)
         return "created"
     except Exception as exc:      # noqa: BLE001 — on avale volontairement
         _log.warning("Zabbix : enregistrement de %r échoué : %s", hostname, exc)
