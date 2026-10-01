@@ -142,6 +142,21 @@ fi
 mkdir -p /etc/cloud/cloud.cfg.d
 printf 'preserve_hostname: true\n' > /etc/cloud/cloud.cfg.d/99-osiris-hostname.cfg
 
+# ── Desactivation IPv6 ─────────────────────────────────────────────────────────
+# Demande de securite (ticket 26421) : couper la couche IPv6 sur toutes les VM.
+# Drop-in sysctl plutot que parametre GRUB : effet IMMEDIAT (sans reboot), et
+# reversible d'un seul fichier. Le gabarit la portera aussi (rescellement) ; ici
+# c'est le filet qui garantit que TOUTE VM deployee l'a, meme clonee d'un master
+# pas encore rescelle.
+_log "Desactivation de la couche IPv6..."
+cat > /etc/sysctl.d/99-osiris-disable-ipv6.conf <<'IPV6'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+IPV6
+sysctl -p /etc/sysctl.d/99-osiris-disable-ipv6.conf > /dev/null 2>&1 \
+    || _log "AVERTISSEMENT : application sysctl IPv6 differee au prochain redemarrage"
+
 # ── Inventaire materiel ───────────────────────────────────────────────────────
 _log "Collecte des informations materiel..."
 HW_SERIAL=$(cat /sys/class/dmi/id/product_serial 2>/dev/null | tr -d '[:space:]') || HW_SERIAL=""

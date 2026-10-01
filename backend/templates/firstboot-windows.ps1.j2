@@ -65,6 +65,20 @@ while ($retries -lt 30) {
     }
 }
 
+# ── Desactivation IPv6 ─────────────────────────────────────────────────────────
+# Demande de securite (ticket 26421). DisabledComponents = 0xFF coupe TOUTES les
+# composantes IPv6 (methode Microsoft, KB929852). Effectif au prochain
+# redemarrage. Le gabarit la portera aussi (rescellement) ; ici, le filet garantit
+# que toute VM deployee l'a, meme clonee d'un master pas encore rescelle.
+Write-Log "Desactivation de la couche IPv6..."
+try {
+    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" `
+        -Name "DisabledComponents" -Value 0xFF -PropertyType DWord -Force | Out-Null
+    Write-Log "IPv6 desactive (DisabledComponents=0xFF, effectif au redemarrage)"
+} catch {
+    Write-Log "AVERTISSEMENT : desactivation IPv6 echouee : $_"
+}
+
 # ── Adresse MAC : identite CANONIQUE de la machine ───────────────────────────
 # On prend la MAC gravee au rendu du script cote serveur, et NON celle detectee en
 # live : avec un adaptateur USB-Ethernet, Windows voit la MAC du DONGLE, qui n'est
