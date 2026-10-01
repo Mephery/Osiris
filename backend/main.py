@@ -39,7 +39,8 @@ from jinja2 import Environment, FileSystemLoader
 import pyotp
 import qrcode
 from comptes import CompteVm, valider_compte
-from disques import DisqueVm, config_proxmox, disques_de, valider_disques
+from disques import (DisqueVm, config_proxmox, disques_de, valider_disques,
+                     schema_partition, valider_systeme, ROOT_GB_DEFAUT, SWAP_GB_DEFAUT)
 from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
 import vpn
 import vsphere
@@ -5615,7 +5616,8 @@ class VmCreateBody(SQLModel):
     folder: str = ""
     vcpus: int = 2
     ram_mb: int = 2048               # RAM en Mo
-    disk_gb: int = 20                # disque système en Go
+    disk_gb: int = 20                # Linux LVM : taille de / (racine) ; Windows : disque système
+    swap_gb: int = 2                 # Linux : taille du volume swap (LVM)
     # Ancien champ unique : un disque monté sur /data. Encore accepté d'un client
     # qui ne connaît pas `disques` (il en devient le premier). Windows : seul
     # champ disponible pour l'instant.
@@ -5643,6 +5645,24 @@ class VmCreateBody(SQLModel):
     # Script de post-installation propre a CETTE VM, joue a la fin du premier
     # demarrage, apres celui du profil. Voir Machine.post_script.
     post_script: str = ""
+
+
+class PartitionPreviewRequest(SQLModel):
+    """Entrée de l'aperçu de partitionnement (formulaire de création de VM)."""
+    root_gb: int = ROOT_GB_DEFAUT
+    swap_gb: int = SWAP_GB_DEFAUT
+    uefi: bool = True
+    disques: list[DisqueVm] = []
+
+
+@app.post("/vm/partition-preview", dependencies=[Depends(get_current_user)])
+def vm_partition_preview(body: PartitionPreviewRequest):
+    """Le schéma LVM résultant (tranches + taille totale du disque), pour l'aperçu
+    en direct du formulaire. Réutilise la validation et le calcul du backend : ce
+    que l'opérateur voit est EXACTEMENT ce qui sera provisionné."""
+    valider_systeme(body.root_gb, body.swap_gb)
+    extras = valider_disques(body.disques)
+    return schema_partition(body.root_gb, body.swap_gb, extras, body.uefi)
 
 
 def _rollback_vm_machine(user: User, body, hv_id: int, vm_id: int,

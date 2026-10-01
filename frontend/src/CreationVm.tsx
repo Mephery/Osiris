@@ -12,6 +12,7 @@ import { ResumeProfil } from './ResumeProfil'
 import { ChampEnCours, Spinner } from './Skeleton'
 import { IcoX } from './icons'
 import { MAX_DISQUES, erreursDisques, libelleDepuisMontage, nouveauDisque, type DisqueForm } from './disquesForm'
+import { schemaPartition, erreursSysteme, decrireTranche } from './partitionForm'
 import { erreurCompte } from './compteForm'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
@@ -247,6 +248,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const manquants = champsManquants(vmForm, Boolean(vmHvId), vmNode)
   // Linux seulement : sous Windows, la liste n'est pas envoyée
   const disquesInvalides = vmForm.os !== 'windows' && erreursDisques(vmForm.disques).length > 0
+  const systemeInvalide = vmForm.os !== 'windows' && erreursSysteme(vmForm.disk_gb, vmForm.swap_gb).length > 0
   const compteInvalide = vmForm.os !== 'windows' ? erreurCompte(vmForm.compte, profilEffectif?.default_user ?? '') : ''
   const clone = vmForm.boot_mode !== 'pxe'
   // Stockage et réseau dépendent du nœud : tant qu'il n'est pas connu, ils attendent aussi
@@ -610,13 +612,16 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
           <label className="flex items-center gap-1 text-[10px] text-slate-500">RAM Mo
             <input type="number" min={512} step={512} value={vmForm.ram_mb} onChange={e => setVmForm(f => ({...f, ram_mb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
           </label>
-          <label className="flex items-center gap-1 text-[10px] text-slate-500">Système Go
+          <label className="flex items-center gap-1 text-[10px] text-slate-500" title={vmForm.os === 'windows' ? 'Disque système' : 'Taille de la racine / (volume LVM)'}>{vmForm.os === 'windows' ? 'Système Go' : '/ (racine) Go'}
             <input type="number" min={8} value={vmForm.disk_gb} onChange={e => setVmForm(f => ({...f, disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
           </label>
-          {/* Windows : un seul disque de données pour l'instant */}
-          {vmForm.os === 'windows' && (
+          {vmForm.os === 'windows' ? (
             <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Disque de données. 0 = aucun.">Données Go
               <input type="number" min={0} value={vmForm.data_disk_gb} onChange={e => setVmForm(f => ({...f, data_disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+            </label>
+          ) : (
+            <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Volume d'échange (swap), en LVM.">swap Go
+              <input type="number" min={1} value={vmForm.swap_gb} onChange={e => setVmForm(f => ({...f, swap_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
             </label>
           )}
         </div>
@@ -658,12 +663,22 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
             <div className="flex items-center gap-3">
               {vmForm.disques.length < MAX_DISQUES && (
                 <button type="button" onClick={() => setVmForm(f => ({ ...f, disques: [...f.disques, nouveauDisque(f.disques)] }))}
-                  className="osiris-btn-ghost text-[10px] border border-slate-700 rounded px-2 py-0.5">+ Ajouter un disque</button>
+                  className="osiris-btn-ghost text-[10px] border border-slate-700 rounded px-2 py-0.5">+ Ajouter un volume</button>
               )}
               <p className={aide}>
-                {vmForm.disques.length === 0 ? 'Aucun disque supplémentaire.' : "LVM : agrandissable à chaud. xfs ne se réduit jamais."}
+                {vmForm.disques.length === 0 ? 'Base seule : /boot + swap + / (LVM). Ajoute un volume pour /home, /backup…' : 'Chaque volume est un LV du groupe LVM — agrandissable à chaud. xfs ne se réduit jamais.'}
               </p>
             </div>
+            {erreursSysteme(vmForm.disk_gb, vmForm.swap_gb).map(e => <p key={e} className="text-[10px] text-amber-400">⚠ {e}</p>)}
+            {(() => {
+              const schema = schemaPartition(vmForm.disk_gb, vmForm.swap_gb, vmForm.disques, true)
+              return (
+                <div className="rounded border border-slate-700 bg-slate-900/40 p-2 space-y-0.5">
+                  <p className="text-[10px] text-slate-400">Aperçu — <span className="font-mono text-slate-200">{schema.total_gb} Go</span> · UEFI · groupe LVM <span className="font-mono">{schema.vg}</span></p>
+                  {schema.tranches.map(t => <p key={t.montage} className="text-[10px] font-mono text-slate-300">{decrireTranche(t)}</p>)}
+                </div>
+              )
+            })()}
           </div>
         )}
       </section>
@@ -769,7 +784,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
         )}
         <div className="flex gap-2">
           <button type="button" onClick={onClose} className="osiris-btn-ghost text-xs px-4 border border-slate-700 rounded">Annuler</button>
-          <button type="submit" disabled={vmInaccessible || manquants.length > 0 || disquesInvalides || Boolean(compteInvalide)} className="osiris-btn text-xs px-4 flex-1 disabled:opacity-50">
+          <button type="submit" disabled={vmInaccessible || manquants.length > 0 || disquesInvalides || systemeInvalide || Boolean(compteInvalide)} className="osiris-btn text-xs px-4 flex-1 disabled:opacity-50">
             Vérifier avant de créer →
           </button>
         </div>

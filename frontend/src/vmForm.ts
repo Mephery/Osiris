@@ -223,7 +223,7 @@ export const LIBELLE_MODE: Record<ModeVm, string> = {
 /** Le formulaire de création de VM à l'ouverture. Ici plutôt que dans le composant
  *  pour que le test du récapitulatif en dérive ses champs : un champ ajouté ici
  *  sans être montré au récapitulatif fait échouer ce test. */
-export const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, data_disk_gb: 0, disques: [] as DisqueForm[], compte: COMPTE_VIDE as CompteForm, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
+export const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 200, swap_gb: 2, data_disk_gb: 0, disques: [] as DisqueForm[], compte: COMPTE_VIDE as CompteForm, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
 
 export type ChargeVm = ReturnType<typeof buildCreateVmPayload<typeof FORMULAIRE_VIDE>>
 
@@ -292,8 +292,8 @@ export const recapVm = (c: ChargeVm, ctx: ContexteRecap): SectionRecap[] => {
             champs: ['ip_cidr', 'gateway', 'dns_servers'] },
     ] },
     { titre: 'Matériel', lignes: [
-      { texte: `${c.vcpus} vCPU · ${tailleRam(c.ram_mb)} RAM · disque système ${c.disk_gb} Go`,
-        champs: ['vcpus', 'ram_mb', 'disk_gb'] },
+      { texte: `${c.vcpus} vCPU · ${tailleRam(c.ram_mb)} RAM · ${c.os === 'windows' ? `disque ${c.disk_gb} Go` : `/ ${c.disk_gb} Go · swap ${c.swap_gb} Go`}`,
+        champs: ['vcpus', 'ram_mb', 'disk_gb', 'swap_gb'] },
       // Chaque disque sur sa ligne : c'est ici qu'on relit un point de montage
       ...(c.disques.length
         ? c.disques.map(d => ({ texte: decrireDisque(d), champs: ['disques', 'data_disk_gb'] as (keyof ChargeVm)[] }))

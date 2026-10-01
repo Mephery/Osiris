@@ -23,6 +23,58 @@ from sqlmodel import SQLModel
 
 MAX_DISQUES = 4
 SYSTEMES = ("ext4", "xfs")
+
+# ── Schéma de partition du disque système (gabarit LVM, convention figée) ───────
+# UEFI : partition EFI + /boot, puis UN groupe LVM « osiris » qui porte le système
+# (/ = LV root), le swap (LV) et les volumes extras (LV). Un seul disque, comme le
+# standard de l'équipe (cf. leur lsblk). Le gabarit livre un / MINIMAL avec de
+# l'espace libre dans le VG : l'agent AGRANDIT / et CRÉE les LV au premier
+# démarrage — on ne réduit jamais un système monté.
+EFI_MB = 512            # partition système EFI (UEFI)
+BOOT_GB = 1             # /boot (demande de l'équipe : >= 1 Go, plus sûr)
+VG_NOM = "osiris"       # nom du groupe de volumes LVM du gabarit
+ROOT_GB_DEFAUT = 200    # taille de / par défaut (modifiable)
+SWAP_GB_DEFAUT = 2      # taille du swap par défaut (modifiable)
+ROOT_GB_MIN = 10        # en deçà, un serveur ne tient pas
+SWAP_GB_MIN = 1
+
+
+def schema_partition(root_gb: int = ROOT_GB_DEFAUT, swap_gb: int = SWAP_GB_DEFAUT,
+                     extras: list[dict] | None = None, uefi: bool = True) -> dict:
+    """Le schéma complet d'un disque système LVM : la liste des « tranches » (pour
+    l'aperçu du formulaire) et la TAILLE TOTALE du disque à provisionner.
+
+    Un seul disque : [EFI] + /boot + VG osiris { swap, /, extras… }. Les tailles
+    s'additionnent — c'est cette somme que l'hyperviseur doit créer.
+    """
+    extras = extras or []
+    tranches = []
+    if uefi:
+        tranches.append({"nom": "EFI", "montage": "/boot/efi", "taille_gb": EFI_MB / 1024,
+                         "fs": "vfat", "type": "partition"})
+    tranches.append({"nom": "boot", "montage": "/boot", "taille_gb": BOOT_GB,
+                     "fs": "ext4", "type": "partition"})
+    tranches.append({"nom": "swap", "montage": "swap", "taille_gb": swap_gb,
+                     "fs": "swap", "type": "lvm"})
+    tranches.append({"nom": "root", "montage": "/", "taille_gb": root_gb,
+                     "fs": "ext4", "type": "lvm"})
+    for d in extras:
+        tranches.append({"nom": d["libelle"], "montage": d["point_montage"],
+                         "taille_gb": d["taille_gb"], "fs": d["systeme_fichiers"],
+                         "type": "lvm"})
+    total = sum(t["taille_gb"] for t in tranches)
+    return {"vg": VG_NOM, "uefi": uefi, "tranches": tranches,
+            "total_gb": int(total) + (1 if total != int(total) else 0)}
+
+
+def valider_systeme(root_gb: int, swap_gb: int) -> None:
+    """Garde-fous sur / et swap, ou un 422 qui dit quoi corriger."""
+    if not ROOT_GB_MIN <= root_gb <= 16384:
+        raise HTTPException(status_code=422,
+                            detail=f"La taille de / doit être comprise entre {ROOT_GB_MIN} et 16384 Go.")
+    if not SWAP_GB_MIN <= swap_gb <= 256:
+        raise HTTPException(status_code=422,
+                            detail=f"La taille du swap doit être comprise entre {SWAP_GB_MIN} et 256 Go.")
 # xfs limite l'étiquette à 12 caractères : la même borne pour tous, pour qu'un
 # changement de système de fichiers ne rende pas un libellé soudain invalide.
 LIBELLE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,11}$")
