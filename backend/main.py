@@ -6580,9 +6580,11 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
 
     elif body.boot_mode == "template":
         # ── Chemin template : clone nu (Windows sysprepé ou Linux) ────────────────
-        # Ni user-data, ni snippet, ni lecteur cloud-init : le clone porte déjà tout
-        # ce qu'il faut (agent d'amorçage cuit dans le template). Il lit sa propre
-        # MAC au premier démarrage et rappelle OSIRIS, qui lui sert son script.
+        # Ni user-data, ni snippet : le clone porte déjà tout ce qu'il faut (agent
+        # d'amorçage cuit dans le template). Il lit sa propre MAC au premier
+        # démarrage et rappelle OSIRIS, qui lui sert son script. Le lecteur
+        # cloud-init du gabarit, s'il en a un, reste : c'est lui qui adapte le
+        # réseau de l'image à la nouvelle carte (cf. plus bas).
         await _cloner_template(h, body, vm_id)
 
         # Matériel selon l'OS, comme à la création PXE : Windows en SATA + e1000
@@ -6613,7 +6615,14 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
         # et il garde une référence vers une ISO qui peut être supprimée ou mise à
         # jour. On l'ôte quand il est là.
         conf = await _proxmox_get(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config")
-        a_retirer = [k for k in ("ide2",) if "cdrom" in str(conf.get(k, ""))]
+        # Seulement un vrai CD (ISO). Le LECTEUR CLOUD-INIT d'un gabarit Linux est
+        # lui aussi « media=cdrom », et il emportait tout avec lui : sans lui,
+        # cloud-init se désactive, et la configuration réseau de l'image — qui
+        # vise la carte de la VM de CONSTRUCTION par son adresse MAC — ne
+        # correspond plus à rien. Le clone démarrait carte éteinte, sans jamais
+        # demander d'adresse (vu le 07/10 sur FIT, gabarit Ubuntu 9006).
+        ide2 = str(conf.get("ide2", ""))
+        a_retirer = ["ide2"] if "cdrom" in ide2 and "cloudinit" not in ide2 else []
         # Le mot de passe cloud-init du gabarit : jamais hérité (cf. chemin cloud-init)
         if conf.get("cipassword"):
             a_retirer.append("cipassword")
