@@ -193,3 +193,32 @@ def test_la_famille_vient_de_l_ostype_proxmox(monkeypatch):
     monkeypatch.setattr(main, "_config_vm", config)
     modeles = asyncio.run(main.ProxmoxProvider.list_all_templates(None))
     assert [m["famille"] for m in modeles] == ["windows", "linux", ""]
+
+
+# ── Le scellement constate le groupe LVM ──────────────────────────────────────
+
+@pytest.mark.parametrize("vg_present", [True, False])
+def test_le_script_linux_annonce_le_groupe_lvm_constate(tmp_path, vg_present):
+    script = main.get_linux_bootstrap().body.decode()
+    (tmp_path / "uuid").write_text(UUID)
+    faux = ('curl() { for a in "$@"; do echo "ARG $a" >&2; done; }\n'
+            f'vgs() {{ [ "$1" = osiris ] && {"true" if vg_present else "false"}; }}\n'
+            'hostname() { echo tpl; }\nOSIRIS_URL=http://osiris.test\n')
+    r = subprocess.run(["bash", "-c", faux + _annonce(script)], capture_output=True, text=True,
+                       timeout=30, env={"PATH": "/usr/bin:/bin", "OSIRIS_PRODUCT_UUID": str(tmp_path / "uuid")})
+    corps = next(l for l in r.stderr.splitlines() if l.startswith("ARG {"))
+    assert f'"lvm":{"true" if vg_present else "false"}' in corps
+
+
+def test_le_scellement_enregistre_et_corrige_la_declaration_lvm(client, clean_db):
+    _enregistrer(client, lvm=True)
+    assert main._annoter_gabarits([{"vmid": 1, "name": "t", "uuid": UUID}])[0]["osiris"]["lvm"] is True
+    _enregistrer(client)                       # rescellé sans groupe : le disque fait foi
+    with Session(engine) as s:
+        assert s.exec(select(GabaritOsiris)).one().lvm is False
+
+
+def test_un_gabarit_windows_n_est_jamais_lvm(client, clean_db):
+    _enregistrer(client, os="windows", lvm=True)
+    with Session(engine) as s:
+        assert s.exec(select(GabaritOsiris)).one().lvm is False

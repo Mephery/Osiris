@@ -2190,6 +2190,7 @@ def get_linux_bootstrap():
         osiris_ip=_osiris_ip() if OSIRIS_URL_HTTPS else "",
         url_installation=OSIRIS_BASE_URL,
         empreinte=_empreinte_agent("linux"),
+        vg=VG_NOM,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -2263,6 +2264,8 @@ class ScellementBody(SQLModel):
     empreinte: str = ""
     os: str = ""
     nom: str = ""
+    # Le groupe LVM du gabarit, constaté sur le disque au scellement
+    lvm: bool = False
 
 
 @app.post("/bootstrap/sealed", status_code=204)
@@ -2285,6 +2288,9 @@ def enregistrer_scellement(request: Request, body: ScellementBody):
         g.empreinte = (body.empreinte or "")[:64]
         g.os = body.os
         g.nom = (body.nom or "")[:128]
+        # Le disque fait foi : un rescellement sans groupe retire une déclaration
+        # manuelle devenue fausse, et le formulaire cesse de découper en LVM.
+        g.lvm = body.lvm if body.os == "linux" else False
         g.scelle_le = datetime.now(timezone.utc)
         session.add(g)
         session.commit()

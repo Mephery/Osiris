@@ -566,10 +566,14 @@ if [ "$SEAL" -eq 1 ]; then
     # modele, et chaque clone en recoit un neuf. Empreinte = version de l'agent
     # grave ici, pour reperer plus tard un gabarit a resceller.
     _uuid=$(cat "${OSIRIS_PRODUCT_UUID:-/sys/class/dmi/id/product_uuid}" 2>/dev/null | tr 'A-F' 'a-f')
+    # Construit avec le groupe LVM « {{ vg }} » : ses clones naitront sur UN disque,
+    # decoupe au premier demarrage. Constate ici, sur le disque, et non declare.
+    _lvm=false
+    command -v vgs > /dev/null 2>&1 && vgs {{ vg }} > /dev/null 2>&1 && _lvm=true
     if [ -n "$_uuid" ] && curl -sf -X POST "$OSIRIS_URL/bootstrap/sealed" \
             -H "Content-Type: application/json" --max-time 15 \
-            -d "{\"uuid\":\"$_uuid\",\"empreinte\":\"{{ empreinte }}\",\"os\":\"linux\",\"nom\":\"$(hostname)\"}" > /dev/null; then
-        echo "[OSIRIS] Gabarit enregistre aupres d'OSIRIS (agent {{ empreinte }})."
+            -d "{\"uuid\":\"$_uuid\",\"empreinte\":\"{{ empreinte }}\",\"os\":\"linux\",\"nom\":\"$(hostname)\",\"lvm\":$_lvm}" > /dev/null; then
+        echo "[OSIRIS] Gabarit enregistre aupres d'OSIRIS (agent {{ empreinte }}, LVM : $_lvm)."
     else
         echo "[OSIRIS] AVERTISSEMENT : OSIRIS n'a pas enregistre ce gabarit."
         echo "         Il faudra le marquer a la main : Infrastructure > Gabarits."
