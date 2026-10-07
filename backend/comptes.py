@@ -22,6 +22,11 @@ RESERVES = {"root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail"
             "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats", "nobody",
             "_apt", "messagebus", "sshd", "zabbix", "polkitd", "syslog", "uuidd",
             "tcpdump", "tss", "landscape", "fwupd-refresh", "usbmux", "dnsmasq"}
+# Compte de CONSTRUCTION des gabarits Linux (cf. preseed-gabarit-debian) : il sert
+# à entretenir le modèle et le premier démarrage le SUPPRIME de chaque clone.
+# Réservé : un compte de personne de ce nom serait effacé au déploiement.
+COMPTE_GABARIT = "osiris-gabarit"
+RESERVES.add(COMPTE_GABARIT)
 TYPES_CLE = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
              "ecdsa-sha2-nistp521", "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
 

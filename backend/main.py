@@ -38,7 +38,7 @@ from jinja2 import Environment, FileSystemLoader
 
 import pyotp
 import qrcode
-from comptes import CompteVm, valider_compte
+from comptes import COMPTE_GABARIT, CompteVm, valider_compte
 from disques import (DisqueVm, config_proxmox, disques_de, valider_disques,
                      schema_partition, valider_systeme, ROOT_GB_DEFAUT, SWAP_GB_DEFAUT,
                      VG_NOM)
@@ -2067,6 +2067,7 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
         partition_vg=VG_NOM,
         root_gb=root_gb,
         swap_gb=swap_gb,
+        compte_gabarit=COMPTE_GABARIT,
     )
 
 
@@ -2444,6 +2445,7 @@ def get_preseed_gabarit_debian():
     password_hash = sha512_crypt.using(rounds=100000).hash(secrets.token_urlsafe(24))
     content = jinja_env.get_template("preseed-gabarit-debian.cfg.j2").render(
         password_hash=password_hash,
+        compte_gabarit=COMPTE_GABARIT,
     )
     return Response(content=content, media_type="text/plain")
 

@@ -44,10 +44,11 @@ d-i clock-setup/ntp boolean true
 # Mot de passe ALÉATOIRE régénéré à CHAQUE téléchargement de ce preseed et jamais
 # stocké : un gabarit en cours de construction n'expose aucun identifiant connu.
 # Le scellement OSIRIS retire/rote ensuite les secrets, et le compte final est
-# injecté par clone.
+# injecté par clone. Ce compte-ci reste sur le MODÈLE pour sa maintenance, mais
+# le premier démarrage le supprime de chaque clone.
 d-i passwd/root-login boolean false
-d-i passwd/user-fullname string osiris-gabarit
-d-i passwd/username string osiris-gabarit
+d-i passwd/user-fullname string {{ compte_gabarit }}
+d-i passwd/username string {{ compte_gabarit }}
 d-i passwd/user-password-crypted password {{ password_hash }}
 d-i passwd/user-default-groups string sudo
 

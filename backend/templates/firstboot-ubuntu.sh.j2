@@ -434,6 +434,32 @@ fi
 unset _root_pw
 {% endif %}
 
+{% if compte_gabarit %}
+# ── Compte de construction du gabarit ─────────────────────────────────────────
+# Le gabarit est construit et entretenu avec ce compte (sudo, mot de passe de
+# maintenance). Le clone en heritait : le MEME compte sudo, au MEME mot de passe,
+# sur chaque VM. On le retire ici ; le modele eteint le garde pour sa maintenance.
+# Script servi par OSIRIS : l'effet vaut pour tous les gabarits, sans rescellement.
+# Jamais s'il est aussi le compte d'administration du profil : on fermerait la
+# porte qu'on vient d'ouvrir.
+_gabarit={{ compte_gabarit | bash_squote }}
+if [ "$_gabarit" != {{ (profile.default_user or '') | bash_squote }} ] \
+        && id -u "$_gabarit" > /dev/null 2>&1; then
+    # Un processus ouvert sous ce compte ferait refuser userdel
+    pkill -KILL -u "$_gabarit" > /dev/null 2>&1 || true
+    # userdel avertit (boite mail absente…) sans echouer : on juge sur le RESULTAT
+    userdel -r "$_gabarit" > /dev/null 2>&1 || true
+    rm -f "/etc/sudoers.d/$_gabarit"
+    if id -u "$_gabarit" > /dev/null 2>&1; then
+        _log "AVERTISSEMENT : compte de construction $_gabarit NON supprime - le retirer a la main"
+        _osiris_log "compte $_gabarit : suppression echouee, compte sudo du gabarit toujours present"
+    else
+        _log "Compte de construction $_gabarit supprime"
+    fi
+fi
+unset _gabarit
+{% endif %}
+
 # ── Partitionnement des disques ───────────────────────────────────────────────
 # Deux modeles coexistent pendant la transition de rescellement :
 #  - gabarit rescelle (groupe LVM « {{ partition_vg }} » present) : UN seul groupe,
