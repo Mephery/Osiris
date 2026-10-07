@@ -108,8 +108,13 @@ d-i partman-basicfilesystems/no_swap boolean false
 #  • open-vm-tools  -> vSphere : c'est vmtoolsd qui lit le guestinfo au clone ;
 #  • qemu-guest-agent -> Proxmox.
 # Chacun ne sert que sur sa plateforme ; l'autre dort, sans nuire.
+# cloud-init : SEUL canal par lequel un clone Proxmox reçoit son adresse (lecteur
+# NoCloud de Proxmox) — sans lui, un clone sur un VLAN sans DHCP n'a aucun réseau,
+# et le scellement a de toute façon retiré la configuration de construction.
+# Limité à NoCloud (cf. late_command) : sur vSphere, sans ce lecteur, il se
+# désactive au démarrage au lieu de sonder d'autres sources pendant des minutes.
 tasksel tasksel/first multiselect standard, ssh-server
-d-i pkgsel/include string curl wget openssh-server sudo lvm2 cloud-guest-utils open-vm-tools qemu-guest-agent efibootmgr
+d-i pkgsel/include string curl wget openssh-server sudo lvm2 cloud-guest-utils open-vm-tools qemu-guest-agent efibootmgr cloud-init
 d-i pkgsel/upgrade select full-upgrade
 popularity-contest popularity-contest/participate boolean false
 
@@ -121,6 +126,7 @@ d-i grub-installer/with_other_os boolean false
 # Tolérant (|| true) : une plateforme n'a pas forcément le service de l'autre actif,
 # et un enable raté ne doit pas faire échouer la construction du gabarit.
 d-i preseed/late_command string \
+ printf 'datasource_list: [ NoCloud ]\n' > /target/etc/cloud/cloud.cfg.d/99-osiris-datasource.cfg ; \
  in-target systemctl enable open-vm-tools || true ; \
  in-target systemctl enable qemu-guest-agent || true ; \
  in-target systemctl enable ssh || true
