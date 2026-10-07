@@ -1470,11 +1470,18 @@ def _profile_for_template(p: Profile, session: Session | None = None) -> dict:
         "set_root_password": p.set_root_password,
         "vm_data_disk_gb": p.vm_data_disk_gb,
         # Temps et depots : appliques par cloud-init lui-meme (directives natives),
-        # donc valables meme quand la machine ne joint pas OSIRIS.
-        "ntp_servers": [x.strip() for x in (p.ntp_servers or "").split(",") if x.strip()],
+        # donc valables meme quand la machine ne joint pas OSIRIS. Les serveurs de
+        # temps sont AUSSI ecrits par le premier demarrage (clone nu, sans
+        # cloud-init) dans des fichiers de configuration : seul un nom ou une
+        # adresse passe, jamais de quoi y glisser une directive.
+        "ntp_servers": [x.strip() for x in (p.ntp_servers or "").split(",")
+                        if _NTP_RE.fullmatch(x.strip())],
         "apt_mirror": (p.apt_mirror or "").strip(),
         "apt_proxy": (p.apt_proxy or "").strip(),
     }
+
+
+_NTP_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.:-]{0,252})")
 
 
 def _resolve_profile(session: Session, machine: Machine) -> Profile:

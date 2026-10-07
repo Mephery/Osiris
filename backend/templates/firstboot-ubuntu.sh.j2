@@ -157,6 +157,37 @@ IPV6
 sysctl -p /etc/sysctl.d/99-osiris-disable-ipv6.conf > /dev/null 2>&1 \
     || _log "AVERTISSEMENT : application sysctl IPv6 differee au prochain redemarrage"
 
+{% if profile.ntp_servers %}
+# ── Serveurs de temps du profil ───────────────────────────────────────────────
+# cloud-init les pose sur le chemin « clone + cloud-init » ; un clone NU n'a que
+# ce script. Sans ce bloc, il gardait les pools publics de l'image — injoignables
+# derriere un pare-feu — et derivait. Pose AVANT la jonction au domaine :
+# Kerberos refuse toute authentification au-dela de cinq minutes d'ecart.
+_ntp_profil="{{ profile.ntp_servers | join(' ') }}"
+if systemctl list-unit-files chrony.service 2>/dev/null | grep -q chrony; then
+    # chrony : nos sources dans sources.d, et les pools de l'image neutralises —
+    # sinon il pourrait continuer a choisir l'un d'eux.
+    mkdir -p /etc/chrony/sources.d
+    : > /etc/chrony/sources.d/osiris.sources
+    for _s in $_ntp_profil; do printf 'server %s iburst\n' "$_s" >> /etc/chrony/sources.d/osiris.sources; done
+    sed -i -E 's/^[[:space:]]*(pool|server)[[:space:]]/# osiris: &/' /etc/chrony/chrony.conf 2>/dev/null || true
+    grep -q '^sourcedir /etc/chrony/sources.d' /etc/chrony/chrony.conf 2>/dev/null \
+        || echo 'sourcedir /etc/chrony/sources.d' >> /etc/chrony/chrony.conf
+    systemctl restart chrony > /dev/null 2>&1 \
+        && _log "Serveurs de temps (chrony) : $_ntp_profil" \
+        || _log "AVERTISSEMENT : chrony n'a pas redemarre - serveurs de temps non appliques"
+else
+    # systemd-timesyncd : NTP= remplace la liste, FallbackNTP= vide retire les
+    # pools publics de secours.
+    mkdir -p /etc/systemd/timesyncd.conf.d
+    printf '[Time]\nNTP=%s\nFallbackNTP=\n' "$_ntp_profil" > /etc/systemd/timesyncd.conf.d/osiris.conf
+    timedatectl set-ntp true > /dev/null 2>&1 || true
+    systemctl restart systemd-timesyncd > /dev/null 2>&1 \
+        && _log "Serveurs de temps (timesyncd) : $_ntp_profil" \
+        || _log "AVERTISSEMENT : systemd-timesyncd absent ou arrete - serveurs de temps non appliques"
+fi
+{% endif %}
+
 # ── Inventaire materiel ───────────────────────────────────────────────────────
 _log "Collecte des informations materiel..."
 HW_SERIAL=$(cat /sys/class/dmi/id/product_serial 2>/dev/null | tr -d '[:space:]') || HW_SERIAL=""
@@ -908,8 +939,15 @@ fi
 _ntp_src=$(timedatectl show-timesync --property=ServerName --value 2>/dev/null)
 [ -z "$_ntp_src" ] && _ntp_src=$(chronyc -n sources 2>/dev/null | awk '/^\^\*/{print $2}' | head -1)
 _ntp_sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null)
-if [ -n "$_ntp_src" ]; then
+# Une source qui n'est PAS du profil n'est pas un succes : c'etait le cas de
+# tous les clones nus jusqu'au 07/10 (pool Debian, jamais synchronise), et le
+# test repondait OK.
+_ntp_du_profil=false
+for _s in {{ profile.ntp_servers | join(' ') }}; do [ "$_s" = "$_ntp_src" ] && _ntp_du_profil=true; done
+if [ -n "$_ntp_src" ] && [ "$_ntp_du_profil" = true ]; then
     _add_test "Serveur de temps" true "$_ntp_src (synchronise : ${_ntp_sync:-inconnu})"
+elif [ -n "$_ntp_src" ]; then
+    _add_test "Serveur de temps" false "$_ntp_src n'est pas un serveur du profil ({{ profile.ntp_servers | join(', ') }})"
 else
     _add_test "Serveur de temps" false "aucune source de temps active"
 fi

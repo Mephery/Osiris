@@ -137,8 +137,9 @@ def test_le_verdict_porte_sur_la_source_pas_sur_la_synchronisation():
     cesserait vite d'être lu — le verdict porte donc sur la présence d'une source
     active, et l'état de synchro voyage dans le détail."""
     script = _firstboot(["10.0.0.1"])
-    verdict = script.split('if [ -n "$_ntp_src" ]')[1].split("fi")[0]
+    verdict = script.split('if [ -n "$_ntp_src" ] && [ "$_ntp_du_profil" = true ]')[1].split("elif")[0]
     assert '"Serveur de temps" true' in verdict
+    assert "NTPSynchronized" not in verdict and "_ntp_sync\"" not in verdict
     assert "synchronise" in verdict, "l'état de synchro doit rester visible, en détail"
 
 
