@@ -343,6 +343,11 @@ class Machine(SQLModel, table=True):
     # clé SSH, sudo. Relu par le premier démarrage, y compris lors d'un
     # redéploiement. « » = aucun.
     compte: str = Field(default="")
+    # Découpage LVM d'un clone de gabarit LVM (cf. disques.py) : taille de « / »
+    # et du swap, relues par le premier démarrage. Les `disques` sont alors des
+    # LV du même groupe, pas des disques séparés. None = hors découpage LVM.
+    root_gb: Optional[int] = Field(default=None)
+    swap_gb: Optional[int] = Field(default=None)
     # Empreinte (SHA-256) du jeton de la machine, cf. jetons.py. Vide = aucun jeton
     # remis depuis l'ouverture de la fenêtre : la prochaine demande de script en
     # recevra un. Le jeton en clair n'est JAMAIS en base.
@@ -518,4 +523,7 @@ class GabaritOsiris(SQLModel, table=True):
     empreinte: str = Field(default="")
     os: str = Field(default="")                    # "linux" | "windows" | "" (inconnu)
     nom: str = Field(default="")                   # nom d'hôte au scellement, pour mémoire
+    # Construit avec le groupe LVM « osiris » : ses clones naissent sur UN disque,
+    # découpé au premier démarrage. Déclaré à la main (Infrastructure › Gabarits).
+    lvm: bool = Field(default=False)
     scelle_le: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

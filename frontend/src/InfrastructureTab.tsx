@@ -98,6 +98,20 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
     }).catch(err => toast.error(err.message))
   }
 
+  // Rien, côté hyperviseur, ne dit qu'un gabarit porte le groupe LVM « osiris » :
+  // on le déclare ici. Le formulaire de VM propose alors /, swap et volumes en
+  // LV sur UN disque, au lieu du disque système + disques séparés.
+  const basculerLvm = (hvId: number, t: ProxmoxTemplate) => {
+    const lvm = !t.osiris?.lvm
+    fetch(`${API_URL}/hypervisors/${hvId}/templates/${t.vmid}/osiris/lvm`, {
+      method: 'PUT', headers: { ...authHeader(token), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lvm }),
+    }).then(r => lireReponse(r, 'Déclaration refusée')).then(() => {
+      toast.success(lvm ? `${t.name} déclaré LVM` : `${t.name} n'est plus déclaré LVM`)
+      chargerGabarits(hvId)
+    }).catch(err => toast.error(err.message))
+  }
+
   const handleTestHv = (id: number) => {
     setHvTesting(prev => ({ ...prev, [id]: true }))
     setHvTestResult(prev => ({ ...prev, [id]: null }))
@@ -265,6 +279,15 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
                               <span className="text-[10px] text-amber-400" title="Scellé avec une version antérieure de l'agent : le resceller pour lui donner les derniers correctifs.">agent ancien — à resceller</span>
                             ) : (
                               <span className="text-[10px] text-slate-400" title="Marqué à la main : OSIRIS ne sait pas avec quelle version de l'agent il a été scellé.">gabarit OSIRIS · agent inconnu</span>
+                            )}
+                            {t.osiris && t.osiris.os !== 'windows' && (
+                              <button onClick={() => basculerLvm(h.id, t)}
+                                title={t.osiris.lvm
+                                  ? 'Déclaré construit avec le groupe LVM « osiris » : ses clones naissent sur un disque découpé en /, swap et volumes. Cliquer pour retirer la déclaration.'
+                                  : 'À déclarer seulement si ce gabarit a été construit avec le groupe LVM « osiris » (preseed gabarit Debian). Ses clones seront alors découpés en LVM.'}
+                                className={`text-[10px] border rounded px-2 py-0.5 ${t.osiris.lvm ? 'border-sky-700 text-sky-300' : 'osiris-btn-ghost border-slate-700'}`}>
+                                {t.osiris.lvm ? '✓ LVM' : 'Déclarer LVM'}
+                              </button>
                             )}
                             {(!t.osiris || t.osiris.etat === 'inconnu') && (
                               <button onClick={() => basculerMarque(h.id, t)} className="osiris-btn-ghost text-[10px] border border-slate-700 rounded px-2 py-0.5">

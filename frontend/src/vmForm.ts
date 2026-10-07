@@ -4,6 +4,7 @@
 // rester testable sans monter de composant — et parce qu'un fichier .tsx ne peut
 // exporter que des composants sans casser le Fast Refresh de Vite.
 import { decrireDisque, disqueData, disquesPourServeur, type DisqueForm } from './disquesForm'
+import { SWAP_GB_DEFAUT, schemaPartition } from './partitionForm'
 import { COMPTE_VIDE, comptePourServeur, decrireCompte, type CompteForm } from './compteForm'
 
 /** L'adresse saisie tombe-t-elle dans le réseau du bridge choisi ? `null` si l'une
@@ -37,12 +38,22 @@ export const completerPrefixeCidr = (ipCidr: string, prefixe: number | undefined
  *  le reste des champs du formulaire garde son vrai type plutôt que de s'effacer
  *  derrière un `Record<string, unknown>`. */
 export const buildCreateVmPayload = <T extends { profile_id: unknown; template_id: unknown; organization_id: unknown;
-                                                 os?: string; disques?: DisqueForm[]; data_disk_gb?: number; compte?: CompteForm }>(
+                                                 os?: string; disques?: DisqueForm[]; data_disk_gb?: number; compte?: CompteForm;
+                                                 disk_gb: number; root_gb: number; swap_gb: number }>(
   vmForm: T,
   vmNode: string,
+  /** Le gabarit choisi est LVM (et la VM un clone Linux) : UN disque découpé. */
+  lvm = false,
 ) => ({
   ...vmForm,
   node: vmNode,
+  // Gabarit LVM : le disque système est la SOMME du schéma (le serveur la
+  // recalcule, mais le récapitulatif doit montrer la même) ; « / » et le swap
+  // partent. Ailleurs, root_gb part à null — le serveur le refuserait — et le
+  // swap à sa valeur réelle : un fichier de 2 Go, quoi qu'on ait saisi.
+  disk_gb: lvm ? schemaPartition(vmForm.root_gb, vmForm.swap_gb, vmForm.disques ?? []).total_gb : vmForm.disk_gb,
+  root_gb: lvm ? vmForm.root_gb : null,
+  swap_gb: lvm ? vmForm.swap_gb : SWAP_GB_DEFAUT,
   profile_id: vmForm.profile_id ? Number(vmForm.profile_id) : null,
   template_id: vmForm.template_id ? Number(vmForm.template_id) : null,
   organization_id: vmForm.organization_id === '' ? null : Number(vmForm.organization_id),
@@ -223,7 +234,7 @@ export const LIBELLE_MODE: Record<ModeVm, string> = {
 /** Le formulaire de création de VM à l'ouverture. Ici plutôt que dans le composant
  *  pour que le test du récapitulatif en dérive ses champs : un champ ajouté ici
  *  sans être montré au récapitulatif fait échouer ce test. */
-export const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 200, swap_gb: 2, data_disk_gb: 0, disques: [] as DisqueForm[], compte: COMPTE_VIDE as CompteForm, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
+export const FORMULAIRE_VIDE = { organization_id: '' as number | '', hostname: '', client: '', os: 'ubuntu', profile_id: '', ou: '', storage: '', bridge: '', folder: '', vcpus: 2, ram_mb: 2048, disk_gb: 20, root_gb: 200, swap_gb: 2, data_disk_gb: 0, disques: [] as DisqueForm[], compte: COMPTE_VIDE as CompteForm, ip_cidr: '', gateway: '', dns_servers: '', iso: '', boot_mode: 'template' as ModeVm, template_id: '', post_script: '' }
 
 export type ChargeVm = ReturnType<typeof buildCreateVmPayload<typeof FORMULAIRE_VIDE>>
 
@@ -292,11 +303,18 @@ export const recapVm = (c: ChargeVm, ctx: ContexteRecap): SectionRecap[] => {
             champs: ['ip_cidr', 'gateway', 'dns_servers'] },
     ] },
     { titre: 'Matériel', lignes: [
-      { texte: `${c.vcpus} vCPU · ${tailleRam(c.ram_mb)} RAM · ${c.os === 'windows' ? `disque ${c.disk_gb} Go` : `/ ${c.disk_gb} Go · swap ${c.swap_gb} Go`}`,
-        champs: ['vcpus', 'ram_mb', 'disk_gb', 'swap_gb'] },
+      { texte: `${c.vcpus} vCPU · ${tailleRam(c.ram_mb)} RAM · `
+          + (c.root_gb !== null
+            ? `un disque de ${c.disk_gb} Go découpé en LVM : / ${c.root_gb} Go · swap ${c.swap_gb} Go`
+            : `disque système ${c.disk_gb} Go` + (c.os === 'windows' ? '' : ` · swap : fichier de ${c.swap_gb} Go`)),
+        champs: ['vcpus', 'ram_mb', 'disk_gb', 'root_gb', 'swap_gb'] },
       // Chaque disque sur sa ligne : c'est ici qu'on relit un point de montage
       ...(c.disques.length
-        ? c.disques.map(d => ({ texte: decrireDisque(d), champs: ['disques', 'data_disk_gb'] as (keyof ChargeVm)[] }))
+        ? c.disques.map(d => ({
+            texte: c.root_gb !== null
+              ? `Volume « ${d.libelle} » : ${d.taille_gb} Go sur ${d.point_montage} · LV du même disque · ${d.systeme_fichiers}`
+              : decrireDisque(d),
+            champs: ['disques', 'data_disk_gb'] as (keyof ChargeVm)[] }))
         : [{ texte: c.data_disk_gb ? `Disque de données : ${c.data_disk_gb} Go` : 'Pas de disque supplémentaire',
              champs: ['disques', 'data_disk_gb'] as (keyof ChargeVm)[] }]),
     ] },

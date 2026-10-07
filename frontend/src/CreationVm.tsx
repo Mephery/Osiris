@@ -248,7 +248,6 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const manquants = champsManquants(vmForm, Boolean(vmHvId), vmNode)
   // Linux seulement : sous Windows, la liste n'est pas envoyée
   const disquesInvalides = vmForm.os !== 'windows' && erreursDisques(vmForm.disques).length > 0
-  const systemeInvalide = vmForm.os !== 'windows' && erreursSysteme(vmForm.disk_gb, vmForm.swap_gb).length > 0
   const compteInvalide = vmForm.os !== 'windows' ? erreurCompte(vmForm.compte, profilEffectif?.default_user ?? '') : ''
   const clone = vmForm.boot_mode !== 'pxe'
   // Stockage et réseau dépendent du nœud : tant qu'il n'est pas connu, ils attendent aussi
@@ -257,6 +256,10 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const gabarits = gabaritsPourMode(vmTemplates, vmForm.boot_mode, vmForm.os)
   const reseaux  = reseauxPourVm(vmNetworks, tousReseaux, vmForm.bridge)
   const gabaritChoisi = vmTemplates.find(t => String(t.vmid) === String(vmForm.template_id))
+  // Clone Linux d'un gabarit LVM : UN disque découpé (/, swap, volumes en LV).
+  // Ailleurs, le formulaire d'avant : disque système + disques séparés.
+  const lvm = clone && vmForm.os !== 'windows' && Boolean(gabaritChoisi?.osiris?.lvm)
+  const systemeInvalide = lvm && erreursSysteme(vmForm.root_gb, vmForm.swap_gb).length > 0
 
   const resumeAvance = [
     LIBELLE_MODE[vmForm.boot_mode],
@@ -270,7 +273,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   // Un clone nu Proxmox n'affiche pas l'adresse (champ grisé) mais la gardait
   // en mémoire et l'envoyait — refusée en 400 après coup. Elle part vide.
   const charge = buildCreateVmPayload(
-    sansAdressage ? { ...vmForm, ip_cidr: '', gateway: '', dns_servers: '' } : vmForm, vmNode)
+    sansAdressage ? { ...vmForm, ip_cidr: '', gateway: '', dns_servers: '' } : vmForm, vmNode, lvm)
   const reseauChoisi = vmNetworks.find(n => n.iface === vmForm.bridge)
   const stockageChoisi = vmStorages.find(s => s.storage === vmForm.storage)
   // Les avertissements du formulaire, repris tels quels au récapitulatif : lus
@@ -288,6 +291,8 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   ].filter((a): a is string => Boolean(a))
 
   const titre = 'text-[10px] font-semibold uppercase tracking-widest text-slate-500'
+  // Sans la colonne « LVM » sur un gabarit LVM : chaque volume y est un LV
+  const grilleDisques = lvm ? 'grid-cols-[4.5rem_1fr_7rem_4.5rem_1.5rem]' : 'grid-cols-[4.5rem_1fr_7rem_3.5rem_4.5rem_1.5rem]'
   const aide  = 'text-[10px] text-slate-600'
 
   if (recap) return (
@@ -418,7 +423,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
                   déploiement, mais savoir où vit un modèle reste utile — c'est le
                   seul indice si un clone échoue faute de stockage partagé. */}
               {gabarits.proposes.map(t => (
-                <option key={t.vmid} value={t.vmid}>{t.name}{t.osiris ? ETAT_AGENT[t.osiris.etat] : ''}{t.node ? ` · sur ${t.node}` : ''}</option>
+                <option key={t.vmid} value={t.vmid}>{t.name}{t.osiris?.lvm ? ' · LVM' : ''}{t.osiris ? ETAT_AGENT[t.osiris.etat] : ''}{t.node ? ` · sur ${t.node}` : ''}</option>
               ))}
               {gabarits.autres.length > 0 && (
                 <optgroup label={gabarits.autresChoisissables
@@ -612,16 +617,22 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
           <label className="flex items-center gap-1 text-[10px] text-slate-500">RAM Mo
             <input type="number" min={512} step={512} value={vmForm.ram_mb} onChange={e => setVmForm(f => ({...f, ram_mb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
           </label>
-          <label className="flex items-center gap-1 text-[10px] text-slate-500" title={vmForm.os === 'windows' ? 'Disque système' : 'Taille de la racine / (volume LVM)'}>{vmForm.os === 'windows' ? 'Système Go' : '/ (racine) Go'}
-            <input type="number" min={8} value={vmForm.disk_gb} onChange={e => setVmForm(f => ({...f, disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
-          </label>
-          {vmForm.os === 'windows' ? (
-            <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Disque de données. 0 = aucun.">Données Go
-              <input type="number" min={0} value={vmForm.data_disk_gb} onChange={e => setVmForm(f => ({...f, data_disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+          {lvm ? (<>
+            <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Taille de la racine / (volume LVM)">/ (racine) Go
+              <input type="number" min={10} value={vmForm.root_gb} onChange={e => setVmForm(f => ({...f, root_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
             </label>
-          ) : (
             <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Volume d'échange (swap), en LVM.">swap Go
               <input type="number" min={1} value={vmForm.swap_gb} onChange={e => setVmForm(f => ({...f, swap_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+            </label>
+          </>) : (
+            <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Disque système">Système Go
+              <input type="number" min={8} value={vmForm.disk_gb} onChange={e => setVmForm(f => ({...f, disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
+            </label>
+          )}
+          {/* Windows : un seul disque de données pour l'instant */}
+          {vmForm.os === 'windows' && (
+            <label className="flex items-center gap-1 text-[10px] text-slate-500" title="Disque de données. 0 = aucun.">Données Go
+              <input type="number" min={0} value={vmForm.data_disk_gb} onChange={e => setVmForm(f => ({...f, data_disk_gb: Number(e.target.value)}))} className="osiris-input text-xs w-full" />
             </label>
           )}
         </div>
@@ -632,9 +643,11 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
         {vmForm.os !== 'windows' && (
           <div className="space-y-1.5">
             {vmForm.disques.length > 0 && (
-              <div className="grid grid-cols-[4.5rem_1fr_7rem_3.5rem_4.5rem_1.5rem] gap-2 text-[10px] text-slate-600">
-                <span>Taille Go</span><span>Point de montage</span><span title="Visible dans lsblk (vg_libellé-libellé) et lsblk -f">Libellé</span>
-                <span title="LVM : agrandissable à chaud en ajoutant un disque">LVM</span><span>Format</span><span />
+              <div className={`grid ${grilleDisques} gap-2 text-[10px] text-slate-600`}>
+                <span>Taille Go</span><span>Point de montage</span>
+                <span title={lvm ? 'Visible dans lsblk (osiris-libellé) et lsblk -f' : 'Visible dans lsblk (vg_libellé-libellé) et lsblk -f'}>Libellé</span>
+                {!lvm && <span title="LVM : agrandissable à chaud en ajoutant un disque">LVM</span>}
+                <span>Format</span><span />
               </div>
             )}
             {vmForm.disques.map((d, i) => {
@@ -642,20 +655,20 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
                 ...f, disques: f.disques.map((x, j) => j === i ? { ...x, ...champ } : x),
               }))
               return (
-                <div key={i} className="grid grid-cols-[4.5rem_1fr_7rem_3.5rem_4.5rem_1.5rem] gap-2 items-center">
+                <div key={i} className={`grid ${grilleDisques} gap-2 items-center`}>
                   <input type="number" min={1} value={d.taille_gb} onChange={e => maj({ taille_gb: Number(e.target.value) })} className="osiris-input text-xs" />
                   <input value={d.point_montage} placeholder="/data"
                     onChange={e => maj({ point_montage: e.target.value, ...(d.libelleTouche ? {} : { libelle: libelleDepuisMontage(e.target.value) }) })}
                     className="osiris-input text-xs font-mono" />
                   <input value={d.libelle} maxLength={12} onChange={e => maj({ libelle: e.target.value.toLowerCase(), libelleTouche: true })}
                     className="osiris-input text-xs font-mono" />
-                  <label className="flex justify-center"><input type="checkbox" checked={d.lvm} onChange={e => maj({ lvm: e.target.checked })} /></label>
+                  {!lvm && <label className="flex justify-center"><input type="checkbox" checked={d.lvm} onChange={e => maj({ lvm: e.target.checked })} /></label>}
                   <select value={d.systeme_fichiers} onChange={e => maj({ systeme_fichiers: e.target.value as DisqueForm['systeme_fichiers'] })} className="osiris-input text-xs">
                     <option value="ext4">ext4</option>
                     <option value="xfs">xfs</option>
                   </select>
                   <button type="button" onClick={() => setVmForm(f => ({ ...f, disques: f.disques.filter((_, j) => j !== i) }))}
-                    className="osiris-action-btn osiris-action-btn--danger" title="Retirer ce disque"><IcoX /></button>
+                    className="osiris-action-btn osiris-action-btn--danger" title={lvm ? 'Retirer ce volume' : 'Retirer ce disque'}><IcoX /></button>
                 </div>
               )
             })}
@@ -663,15 +676,17 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
             <div className="flex items-center gap-3">
               {vmForm.disques.length < MAX_DISQUES && (
                 <button type="button" onClick={() => setVmForm(f => ({ ...f, disques: [...f.disques, nouveauDisque(f.disques)] }))}
-                  className="osiris-btn-ghost text-[10px] border border-slate-700 rounded px-2 py-0.5">+ Ajouter un volume</button>
+                  className="osiris-btn-ghost text-[10px] border border-slate-700 rounded px-2 py-0.5">{lvm ? '+ Ajouter un volume' : '+ Ajouter un disque'}</button>
               )}
               <p className={aide}>
-                {vmForm.disques.length === 0 ? 'Base seule : /boot + swap + / (LVM). Ajoute un volume pour /home, /backup…' : 'Chaque volume est un LV du groupe LVM — agrandissable à chaud. xfs ne se réduit jamais.'}
+                {lvm
+                  ? (vmForm.disques.length === 0 ? 'Base seule : /boot + swap + / (LVM). Ajoute un volume pour /home, /backup…' : 'Chaque volume est un LV du groupe LVM — agrandissable à chaud. xfs ne se réduit jamais.')
+                  : (vmForm.disques.length === 0 ? 'Aucun disque supplémentaire.' : 'LVM : agrandissable à chaud. xfs ne se réduit jamais.')}
               </p>
             </div>
-            {erreursSysteme(vmForm.disk_gb, vmForm.swap_gb).map(e => <p key={e} className="text-[10px] text-amber-400">⚠ {e}</p>)}
-            {(() => {
-              const schema = schemaPartition(vmForm.disk_gb, vmForm.swap_gb, vmForm.disques, true)
+            {lvm && erreursSysteme(vmForm.root_gb, vmForm.swap_gb).map(e => <p key={e} className="text-[10px] text-amber-400">⚠ {e}</p>)}
+            {lvm && (() => {
+              const schema = schemaPartition(vmForm.root_gb, vmForm.swap_gb, vmForm.disques, true)
               return (
                 <div className="rounded border border-slate-700 bg-slate-900/40 p-2 space-y-0.5">
                   <p className="text-[10px] text-slate-400">Aperçu — <span className="font-mono text-slate-200">{schema.total_gb} Go</span> · UEFI · groupe LVM <span className="font-mono">{schema.vg}</span></p>

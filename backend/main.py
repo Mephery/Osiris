@@ -30,6 +30,7 @@ from contextlib import asynccontextmanager
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from pydantic import PrivateAttr
 from sqlmodel import SQLModel, Session, select, func
 
 from arq import create_pool
@@ -2059,11 +2060,10 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
         # leve aucune erreur : il ne s'execute simplement jamais.
         ip_attendue=(ip_attendue or "").split("/")[0].strip(),
         osiris_url=osiris_url,
-        # Partitionnement LVM du gabarit rescelle (cf. disques.py / formulaire VM) :
-        # nom du groupe a detecter, taille de « / » a atteindre, taille du swap.
-        # `root_gb` a None = on n'impose pas de taille a « / » (on agrandit juste
-        # la partition au disque) ; les vraies valeurs viendront de la fiche quand
-        # la creation « un seul disque » les y stockera.
+        # Partitionnement LVM du gabarit (cf. disques.py / formulaire VM) : nom du
+        # groupe a detecter, taille de « / » a atteindre, taille du swap — celles
+        # de la fiche. `root_gb` a None = machine hors decoupage LVM : on n'impose
+        # pas de taille a « / » (on agrandit juste la partition au disque).
         partition_vg=VG_NOM,
         root_gb=root_gb,
         swap_gb=swap_gb,
@@ -2097,6 +2097,8 @@ def _render_linux_firstboot(mac: str, jeton: Optional[str] = None) -> Response:
         disques=disques_de(machine.disques) if machine.disques else None,
         compte=json.loads(machine.compte) if machine.compte else None,
         jeton=jeton_script,
+        root_gb=machine.root_gb,
+        swap_gb=machine.swap_gb or SWAP_GB_DEFAUT,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -2334,7 +2336,7 @@ def _annoter_gabarits(modeles: list[dict]) -> list[dict]:
             etat = "inconnu"
         else:
             etat = "a_jour" if g.empreinte == _empreinte_agent(g.os) else "perime"
-        m["osiris"] = {"etat": etat, "os": g.os,
+        m["osiris"] = {"etat": etat, "os": g.os, "lvm": bool(g.lvm),
                        "scelle_le": g.scelle_le.isoformat() if g.scelle_le else None}
     return modeles
 
@@ -5618,6 +5620,38 @@ async def demarquer_gabarit(hv_id: int, vmid: int, current_user: User = Depends(
     return Response(status_code=204)
 
 
+class GabaritLvmBody(SQLModel):
+    lvm: bool
+
+
+@app.put("/hypervisors/{hv_id}/templates/{vmid}/osiris/lvm", status_code=204)
+async def declarer_gabarit_lvm(hv_id: int, vmid: int, body: GabaritLvmBody,
+                               current_user: User = Depends(require_admin)):
+    """Déclare (ou non) qu'un gabarit OSIRIS Linux porte le groupe LVM « osiris ».
+
+    Rien, côté hyperviseur, ne le dit : c'est une propriété du disque, visible
+    seulement de l'intérieur. Déclaré LVM, le gabarit se clone en UN disque à la
+    taille du schéma, et le premier démarrage le découpe (cf. disques.py). Une
+    déclaration fausse ne casse rien d'irréversible : le premier démarrage
+    vérifie le groupe et, faute de le trouver, retombe sur l'ancien modèle."""
+    h = _get_hypervisor(hv_id)
+    uuid = await _uuid_du_modele(h, vmid)
+    with Session(engine) as session:
+        g = session.exec(select(GabaritOsiris).where(
+            GabaritOsiris.uuid.in_(_variantes_uuid(uuid)))).first()
+        if not g:
+            raise HTTPException(status_code=409, detail=(
+                "Ce modèle n'est pas un gabarit OSIRIS : le marquer d'abord comme tel."))
+        if g.os == "windows":
+            raise HTTPException(status_code=422, detail="Le découpage LVM ne concerne que Linux.")
+        g.lvm = body.lvm
+        session.add(g)
+        _log(session, current_user, "gabarit_lvm",
+             details={"hypervisor_id": hv_id, "vmid": vmid, "lvm": body.lvm})
+        session.commit()
+    return Response(status_code=204)
+
+
 @app.get("/hypervisors/{hv_id}/nodes/{node}/templates")
 async def get_node_templates(hv_id: int, node: str, _: User = Depends(require_admin)):
     """Templates clonables."""
@@ -5647,8 +5681,16 @@ class VmCreateBody(SQLModel):
     folder: str = ""
     vcpus: int = 2
     ram_mb: int = 2048               # RAM en Mo
-    disk_gb: int = 20                # Linux LVM : taille de / (racine) ; Windows : disque système
-    swap_gb: int = 2                 # Linux : taille du volume swap (LVM)
+    disk_gb: int = 20                # disque système (sur gabarit LVM : calculé, cf. root_gb)
+    # Gabarit LVM uniquement (cf. disques.py) : taille de « / » et du swap. Le
+    # disque système vaut alors la somme du schéma, et `disques` deviennent des
+    # LV du même groupe. `root_gb` renseigné sur un gabarit qui n'est pas LVM est
+    # refusé : ces tailles ne seraient appliquées par personne.
+    root_gb: Optional[int] = None
+    swap_gb: int = SWAP_GB_DEFAUT
+    # Décidé par le SERVEUR d'après le gabarit, jamais par le client : un clone
+    # LVM ne reçoit aucun disque séparé de l'hyperviseur.
+    _lvm: bool = PrivateAttr(default=False)
     # Ancien champ unique : un disque monté sur /data. Encore accepté d'un client
     # qui ne connaît pas `disques` (il en devient le premier). Windows : seul
     # champ disponible pour l'instant.
@@ -5694,6 +5736,41 @@ def vm_partition_preview(body: PartitionPreviewRequest):
     valider_systeme(body.root_gb, body.swap_gb)
     extras = valider_disques(body.disques)
     return schema_partition(body.root_gb, body.swap_gb, extras, body.uefi)
+
+
+def _decouper_en_lvm(body: "VmCreateBody", gabarit: Optional[dict]) -> None:
+    """Clone d'un gabarit LVM : UN disque à la taille du schéma, découpé au premier
+    démarrage. Ailleurs, `root_gb` est refusé plutôt qu'ignoré.
+
+    La taille du disque système n'est plus saisie : c'est la somme de /boot, du
+    swap, de « / » et des volumes — exactement l'aperçu du formulaire. Les
+    `disques` restent sur la fiche (le premier démarrage en fait des LV) mais
+    l'hyperviseur n'en crée aucun."""
+    lvm = bool(body.os != "windows" and gabarit
+               and (gabarit.get("osiris") or {}).get("lvm"))
+    if not lvm:
+        if body.root_gb is not None:
+            raise HTTPException(status_code=409, detail=(
+                "Ce gabarit n'est pas déclaré LVM (ou son état est illisible) : la taille "
+                "de / et du swap n'y serait appliquée par personne. Recharger le formulaire, "
+                "ou déclarer le gabarit LVM dans Infrastructure › Gabarits."))
+        return
+    if body.root_gb is None:
+        raise HTTPException(status_code=422, detail=(
+            "Ce gabarit est LVM : indiquer la taille de / (et du swap)."))
+    valider_systeme(body.root_gb, body.swap_gb)
+    body.disk_gb = schema_partition(body.root_gb, body.swap_gb,
+                                    [d.model_dump() for d in body.disques])["total_gb"]
+    body._lvm = True
+
+
+def disques_hyperviseur(body) -> list[dict]:
+    """Les disques que l'hyperviseur doit CRÉER : aucun pour un clone LVM, dont les
+    volumes sont des LV du disque système."""
+    if getattr(body, "_lvm", False):
+        return []
+    return [d.model_dump() if hasattr(d, "model_dump") else d
+            for d in (getattr(body, "disques", None) or [])]
 
 
 def _rollback_vm_machine(user: User, body, hv_id: int, vm_id: int,
@@ -5847,6 +5924,8 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str, jeton: str
         disques=[d.model_dump() if hasattr(d, "model_dump") else d for d in (getattr(body, "disques", None) or [])],
         compte=body.compte.model_dump() if getattr(body, "compte", None) else None,
         jeton=jeton,
+        root_gb=body.root_gb if getattr(body, "_lvm", False) else None,
+        swap_gb=getattr(body, "swap_gb", None) or SWAP_GB_DEFAUT,
     )
 
     return jinja_env.get_template("cloud-init-user-data.j2").render(
@@ -6068,6 +6147,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     # reste en transition. Lecture impossible = transition : ce contrôle ne doit
     # jamais empêcher une création.
     jeton_exige = False
+    gabarit = None
     if body.boot_mode in ("template", "cloudinit") and body.template_id:
         try:
             modeles = _annoter_gabarits(await _provider(h).list_all_templates(h))
@@ -6076,6 +6156,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                                and gabarit["osiris"].get("etat") == "a_jour")
         except Exception:
             _hv_log.warning("État du gabarit %s illisible : VM en mode transition", body.template_id)
+    _decouper_en_lvm(body, gabarit)
     user_data = ""
     if body.boot_mode == "cloudinit":
         user_data = _render_cloud_init_user_data(h, body, mac_plain, jeton_clair)
@@ -6108,6 +6189,8 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                 disques=(json.dumps([d.model_dump() for d in body.disques])
                          if body.os != "windows" else ""),
                 compte=json.dumps(body.compte.model_dump()) if body.compte else "",
+                root_gb=body.root_gb if body._lvm else None,
+                swap_gb=body.swap_gb if body._lvm else None,
                 jeton_hash=jeton_hash,
                 jeton_exige=jeton_exige,
                 ip_cidr=body.ip_cidr.strip(),
@@ -6474,7 +6557,7 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
             if body.data_disk_gb:
                 vm_config["sata1"] = f"{body.storage}:{body.data_disk_gb}{fmt}"
         else:
-            vm_config.update(config_proxmox([d.model_dump() for d in body.disques], body.storage, "scsi", fmt))
+            vm_config.update(config_proxmox(disques_hyperviseur(body), body.storage, "scsi", fmt))
         if body.iso and "ide2" not in vm_config:
             vm_config["ide2"] = f"{body.iso},media=cdrom"
         vm_config["smbios1"] = _smbios_avec_jeton(None, jeton)
@@ -6505,7 +6588,7 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
             if body.data_disk_gb:
                 cfg["sata1"] = f"{body.storage}:{body.data_disk_gb}"
         else:
-            cfg.update(config_proxmox([d.model_dump() for d in body.disques], body.storage))
+            cfg.update(config_proxmox(disques_hyperviseur(body), body.storage))
         # Le jeton, par le seul canal que l'invité lit sans réseau ; l'UUID du clone
         # est conservé, le numéro de série du gabarit écrasé.
         cfg["smbios1"] = _smbios_avec_jeton(
@@ -6566,8 +6649,8 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
         cloud_config["smbios1"] = _smbios_avec_jeton(conf_clone, jeton)
 
         # Le template n'a qu'un disque : ceux-ci s'ajoutent, vierges, et seront
-        # formatés puis montés au premier démarrage.
-        cloud_config.update(config_proxmox([d.model_dump() for d in body.disques], body.storage))
+        # formatés puis montés au premier démarrage (aucun sur un gabarit LVM).
+        cloud_config.update(config_proxmox(disques_hyperviseur(body), body.storage))
 
         # Adressage : cloud-init applique `ipconfig0` au premier demarrage.
         # Sans lui, Proxmox laisse la carte en DHCP.

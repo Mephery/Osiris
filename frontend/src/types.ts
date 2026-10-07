@@ -269,6 +269,9 @@ export interface GabaritOsiris {
    *  inconnu : marqué à la main, sans empreinte. */
   etat: 'a_jour' | 'perime' | 'inconnu';
   os: string;
+  /** Construit avec le groupe LVM « osiris » : le clone naît sur UN disque, que
+   *  le premier démarrage découpe (/, swap, volumes). Déclaré à la main. */
+  lvm?: boolean;
   scelle_le: string | null;
 }
 

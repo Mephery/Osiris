@@ -76,6 +76,7 @@ describe('buildCreateVmPayload', () => {
   const base = {
     hostname: 'srv-test', os: 'ubuntu', profile_id: '', template_id: '',
     organization_id: '' as number | '', boot_mode: 'pxe',
+    disk_gb: 20, root_gb: 200, swap_gb: 4, disques: [] as ReturnType<typeof disqueData>[],
   }
 
   it('convertit les identifiants vides en null plutôt qu\'en NaN', () => {
@@ -108,6 +109,21 @@ describe('buildCreateVmPayload', () => {
     expect(payload.hostname).toBe('srv-test')
     expect(payload.os).toBe('ubuntu')
     expect(payload.boot_mode).toBe('pxe')
+  })
+
+  // Une taille saisie est appliquée ou refusée, jamais ignorée en silence.
+  it('gabarit classique : disque système saisi, pas de racine, swap réel de 2 Go', () => {
+    const payload = buildCreateVmPayload({ ...base, os: 'debian' }, 'n1')
+    expect(payload.disk_gb).toBe(20)
+    expect(payload.root_gb).toBeNull()
+    expect(payload.swap_gb).toBe(2)
+  })
+
+  it('gabarit LVM : un disque à la somme du schéma, racine et swap envoyés', () => {
+    const payload = buildCreateVmPayload({ ...base, os: 'debian', disques: [disqueData(50)] }, 'n1', true)
+    expect(payload.root_gb).toBe(200)
+    expect(payload.swap_gb).toBe(4)
+    expect(payload.disk_gb).toBe(256)            // 0,5 + 1 + 4 + 200 + 50, arrondi au Go
   })
 })
 
@@ -342,6 +358,18 @@ describe('recapVm', () => {
 
   const texte = (c: ChargeVm, x: ContexteRecap = ctx) =>
     recapVm(c, x).flatMap(s => s.lignes.map(l => l.texte)).join('\n')
+
+  it('dit le découpage LVM et chaque volume comme un LV du même disque', () => {
+    const c = buildCreateVmPayload({ ...FORMULAIRE_VIDE, os: 'debian', disques: [disqueData(50)] }, 'n1', true)
+    const t = texte(c)
+    expect(t).toContain('un disque de 254 Go découpé en LVM : / 200 Go · swap 2 Go')
+    expect(t).toContain('LV du même disque')
+  })
+
+  it('montre la racine, le swap et le disque calculé sur un gabarit LVM', () => {
+    const c = buildCreateVmPayload({ ...FORMULAIRE_VIDE, os: 'debian', disques: [disqueData(5)] }, 'n1', true)
+    for (const k of ['root_gb', 'swap_gb', 'disk_gb', 'disques'] as const) expect(champsMontres(c).has(k)).toBe(true)
+  })
 
   it('dit « DHCP » plutôt que de taire une adresse vide', () => {
     expect(texte(buildCreateVmPayload(FORMULAIRE_VIDE, 'n1'))).toMatch(/DHCP/)

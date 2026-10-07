@@ -858,8 +858,10 @@ def _finish(vm, network, body, user_data: str, render_user_data, jeton: str = ""
     # Disques supplémentaires, dans l'ORDRE de la liste : c'est cet ordre (unités
     # SCSI croissantes, donc sdb, sdc…) que le premier démarrage suit pour les
     # retrouver — vSphere n'expose pas de numéro de série comme Proxmox.
-    tailles = [d.taille_gb for d in (getattr(body, "disques", None) or [])] \
-        or ([body.data_disk_gb] if getattr(body, "data_disk_gb", 0) else [])
+    # Aucun sur un clone de gabarit LVM : ses volumes sont des LV du disque système.
+    tailles = [] if getattr(body, "_lvm", False) else (
+        [d.taille_gb for d in (getattr(body, "disques", None) or [])]
+        or ([body.data_disk_gb] if getattr(body, "data_disk_gb", 0) else []))
     controller = next((d for d in vm.config.hardware.device
                        if isinstance(d, vim.vm.device.VirtualSCSIController)), None)
     if tailles and controller is not None:
