@@ -743,8 +743,45 @@ _partitionner_osiris() {
 {% endif %}
 }
 
+# Racine d'un gabarit classique : sa partition au disque, puis son systeme de
+# fichiers. OSIRIS provisionne le disque plus grand que le gabarit, mais rien ne
+# le faisait voir a « / » : on comptait sur le module growpart de cloud-init, or
+# cloud-init se DESACTIVE sur un clone nu vSphere (aucune source de donnees).
+# Vu le 07/10 : disque de 20 Go, « / » reste a 8,7 Go. Jamais fatal.
+_agrandir_racine() {
+    local src disque num fs
+    src=$(findmnt -no SOURCE / 2>/dev/null)
+    case "$src" in
+        /dev/sd*|/dev/vd*|/dev/xvd*|/dev/nvme*) ;;
+        *) _log "/ sur ${src:-?} : pas une partition simple - taille inchangee"; return 0 ;;
+    esac
+    disque=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1)
+    num=$(printf '%s' "$src" | grep -o '[0-9]*$')
+    if [ -z "$disque" ] || [ -z "$num" ]; then
+        _log "AVERTISSEMENT : partition de / non identifiee ($src) - taille inchangee"
+        return 0
+    fi
+    command -v growpart > /dev/null 2>&1 || apt-get install -y cloud-guest-utils > /dev/null 2>&1 || true
+    if ! command -v growpart > /dev/null 2>&1; then
+        _log "AVERTISSEMENT : growpart absent - / reste a la taille du gabarit"
+        return 0
+    fi
+    if ! growpart "/dev/$disque" "$num" > /dev/null 2>&1; then
+        _log "/ : partition deja a la taille du disque"
+        return 0
+    fi
+    fs=$(findmnt -no FSTYPE / 2>/dev/null)
+    if { [ "${fs#ext}" != "$fs" ] && resize2fs "$src" > /dev/null 2>&1; } \
+       || { [ "$fs" = xfs ] && xfs_growfs / > /dev/null 2>&1; }; then
+        _log "/ agrandie au disque : $(df -h --output=size / | tail -1 | tr -d ' ')"
+    else
+        _log "AVERTISSEMENT : partition agrandie mais systeme de fichiers ${fs:-?} non etendu"
+    fi
+}
+
 # Repli historique : disques separes + fichier de swap (gabarit pas rescelle).
 _partitionner_legacy() {
+    _agrandir_racine
 {% if disques %}
 {% for d in disques %}
     _preparer_disque {{ d.libelle | bash_squote }} {{ d.taille_gb | int }} {{ d.point_montage | bash_squote }} {{ 1 if d.lvm else 0 }} {{ d.systeme_fichiers | bash_squote }} || true
@@ -1029,6 +1066,19 @@ else
     _add_test {{ ("Volume " ~ d.point_montage) | bash_squote }} false "Non monte"
 fi
 {% endfor %}
+
+# Racine : sa taille, et — sur une partition simple — l'espace du disque qu'elle
+# laisse inutilise. `growpart --dry-run` repond 0 s'il RESTE de quoi agrandir.
+_racine_src=$(findmnt -no SOURCE / 2>/dev/null)
+_racine_taille=$(df -h --output=size / 2>/dev/null | tail -1 | tr -d ' ')
+_racine_disque=$(lsblk -no PKNAME "$_racine_src" 2>/dev/null | head -1)
+_racine_num=$(printf '%s' "$_racine_src" | grep -o '[0-9]*$')
+if [ -n "$_racine_disque" ] && [ -n "$_racine_num" ] && command -v growpart > /dev/null 2>&1 \
+        && growpart --dry-run "/dev/$_racine_disque" "$_racine_num" > /dev/null 2>&1; then
+    _add_test "Racine /" false "$_racine_taille - le disque /dev/$_racine_disque a de l'espace que / n'utilise pas"
+else
+    _add_test "Racine /" true "${_racine_taille:-?}"
+fi
 
 _swap_taille=$(swapon --noheadings --show=SIZE 2>/dev/null | head -1 | tr -d ' ')
 if [ -n "$_swap_taille" ]; then
