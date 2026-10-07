@@ -1,0 +1,127 @@
+# OSIRIS — Preseed GABARIT Debian (LVM, VG « osiris ») — construction d'un master
+#
+# Ce preseed NE déploie PAS une machine : il construit le GABARIT qu'OSIRIS clonera
+# ensuite. D'où les différences avec preseed.cfg.j2 (bare-metal, par MAC) :
+#  • partitionnement « équipe » (01/10) : EFI + /boot 1 Go + un seul VG « osiris »
+#    avec un LV « root » MINIMAL et de l'espace LIBRE — l'agent de premier démarrage
+#    agrandit « / », crée le swap et les volumes au clonage (modèle « on agrandit,
+#    jamais on réduit ») ;
+#  • paquets lvm2 / cloud-guest-utils / qemu-guest-agent GRAVÉS : l'agent en a besoin
+#    (growpart, lvextend) et doit pouvoir tourner sur un VLAN sans dépôt APT ;
+#  • aucun rappel machine ni firstboot par MAC : c'est le scellement OSIRIS qui grave
+#    l'agent et généralise. Ici on produit juste un Debian propre au bon format.
+#
+# UEFI OBLIGATOIRE : la VM doit démarrer en EFI (OVMF/firmware EFI), sinon pas de
+# partition EFI possible et le gabarit ne bootera pas en UEFI.
+
+# ── Locale et clavier ─────────────────────────────────────────────────────────
+d-i debian-installer/locale string fr_FR.UTF-8
+d-i localechooser/supported-locales multiselect en_US.UTF-8, fr_FR.UTF-8
+d-i keyboard-configuration/xkb-keymap select fr
+
+# ── Réseau ───────────────────────────────────────────────────────────────────
+d-i netcfg/choose_interface select auto
+d-i netcfg/get_hostname string debian-gabarit
+d-i netcfg/get_domain string local
+d-i netcfg/wireless_wep string
+
+# ── Miroir APT ────────────────────────────────────────────────────────────────
+# Miroir fixé explicitement : derrière un pare-feu à liste blanche de
+# destinations, un netinst laissé au choix du miroir calerait sans le dire.
+# Les mises à jour de sécurité passent par security.debian.org.
+d-i mirror/country string manual
+d-i mirror/http/hostname string apt.tetaneutral.net
+d-i mirror/http/directory string /debian
+d-i mirror/http/proxy string
+d-i mirror/suite string bookworm
+
+# ── Horloge ───────────────────────────────────────────────────────────────────
+d-i clock-setup/utc boolean true
+d-i time/zone string Europe/Paris
+d-i clock-setup/ntp boolean true
+
+# ── Compte (jetable) ──────────────────────────────────────────────────────────
+# Mot de passe ALÉATOIRE régénéré à CHAQUE téléchargement de ce preseed et jamais
+# stocké : un gabarit en cours de construction n'expose aucun identifiant connu.
+# Le scellement OSIRIS retire/rote ensuite les secrets, et le compte final est
+# injecté par clone.
+d-i passwd/root-login boolean false
+d-i passwd/user-fullname string osiris-gabarit
+d-i passwd/username string osiris-gabarit
+d-i passwd/user-password-crypted password {{ password_hash }}
+d-i passwd/user-default-groups string sudo
+
+# ── Partitionnement : EFI + /boot + VG « osiris » (LV root minimal + LIBRE) ──
+# root à 8 Go (sous le mini de 10 côté formulaire) + le reste du VG laissé LIBRE :
+# l'agent agrandit root à la taille voulue. PAS de swap ici — l'agent le crée en LV.
+# Le groupe n'existe que par sa partition PV (`method{ lvm } vg_name{ osiris }`,
+# taille -1 = tout le reste du disque) : déclarer un LV `in_vg{ osiris }` sans elle
+# fait échouer l'installeur (« pas de volume physique dans le groupe », vu le 01/10).
+d-i partman-auto/method string lvm
+d-i partman-auto-lvm/new_vg_name string osiris
+d-i partman-lvm/device_count string 1
+d-i partman-lvm/confirm boolean true
+d-i partman-lvm/confirm_nooverwrite boolean true
+d-i partman-auto/expert_recipe string                                     \
+      osiris-lvm ::                                                       \
+              538 538 1075 free                                           \
+                      $iflabel{ gpt }                                     \
+                      $reusemethod{ }                                     \
+                      method{ efi } format{ }                             \
+              .                                                           \
+              1024 1024 1024 ext4                                         \
+                      $primary{ }                                         \
+                      method{ format } format{ }                          \
+                      use_filesystem{ } filesystem{ ext4 }                \
+                      mountpoint{ /boot }                                 \
+              .                                                           \
+              100 1000 -1 ext4                                            \
+                      $defaultignore{ }                                   \
+                      $primary{ }                                         \
+                      method{ lvm }                                       \
+                      vg_name{ osiris }                                   \
+              .                                                           \
+              8192 8192 8192 ext4                                         \
+                      $lvmok{ }                                           \
+                      in_vg{ osiris }                                     \
+                      lv_name{ root }                                     \
+                      method{ format } format{ }                          \
+                      use_filesystem{ } filesystem{ ext4 }                \
+                      mountpoint{ / }                                     \
+              .
+d-i partman-partitioning/choose_label string gpt
+d-i partman-partitioning/default_label string gpt
+d-i partman/default_filesystem string ext4
+d-i partman-partitioning/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+d-i partman-md/confirm boolean true
+d-i partman/mount_style select uuid
+# Pas de swap dans le gabarit (voulu) : sans cette réponse, l'installeur s'arrête
+# pour proposer d'en ajouter un (vu le 01/10). false = ne pas revenir au menu.
+d-i partman-basicfilesystems/no_swap boolean false
+
+# ── Paquets : le strict nécessaire + ce dont l'AGENT a besoin au clonage ─────
+# Les DEUX agents invités sont gravés pour que CETTE recette serve les 3 hyperviseurs :
+#  • open-vm-tools  -> vSphere : c'est vmtoolsd qui lit le guestinfo au clone ;
+#  • qemu-guest-agent -> Proxmox.
+# Chacun ne sert que sur sa plateforme ; l'autre dort, sans nuire.
+tasksel tasksel/first multiselect standard, ssh-server
+d-i pkgsel/include string curl wget openssh-server sudo lvm2 cloud-guest-utils open-vm-tools qemu-guest-agent efibootmgr
+d-i pkgsel/upgrade select full-upgrade
+popularity-contest popularity-contest/participate boolean false
+
+# ── Chargeur de démarrage (UEFI) ─────────────────────────────────────────────
+d-i grub-installer/only_drive boolean true
+d-i grub-installer/with_other_os boolean false
+
+# ── Fin : activer les agents invités (guestinfo au clonage) + SSH. Pas de rappel. ─
+# Tolérant (|| true) : une plateforme n'a pas forcément le service de l'autre actif,
+# et un enable raté ne doit pas faire échouer la construction du gabarit.
+d-i preseed/late_command string \
+ in-target systemctl enable open-vm-tools || true ; \
+ in-target systemctl enable qemu-guest-agent || true ; \
+ in-target systemctl enable ssh || true
+
+d-i finish-install/reboot_in_progress note

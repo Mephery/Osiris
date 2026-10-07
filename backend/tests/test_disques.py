@@ -90,8 +90,12 @@ def _fonctions() -> str:
         machine={"hostname": "srv-01", "mac": "aabbccddeeff", "ou": "", "post_script": ""},
         profile={"machine_type": "server"}, linux_apps=[], zabbix=None,
         disques=valider_disques([_d()]), osiris_url="http://osiris.test", ip_attendue="")
+    # Les définitions du modèle historique : du setup jusqu'à la fin de la
+    # fonction _preparer_disque (les appels, eux, sont désormais indentés dans
+    # _partitionner_legacy — on ne les prend pas, _executer fait le sien).
     debut = script.index("_disques_pris=")
-    return script[debut:script.index("\n_preparer_disque '", debut)]
+    fin = script.index("\n}\n", script.index("_preparer_disque() {")) + 2
+    return script[debut:fin]
 
 
 # lsblk simulé : SERIAL, tailles, et disques « non vierges » pilotés par l'environnement

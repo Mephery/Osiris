@@ -284,8 +284,13 @@ def test_disque_de_donnees_ne_touche_quun_disque_vierge(client, linux_setup):
 
 
 def test_pas_de_formatage_sans_disque_de_donnees(client, linux_setup):
+    """Sans disque de données, RIEN n'est formaté. Les fonctions de préparation
+    (_preparer_disque pour le modèle historique, _preparer_lv pour le modèle LVM)
+    sont désormais TOUJOURS définies — mais elles ne sont APPELÉES que pour un
+    disque listé. On vérifie donc l'absence d'appel, pas l'absence de définition."""
     script = _firstboot(client)
-    assert "mkfs" not in script
+    assert "_preparer_disque '" not in script
+    assert "_preparer_lv '" not in script
 
 
 # ── URL de rappel par hyperviseur ─────────────────────────────────────────────

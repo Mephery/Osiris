@@ -512,6 +512,53 @@ systemctl daemon-reload
 systemctl enable osiris-firstboot.service > /dev/null
 echo "[OSIRIS] Unite osiris-firstboot.service installee et activee."
 
+# L'adresse de CONSTRUCTION ne doit pas partir avec le gabarit.
+#
+# Un gabarit installe par preseed (et non tire d'une image cloud) garde dans
+# /etc/network/interfaces l'IP fixe qu'on lui a donnee pour s'installer : sur un
+# VLAN sans DHCP, il en fallait une. Laissee la, chaque clone la reprendrait au
+# demarrage. Et ifupdown ADDITIONNE les declarations d'une meme carte : le clone
+# porterait sa propre adresse (ecrite par l'agent dans interfaces.d) ET celle du
+# gabarit, avec deux passerelles. Deux clones = conflit d'IP (vu le 01/10 sur le
+# gabarit Debian LVM, avant qu'il ne soit scelle).
+#
+# On ne garde que la boucle locale et l'inclusion d'interfaces.d, ou l'agent
+# ecrit l'adressage de chaque clone. Ne touche a rien sans adresse fixe (images
+# cloud : DHCP ou netplan) — le cas courant reste intact.
+# Chemins surchargeables UNIQUEMENT pour les tests.
+neutraliser_adresse_installeur() {
+    local f=${OSIRIS_INTERFACES:-/etc/network/interfaces}
+    local hosts=${OSIRIS_HOSTS:-/etc/hosts}
+    local ip
+    if [ ! -f "$f" ]; then
+        return 0
+    fi
+    if ! grep -Eq '^[[:space:]]*iface[[:space:]]+[^[:space:]]+[[:space:]]+inet6?[[:space:]]+static' "$f"; then
+        return 0
+    fi
+    # La meme adresse figure dans /etc/hosts (l'installeur l'y associe au nom) :
+    # elle y resterait fausse sur chaque clone.
+    for ip in $(awk '$1=="address" {sub(/\/.*/, "", $2); print $2}' "$f"); do
+        if [ -f "$hosts" ]; then
+            sed -i "/^${ip//./\\.}[[:space:]]/d" "$hosts"
+        fi
+    done
+    # Le nom doit rester resolu en local (sudo s'en plaint sinon). Le firstboot
+    # remplace ensuite cette ligne par le nom de chaque clone.
+    if [ -f "$hosts" ] && ! grep -q '^127\.0\.1\.1' "$hosts"; then
+        printf '127.0.1.1\t%s\n' "$(hostname)" >> "$hosts"
+    fi
+    cat > "$f" << 'OSIRIS_INTERFACES_EOF'
+# Gabarit OSIRIS : aucune adresse ici. Au premier demarrage d'un clone, l'agent
+# OSIRIS lit l'adressage dans guestinfo et l'ecrit dans interfaces.d/60-osiris.
+source /etc/network/interfaces.d/*
+
+auto lo
+iface lo inet loopback
+OSIRIS_INTERFACES_EOF
+    echo "[OSIRIS] Adresse de construction retiree de $f : chaque clone recevra la sienne."
+}
+
 if [ "$SEAL" -eq 1 ]; then
     echo "[OSIRIS] Scellement du template..."
     # Le gabarit s'annonce a OSIRIS, qui ne proposera en clone nu QUE les modeles
@@ -528,6 +575,7 @@ if [ "$SEAL" -eq 1 ]; then
         echo "         Il faudra le marquer a la main : Infrastructure > Gabarits."
     fi
     command -v cloud-init > /dev/null && cloud-init clean --logs --seed || true
+    neutraliser_adresse_installeur
     # machine-id identique sur tous les clones = meme DUID DHCP = baux qui se
     # volent l'un l'autre. Il doit etre vide pour etre regenere au demarrage.
     : > /etc/machine-id

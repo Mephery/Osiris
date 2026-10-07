@@ -40,7 +40,8 @@ import pyotp
 import qrcode
 from comptes import CompteVm, valider_compte
 from disques import (DisqueVm, config_proxmox, disques_de, valider_disques,
-                     schema_partition, valider_systeme, ROOT_GB_DEFAUT, SWAP_GB_DEFAUT)
+                     schema_partition, valider_systeme, ROOT_GB_DEFAUT, SWAP_GB_DEFAUT,
+                     VG_NOM)
 from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
 import vpn
 import vsphere
@@ -68,6 +69,7 @@ _ROUTES_MACHINES = (
     "/firstboot-windows/000000000000",
     "/winpe-script/000000000000",
     "/preseed/000000000000",
+    "/preseed/gabarit/debian",
 )
 
 
@@ -2024,7 +2026,9 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
                              linux_apps: list, zabbix: Optional[dict],
                              osiris_url: str, post_script: str = "",
                              ip_attendue: str = "", disques: Optional[list] = None,
-                             compte: Optional[dict] = None, jeton: str = "") -> str:
+                             compte: Optional[dict] = None, jeton: str = "",
+                             root_gb: Optional[int] = None,
+                             swap_gb: int = SWAP_GB_DEFAUT) -> str:
     """Le script de premier démarrage Linux, rendu à partir d'un contexte explicite.
 
     Volontairement sans accès à la base : le script est aussi embarqué dans le
@@ -2055,6 +2059,14 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
         # leve aucune erreur : il ne s'execute simplement jamais.
         ip_attendue=(ip_attendue or "").split("/")[0].strip(),
         osiris_url=osiris_url,
+        # Partitionnement LVM du gabarit rescelle (cf. disques.py / formulaire VM) :
+        # nom du groupe a detecter, taille de « / » a atteindre, taille du swap.
+        # `root_gb` a None = on n'impose pas de taille a « / » (on agrandit juste
+        # la partition au disque) ; les vraies valeurs viendront de la fiche quand
+        # la creation « un seul disque » les y stockera.
+        partition_vg=VG_NOM,
+        root_gb=root_gb,
+        swap_gb=swap_gb,
     )
 
 
@@ -2415,6 +2427,23 @@ def get_preseed(mac: str):
         mac=clean_mac,
         osiris_url=OSIRIS_BASE_URL,
         status_url=f"{OSIRIS_BASE_URL}/machines/{clean_mac}/status",
+    )
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/preseed/gabarit/debian")
+def get_preseed_gabarit_debian():
+    """Preseed pour CONSTRUIRE le gabarit Debian LVM (VG « osiris »), pas pour
+    déployer une machine : partitionnement EFI + /boot + VG « osiris » (LV root
+    minimal + espace libre), paquets de l'agent gravés, aucun rappel par MAC.
+
+    Le mot de passe d'installation est ALÉATOIRE et régénéré à chaque appel, jamais
+    stocké : rien de connu n'est servi, et le scellement rote de toute façon les
+    secrets. Servi sous /preseed/ (déjà en clair côté frontal) car l'installeur
+    Debian le récupère en HTTP, sans magasin de certificats."""
+    password_hash = sha512_crypt.using(rounds=100000).hash(secrets.token_urlsafe(24))
+    content = jinja_env.get_template("preseed-gabarit-debian.cfg.j2").render(
+        password_hash=password_hash,
     )
     return Response(content=content, media_type="text/plain")
 

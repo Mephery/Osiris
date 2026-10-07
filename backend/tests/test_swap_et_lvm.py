@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 # Copyright (c) 2026 Coline Derycke. See LICENSE.
-"""Swap et LVM au premier démarrage Linux.
+"""Swap et partitionnement au premier démarrage Linux.
 
-- Swap : un fichier de 2 Go, seulement si aucun swap n'est actif. JAMAIS fatal :
-  le script tourne sous `trap ERR`, et une machine sans swap fonctionne — la
-  faire passer en échec pour ça serait pire que le mal.
-- /data en LVM, pour l'agrandir à chaud ; sans lvm2 (images cloud Debian, VLAN
-  sans dépôts), retour à l'ext4 direct, dit dans le journal.
+Deux modèles coexistent pendant la transition de rescellement, choisis à chaud :
+- Gabarit RESCELLÉ (groupe LVM « osiris ») : on agrandit la partition au disque,
+  on porte « / » à la taille voulue, et swap + volumes sont des LV dans ce groupe
+  (modèle validé avec l'équipe le 01/10). On agrandit, on ne réduit JAMAIS.
+- Gabarit PAS ENCORE rescellé (pas de groupe) : ancien modèle — disques séparés
+  et fichier de swap — pour ne pas régresser les sites non repris.
 
-Le bloc swap est EXÉCUTÉ ici, avec des commandes simulées : c'est la seule
-façon de prouver qu'aucun échec n'y déclenche le piège.
+Historique conservé et toujours testé :
+- Swap par fichier (repli) : 2 Go, seulement si aucun swap actif. JAMAIS fatal —
+  une machine sans swap fonctionne, l'y faire échouer serait pire que le mal.
+- /data en LVM séparé ; sans lvm2, retour à l'ext4 direct, dit dans le journal.
+
+Le bloc swap par fichier est EXÉCUTÉ ici, avec des commandes simulées : c'est la
+seule façon de prouver qu'aucun échec n'y déclenche le piège.
 """
 import re
 import stat
@@ -23,7 +29,8 @@ DATA = [{"taille_gb": 10, "point_montage": "/data", "libelle": "data", "lvm": Tr
          "systeme_fichiers": "ext4"}]
 
 
-def _rendu(data_disk_gb: int = 0, complet: bool = False) -> str:
+def _rendu(data_disk_gb: int = 0, complet: bool = False,
+           root_gb: int = 200, swap_gb: int = 2) -> str:
     env = Environment(loader=FileSystemLoader("templates"), trim_blocks=True,
                       lstrip_blocks=True, autoescape=False)
     env.filters.setdefault("bash_squote", lambda v: "'" + str(v).replace("'", "'\\''") + "'")
@@ -32,7 +39,8 @@ def _rendu(data_disk_gb: int = 0, complet: bool = False) -> str:
         profile={"machine_type": "server"},
         linux_apps=[{"name": "Htop", "apt_package": "htop"}] if complet else [],
         zabbix={"server": "192.0.2.50"} if complet else None,
-        disques=DATA if data_disk_gb else [], osiris_url="http://osiris.test", ip_attendue="")
+        disques=DATA if data_disk_gb else [], osiris_url="http://osiris.test",
+        ip_attendue="", partition_vg="osiris", root_gb=root_gb, swap_gb=swap_gb)
 
 
 def test_le_script_rendu_reste_du_bash_valide():
@@ -42,9 +50,12 @@ def test_le_script_rendu_reste_du_bash_valide():
 
 
 def _bloc_swap() -> str:
+    """Extrait le bloc de swap PAR FICHIER (repli historique), désormais dans la
+    fonction _partitionner_legacy. Deux `if [ -n "$(swapon` existent maintenant
+    (l'autre crée un LV de swap dans le VG) : on vise bien celui du fichier."""
     script = _rendu()
-    debut = script.index("# ── Swap")
-    fin = script.index("\nfi\n", script.index("fichier de swap impossible", debut)) + 4
+    debut = script.index("if [ -n", script.index("Swap : un FICHIER"))
+    fin = script.index("\n    fi", script.index("tourne sans swap\"", debut)) + len("\n    fi")
     return script[debut:fin]
 
 
@@ -175,3 +186,58 @@ def test_apt_update_dit_pourquoi_il_renonce(tmp_path):
     r = subprocess.run(["bash", "-c", corps], text=True, capture_output=True,
                        env={"PATH": f"{tmp_path}:/usr/bin:/bin"})
     assert "RENONCE" in r.stdout and "lists/lock" in r.stdout
+
+
+# ── Modèle rescellé : un seul groupe LVM « osiris » ──────────────────────────
+
+def test_gabarit_rescelle_taille_racine_swap_et_volumes():
+    """Gabarit rescellé : « / » porté à la taille demandée, swap et volumes en LV
+    dans le groupe « osiris » (et non en disques séparés ni en swapfile)."""
+    script = _rendu(10, root_gb=200, swap_gb=4)
+    # On rend d'abord à LVM l'espace ajouté au disque, sinon « / » ne peut grandir.
+    assert "growpart" in script and 'pvresize "$pv"' in script
+    # « / » porté à la cible, systeme de fichiers agrandi avec (-r).
+    assert 'lvextend -r -L 200G "/dev/$_vg/root"' in script
+    # Swap = LV « swap » dans le groupe (plus un /swapfile sur gabarit rescellé).
+    assert 'lvcreate -y -L 4G -n swap "$_vg"' in script
+    # Volume supplémentaire = LV dans le même groupe.
+    assert "_preparer_lv 'data' 10 '/data' 'ext4'" in script
+
+
+def test_aiguillage_osiris_sinon_historique():
+    """La bascule se fait à CHAUD : si le groupe « osiris » existe on part en LVM,
+    sinon on retombe sur le modèle historique (gabarit pas encore rescellé)."""
+    script = _rendu(10)
+    assert 'vgs "$_vg"' in script
+    i = script.index('vgs "$_vg"')
+    apres = script[i:]
+    assert "_partitionner_osiris" in apres
+    assert "_partitionner_legacy" in apres
+    assert apres.index("_partitionner_osiris") < apres.index("_partitionner_legacy")
+    # lvm2 peut manquer : on l'installe au moins pour pouvoir INTERROGER le groupe.
+    assert 'command -v vgs' in script
+
+
+def test_on_agrandit_jamais_on_reduit():
+    """Modèle « on agrandit, jamais on réduit » : aucune opération destructrice
+    sur « / » (pas de lvreduce, pas de --resizefs à la baisse)."""
+    script = _rendu(10, root_gb=50)
+    assert "lvreduce" not in script
+    # « / » ne se touche que par agrandissement.
+    assert "lvextend -r -L 50G" in script
+
+
+def test_la_racine_n_est_pas_touchee_sans_taille():
+    """root_gb absent (création pas encore branchée) : on agrandit la partition
+    mais on NE redimensionne PAS « / » — on ne devine pas une taille."""
+    script = _rendu(0, root_gb=None)
+    assert "lvextend -r -L" not in script   # « lvextend » apparaît en commentaire ailleurs
+    # Le reste du modèle reste là (swap LV, agrandissement de partition).
+    assert "growpart" in script and 'lvcreate -y -L 2G -n swap "$_vg"' in script
+
+
+def test_le_script_reste_du_bash_valide_en_lvm():
+    """Le modèle LVM complet (racine + swap + volume) reste du bash valide."""
+    r = subprocess.run(["bash", "-n"], input=_rendu(10, root_gb=200, swap_gb=4),
+                       text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr

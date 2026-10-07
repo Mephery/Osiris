@@ -434,8 +434,16 @@ fi
 unset _root_pw
 {% endif %}
 
-{% if disques %}
-# ── Disques supplementaires ───────────────────────────────────────────────────
+# ── Partitionnement des disques ───────────────────────────────────────────────
+# Deux modeles coexistent pendant la transition de rescellement :
+#  - gabarit rescelle (groupe LVM « {{ partition_vg }} » present) : UN seul groupe,
+#    on agrandit « / » et on taille swap + volumes en LV dedans (modele valide avec
+#    l'equipe le 01/10) ;
+#  - gabarit pas encore rescelle (pas de groupe) : ancien modele, disques separes
+#    et fichier de swap, pour ne pas regresser les sites non encore repris.
+# Les fonctions sont definies dans tous les cas ; l'aiguillage final tranche.
+#
+# ── Modele historique : disques supplementaires separes ───────────────────────
 # Crees VIERGES par l'hyperviseur : c'est ici qu'ils deviennent utilisables. On ne
 # touche QU'A un disque sans table de partition ni systeme de fichiers — jamais au
 # disque systeme, jamais a un disque deja formate (un redeploiement ne doit pas
@@ -558,29 +566,164 @@ _preparer_disque() {
     _log "$mnt monte ($taille Go, $fs$([ "$cible" != "$dev" ] && echo ', LVM'))"
 }
 
+# ── Modele equipe : un seul groupe LVM « {{ partition_vg }} » ──────────────────
+# Un volume = un LV dans ce groupe. libelle -> nom de LV (les « - » deviennent
+# « _ »). On agrandit, on ne reduit JAMAIS : lvextend refuse de lui-meme une cible
+# plus petite, on ne force rien. Monte par UUID (l'ordre des disques peut changer).
+# Comme _preparer_disque, cette fonction appelle _on_error elle-meme : le piege ERR
+# ne se declenche pas dans une fonction (pas de set -E, voulu).
+# $1 libelle  $2 taille (Go)  $3 point de montage  $4 ext4|xfs
+_preparer_lv() {
+    local lib=$1 taille=$2 mnt=$3 fs=$4 nom dev uuid
+    nom=${lib//-/_}
+    dev="/dev/$_vg/$nom"
+    if mountpoint -q "$mnt"; then
+        _log "$mnt deja monte - inchange"
+        return 0
+    fi
+    if lvs "$_vg/$nom" > /dev/null 2>&1; then
+        _log "Volume $nom deja present - $mnt inchange"
+    else
+        # xfs demande xfsprogs, absent de certaines images : repli ext4, annonce.
+        if [ "$fs" = "xfs" ] && ! command -v mkfs.xfs > /dev/null 2>&1 \
+           && ! _fs_apt=$(apt-get install -y xfsprogs 2>&1); then
+            _osiris_log "apt xfsprogs : $(printf '%s' "$_fs_apt" | tail -3 | tr '\n' ' ')"
+        fi
+        if [ "$fs" = "xfs" ] && ! command -v mkfs.xfs > /dev/null 2>&1; then
+            _log "AVERTISSEMENT : xfsprogs non installable - $mnt formate en ext4"
+            fs=ext4
+        fi
+        if ! _lv_out=$(lvcreate -y -L "${taille}G" -n "$nom" "$_vg" 2>&1); then
+            _osiris_log "echec lvcreate $nom ($taille Go) dans $_vg : ${_lv_out:-aucune sortie}"
+            _on_error "$LINENO" "lvcreate $nom dans $_vg"
+            return 1
+        fi
+        if ! _mkfs_out=$("mkfs.$fs" -q -L "$lib" "$dev" 2>&1); then
+            _osiris_log "echec mkfs.$fs sur $dev : ${_mkfs_out:-aucune sortie}"
+            _on_error "$LINENO" "mkfs.$fs sur $dev ($lib)"
+            return 1
+        fi
+    fi
+    if [ -d "$mnt" ] && [ -n "$(ls -A "$mnt" 2>/dev/null)" ]; then
+        _log "AVERTISSEMENT : $mnt n'etait pas vide - son contenu est masque par $nom"
+    fi
+    mkdir -p "$mnt"
+    uuid=$(blkid -s UUID -o value "$dev")
+    grep -q "$uuid" /etc/fstab 2>/dev/null || printf 'UUID=%s %s %s defaults,nofail 0 2\n' "$uuid" "$mnt" "$fs" >> /etc/fstab
+    systemctl daemon-reload 2>/dev/null || true
+    if ! mount "$mnt"; then
+        _on_error "$LINENO" "mount $mnt ($lib)"
+        return 1
+    fi
+    _log "$mnt monte ($taille Go, $fs, LV $nom)"
+}
+
+# Agrandit la partition LVM au disque (OSIRIS le provisionne plus grand que le
+# gabarit), puis taille « / », le swap et les volumes DANS le groupe.
+_partitionner_osiris() {
+    local pv pdisk pnum
+    # 1. Rendre a LVM l'espace ajoute au disque : growpart etend la derniere
+    #    partition (celle du PV), pvresize le fait voir au groupe. growpart vient
+    #    de cloud-guest-utils, absent de certaines images -> installe a la demande.
+    pv=$(pvs --noheadings -o pv_name,vg_name 2>/dev/null | awk -v v="$_vg" '$2==v {print $1; exit}')
+    pv=$(printf '%s' "$pv" | tr -d ' ')
+    if [ -n "$pv" ]; then
+        pdisk=$(lsblk -no PKNAME "$pv" 2>/dev/null | head -1)
+        pnum=$(printf '%s' "$pv" | grep -o '[0-9]*$')
+        if [ -n "$pdisk" ] && [ -n "$pnum" ]; then
+            command -v growpart > /dev/null 2>&1 || apt-get install -y cloud-guest-utils > /dev/null 2>&1 || true
+            if command -v growpart > /dev/null 2>&1; then
+                if growpart "/dev/$pdisk" "$pnum" > /dev/null 2>&1; then
+                    _log "Partition LVM /dev/${pdisk}${pnum} agrandie au disque"
+                else
+                    _log "Partition LVM /dev/${pdisk}${pnum} deja au maximum"
+                fi
+            fi
+        fi
+        pvresize "$pv" > /dev/null 2>&1 && _log "Espace du groupe $_vg reactualise" || true
+    else
+        _log "AVERTISSEMENT : aucun volume physique pour le groupe $_vg - espace non agrandi"
+    fi
+
+    # 2. « / » : le LV « root » porte a la taille demandee (-r agrandit aussi le
+    #    systeme de fichiers). Jamais vers le bas.
+{% if root_gb %}
+    if lvs "$_vg/root" > /dev/null 2>&1; then
+        if lvextend -r -L {{ root_gb | int }}G "/dev/$_vg/root" > /dev/null 2>&1; then
+            _log "/ (volume root) porte a {{ root_gb | int }} Go"
+        else
+            _log "/ (volume root) inchange (deja >= {{ root_gb | int }} Go ou agrandissement impossible)"
+        fi
+    else
+        _log "AVERTISSEMENT : volume « root » absent du groupe $_vg - / non redimensionne"
+    fi
+{% endif %}
+
+    # 3. Swap : un LV « swap » (remplace l'ancien fichier). Cree s'il manque,
+    #    jamais reduit. Rien si un swap est deja actif (gabarit, installeur).
+{% if swap_gb %}
+    if [ -n "$(swapon --noheadings --show 2>/dev/null)" ]; then
+        _log "Swap deja actif - inchange"
+    elif lvs "$_vg/swap" > /dev/null 2>&1; then
+        _log "Volume swap deja present - inchange"
+    elif _sw_out=$(lvcreate -y -L {{ swap_gb | int }}G -n swap "$_vg" 2>&1) \
+         && mkswap "/dev/$_vg/swap" > /dev/null 2>&1; then
+        _suuid=$(blkid -s UUID -o value "/dev/$_vg/swap")
+        grep -q "$_suuid" /etc/fstab 2>/dev/null || printf 'UUID=%s none swap sw 0 0\n' "$_suuid" >> /etc/fstab
+        swapon "/dev/$_vg/swap" 2>/dev/null || true
+        _log "Swap : volume de {{ swap_gb | int }} Go actif"
+    else
+        _osiris_log "echec swap LVM dans $_vg : ${_sw_out:-aucune sortie}"
+        _log "AVERTISSEMENT : volume swap impossible a creer - la machine tourne sans swap dedie"
+    fi
+{% endif %}
+
+    # 4. Volumes supplementaires : des LV dans le meme groupe.
+{% if disques %}
 {% for d in disques %}
-_preparer_disque {{ d.libelle | bash_squote }} {{ d.taille_gb | int }} {{ d.point_montage | bash_squote }} {{ 1 if d.lvm else 0 }} {{ d.systeme_fichiers | bash_squote }} || true
+    _preparer_lv {{ d.libelle | bash_squote }} {{ d.taille_gb | int }} {{ d.point_montage | bash_squote }} {{ d.systeme_fichiers | bash_squote }} || true
+{% endfor %}
+{% endif %}
+}
+
+# Repli historique : disques separes + fichier de swap (gabarit pas rescelle).
+_partitionner_legacy() {
+{% if disques %}
+{% for d in disques %}
+    _preparer_disque {{ d.libelle | bash_squote }} {{ d.taille_gb | int }} {{ d.point_montage | bash_squote }} {{ 1 if d.lvm else 0 }} {{ d.systeme_fichiers | bash_squote }} || true
 {% endfor %}
 {% endif %}
 
-# ── Swap ──────────────────────────────────────────────────────────────────────
-# Un fichier et non une partition : il se redimensionne sans repartitionner.
-# 2 Go fixes : « la moitie de la RAM » date des machines a 1 Go ; sur un serveur
-# a 16 Go, 8 Go de swap ne font que ralentir longtemps avant que le noyau ne
-# tue le processus fautif. Rien si un swap est deja actif (gabarit, installeur).
-# Jamais fatal : une machine sans swap fonctionne, elle le dit et continue.
-if [ -n "$(swapon --noheadings --show 2>/dev/null)" ]; then
-    _log "Swap deja actif - inchange"
-elif [ "$(df --output=avail -k / 2>/dev/null | tail -1)" -lt $((3 * 1024 * 1024)) ]; then
-    _log "AVERTISSEMENT : moins de 3 Go libres sur / : pas de fichier de swap"
-elif { fallocate -l 2G /swapfile 2>/dev/null \
-       || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none 2>/dev/null; } \
-     && chmod 600 /swapfile && mkswap /swapfile > /dev/null 2>&1 && swapon /swapfile 2>/dev/null; then
-    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    _log "Swap : fichier de 2 Go actif"
+    # Swap : un FICHIER et non une partition : il se redimensionne sans
+    # repartitionner. 2 Go fixes ; rien si un swap est deja actif. Jamais fatal.
+    if [ -n "$(swapon --noheadings --show 2>/dev/null)" ]; then
+        _log "Swap deja actif - inchange"
+    elif [ "$(df --output=avail -k / 2>/dev/null | tail -1)" -lt $((3 * 1024 * 1024)) ]; then
+        _log "AVERTISSEMENT : moins de 3 Go libres sur / : pas de fichier de swap"
+    elif { fallocate -l 2G /swapfile 2>/dev/null \
+           || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none 2>/dev/null; } \
+         && chmod 600 /swapfile && mkswap /swapfile > /dev/null 2>&1 && swapon /swapfile 2>/dev/null; then
+        grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        _log "Swap : fichier de 2 Go actif"
+    else
+        rm -f /swapfile
+        _log "AVERTISSEMENT : fichier de swap impossible a activer - la machine tourne sans swap"
+    fi
+}
+
+# ── Aiguillage ─────────────────────────────────────────────────────────────────
+# lvm2 peut manquer aux images cloud : on l'installe au moins pour INTERROGER le
+# groupe. Son absence fait forcement tomber dans le repli historique.
+_vg={{ partition_vg | bash_squote }}
+if ! command -v vgs > /dev/null 2>&1 && ! _lvm_apt=$(apt-get install -y lvm2 2>&1); then
+    _osiris_log "apt lvm2 : $(printf '%s' "$_lvm_apt" | tail -3 | tr '\n' ' ')"
+fi
+if command -v vgs > /dev/null 2>&1 && vgs "$_vg" > /dev/null 2>&1; then
+    _log "Groupe LVM « $_vg » detecte - partitionnement en volumes logiques"
+    _partitionner_osiris
 else
-    rm -f /swapfile
-    _log "AVERTISSEMENT : fichier de swap impossible a activer - la machine tourne sans swap"
+    _log "Groupe LVM « $_vg » absent - gabarit non rescelle, modele disques separes"
+    _partitionner_legacy
 fi
 
 {% if profile.machine_type == 'server' %}
