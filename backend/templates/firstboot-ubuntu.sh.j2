@@ -779,7 +779,7 @@ if command -v vgs > /dev/null 2>&1 && vgs "$_vg" > /dev/null 2>&1; then
     _log "Groupe LVM « $_vg » detecte - partitionnement en volumes logiques"
     _partitionner_osiris
 else
-    _log "Groupe LVM « $_vg » absent - gabarit non rescelle, modele disques separes"
+    _log "Groupe LVM « $_vg » absent - gabarit classique : disques separes et fichier de swap"
     _partitionner_legacy
 fi
 
