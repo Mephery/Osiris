@@ -6613,9 +6613,13 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
         # et il garde une référence vers une ISO qui peut être supprimée ou mise à
         # jour. On l'ôte quand il est là.
         conf = await _proxmox_get(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config")
-        if "cdrom" in str(conf.get("ide2", "")):
+        a_retirer = [k for k in ("ide2",) if "cdrom" in str(conf.get(k, ""))]
+        # Le mot de passe cloud-init du gabarit : jamais hérité (cf. chemin cloud-init)
+        if conf.get("cipassword"):
+            a_retirer.append("cipassword")
+        if a_retirer:
             await _proxmox_put(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/config",
-                               {"delete": "ide2"})
+                               {"delete": ",".join(a_retirer)})
 
         # Le disque système hérite de la taille du template. On ne l'agrandit que s'il
         # est demandé PLUS grand : Proxmox refuse de rétrécir, et un resize à taille
@@ -6660,6 +6664,13 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
         # Le jeton en numéro de série SMBIOS (cf. `_smbios_avec_jeton`) : le
         # cloud-init de Proxmox n'arrive pas dans la VM, ce canal-là si.
         cloud_config["smbios1"] = _smbios_avec_jeton(conf_clone, jeton)
+        # Le mot de passe cloud-init du GABARIT, recopié par le clone : cloud-init le
+        # poserait sur le compte du profil (`ciuser` ci-dessous), donc le même mot
+        # de passe sur toutes les VM du gabarit. Vu le 07/10 sur le 9003 de Nova et
+        # de FIT, resté de sa construction. Un compte d'administration n'a que des
+        # clés ; l'accès console de secours, c'est le mot de passe root par machine.
+        if conf_clone.get("cipassword"):
+            cloud_config["delete"] = "cipassword"
 
         # Le template n'a qu'un disque : ceux-ci s'ajoutent, vierges, et seront
         # formatés puis montés au premier démarrage (aucun sur un gabarit LVM).
