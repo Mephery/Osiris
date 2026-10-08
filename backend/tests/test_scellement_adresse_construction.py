@@ -118,6 +118,53 @@ def test_sans_fichier_interfaces_rien_ne_casse(fonction, tmp_path):
     assert not f.exists()
 
 
+def test_rien_a_retirer_est_dit(fonction, tmp_path):
+    """Une ligne absente du journal de scellement laissait se demander si
+    l'étape avait seulement tourné (07/10, gabarits tirés d'images cloud)."""
+    cloud = "auto lo\niface lo inet loopback\nauto eth0\niface eth0 inet dhcp\n"
+    r, _, _ = _lancer(fonction, tmp_path, cloud, HOSTS_INSTALLEUR)
+    assert "rien a retirer" in r.stdout
+
+
+def test_sans_fichier_interfaces_rien_a_retirer_est_dit_aussi(fonction, tmp_path):
+    r, _, _ = _lancer(fonction, tmp_path, None, None)
+    assert "rien a retirer" in r.stdout and "FIN" in r.stdout, r.stderr
+
+
+def _annonce(script, tmp_path, url, ip):
+    """Exécute curl_annonce contre un faux curl qui recopie ses arguments."""
+    debut = script.index("curl_annonce() {")
+    fn = script[debut:script.index("\n}\n", debut) + 3]
+    faux = tmp_path / "curl"
+    faux.write_text('#!/bin/bash\necho "$@"\n')
+    faux.chmod(0o755)
+    r = subprocess.run(
+        ["bash", "-c", f"set -euo pipefail\nexport PATH={tmp_path}:$PATH\n"
+                       f"OSIRIS_URL={url}\nOSIRIS_IP={ip}\n{fn}\n"
+                       f"curl_annonce -sf $OSIRIS_URL/bootstrap/sealed"],
+        text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_l_annonce_du_scellement_epingle_le_nom_https(script, tmp_path):
+    """Un `curl` nu dépendait du DNS de la VM de construction : sur un VLAN qui
+    ne résout pas le nom public, le gabarit n'était pas enregistré (07/10)."""
+    sortie = _annonce(script, tmp_path, "https://osiris.example.com", "192.0.2.11")
+    assert "--resolve osiris.example.com:443:192.0.2.11" in sortie
+
+
+def test_l_annonce_en_http_reste_simple(script, tmp_path):
+    sortie = _annonce(script, tmp_path, "http://192.0.2.11", "")
+    assert "--resolve" not in sortie
+
+
+def test_le_scellement_annonce_par_l_appel_epingle(script):
+    sceller = script[script.index('if [ "$SEAL" -eq 1 ]; then'):]
+    assert "curl_annonce -sf -X POST" in sceller
+    assert "&& curl -sf" not in sceller
+
+
 def test_le_scellement_appelle_la_fonction(script):
     sceller = script[script.index('if [ "$SEAL" -eq 1 ]; then'):]
     assert "neutraliser_adresse_installeur" in sceller

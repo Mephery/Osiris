@@ -360,3 +360,68 @@ def test_le_fichier_networkd_passe_AVANT_ceux_de_l_image(agent):
     alphabétique. Une image embarquant un `01-eth0.network` battrait un `60-`."""
     assert "00-osiris.network" in _code(agent)
     assert "60-osiris.network" not in _code(agent)
+
+
+# ── Clone en DHCP d'un gabarit dont le scellement a vidé interfaces ───────────
+
+INTERFACES_SCELLE = ("source /etc/network/interfaces.d/*\n\n"
+                     "auto lo\niface lo inet loopback\n")
+
+
+def _dhcp(fonctions, tmp_path, interfaces=INTERFACES_SCELLE, **scripts):
+    (tmp_path / "interfaces").write_text(interfaces)
+    scripts.setdefault("ifup", 'echo "ifup $*" >> "$TRACE"; exit 0')
+    sortie = _lancer(fonctions,
+                     f'export OSIRIS_INTERFACES="{tmp_path}/interfaces"\n'
+                     'activer_dhcp ens192', tmp_path, **scripts)
+    trace = tmp_path / "trace.txt"
+    return sortie, trace.read_text() if trace.exists() else ""
+
+
+def test_un_clone_dhcp_sans_cloud_init_declare_sa_carte(fonctions, tmp_path):
+    """Le trou du 07/10 : le scellement vide /etc/network/interfaces (l'adresse
+    de construction ne doit pas partir avec le gabarit). Un clone nu vSphere en
+    DHCP n'a ni guestinfo ni cloud-init : PERSONNE ne déclarait la carte, et
+    aucune demande DHCP ne partait."""
+    sortie, trace = _dhcp(fonctions, tmp_path)
+    ecrit = (tmp_path / "ifupdown" / "60-osiris").read_text()
+    assert "auto ens192" in ecrit
+    assert "iface ens192 inet dhcp" in ecrit
+    assert "ifup ens192" in trace
+    assert "DHCP active" in sortie
+
+
+def test_une_carte_deja_declaree_n_est_pas_doublee(fonctions, tmp_path):
+    """Image cloud, ou cloud-init qui a fait son travail : ifupdown additionne
+    les déclarations d'une même carte, en ajouter une serait nuire."""
+    sortie, trace = _dhcp(fonctions, tmp_path,
+                          INTERFACES_SCELLE + "auto ens192\niface ens192 inet dhcp\n")
+    assert not (tmp_path / "ifupdown" / "60-osiris").exists()
+    assert "ifup" not in trace
+
+
+def test_une_declaration_dans_interfaces_d_compte_aussi(fonctions, tmp_path):
+    (tmp_path / "ifupdown").mkdir(exist_ok=True)
+    (tmp_path / "ifupdown" / "50-cloud-init").write_text("iface ens192 inet dhcp\n")
+    sortie, trace = _dhcp(fonctions, tmp_path)
+    assert not (tmp_path / "ifupdown" / "60-osiris").exists()
+
+
+def test_networkd_actif_fait_son_dhcp_tout_seul(fonctions, tmp_path):
+    sortie, trace = _dhcp(fonctions, tmp_path,
+                          systemctl='echo "systemctl $*" >> "$TRACE"\n'
+                                    '[ "$2" = "systemd-networkd" ]')
+    assert not (tmp_path / "ifupdown" / "60-osiris").exists()
+    assert "ifup" not in trace
+
+
+def test_sans_bail_dhcp_le_journal_le_dit(fonctions, tmp_path):
+    """Un VLAN sans DHCP : on ne prétend pas avoir réussi."""
+    sortie, _ = _dhcp(fonctions, tmp_path, ifup='exit 1')
+    assert "aucun bail obtenu" in sortie
+
+
+def test_le_dhcp_de_secours_n_intervient_qu_en_l_absence_d_adresse_imposee(agent):
+    corps = agent[agent.index(FIN):]
+    bloc = corps[corps.index("activer_dhcp") - 200:corps.index("activer_dhcp")]
+    assert '-z "${ADR:-}"' in bloc and "! adresse_utilisable" in bloc

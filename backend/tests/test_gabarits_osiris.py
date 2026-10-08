@@ -132,7 +132,10 @@ def test_un_technicien_ne_marque_rien(client, technician_headers, hyperviseur):
 def _annonce(script: str) -> str:
     m = re.search(r"^    _uuid=\$\(.*?^    fi\n", script, re.S | re.M)
     assert m, "l'annonce du gabarit n'est pas dans le script rendu"
-    return m.group(0)
+    # L'annonce passe par curl_annonce (nom HTTPS épinglé) : on l'emporte avec
+    # elle, et le faux `curl` du test reste celui qu'elle appelle.
+    debut = script.index("curl_annonce() {")
+    return script[debut:script.index("\n}\n", debut) + 3] + m.group(0)
 
 
 def test_le_script_linux_annonce_uuid_empreinte_et_os(tmp_path):

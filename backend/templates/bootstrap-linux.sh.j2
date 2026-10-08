@@ -341,6 +341,40 @@ appliquer_adressage() {
     echo "[$(ts)] Adressage : aucun moteur reseau persistant trouve - $ip pose TEMPORAIREMENT sur $carte, ne survivra PAS au redemarrage."
 }
 
+# Un clone en DHCP doit DEMANDER une adresse — encore faut-il que quelqu'un
+# declare sa carte.
+#
+# Le scellement vide /etc/network/interfaces d'un gabarit installe par preseed,
+# pour que l'adresse de construction ne parte pas avec lui. Un clone a adresse
+# imposee recoit la sienne de l'agent ; un clone sous cloud-init, de cloud-init.
+# Mais un clone en DHCP SANS cloud-init (clone nu vSphere : aucune datasource)
+# ne recevait rien de personne : ifupdown ne montait pas la carte, aucune
+# demande DHCP ne partait, et la machine restait muette.
+#
+# Ne s'occupe QUE d'ifupdown, et seulement si rien ne declare deja la carte :
+# netplan, systemd-networkd ou NetworkManager font du DHCP d'eux-memes.
+# Chemins surchargeables UNIQUEMENT pour les tests.
+activer_dhcp() {
+    local carte="$1" f=${OSIRIS_INTERFACES:-/etc/network/interfaces}
+    local d=${OSIRIS_IFUPDOWN:-/etc/network/interfaces.d} fichier
+    command -v ifup >/dev/null 2>&1 || return 0
+    [ -d "$d" ] || return 0
+    systemctl is-active systemd-networkd >/dev/null 2>&1 && return 0
+    systemctl is-active NetworkManager >/dev/null 2>&1 && return 0
+    if cat "$f" "$d"/* 2>/dev/null \
+            | grep -Eq "^[[:space:]]*iface[[:space:]]+$carte[[:space:]]"; then
+        return 0
+    fi
+    fichier="$d/60-osiris"
+    printf 'auto %s\niface %s inet dhcp\n' "$carte" "$carte" > "$fichier"
+    chmod 644 "$fichier"
+    if ifup "$carte" >/dev/null 2>&1; then
+        echo "[$(ts)] Adressage : aucune declaration pour $carte - DHCP active via $fichier."
+    else
+        echo "[$(ts)] Adressage : DHCP declare pour $carte ($fichier) mais aucun bail obtenu - le VLAN a-t-il un DHCP ?"
+    fi
+}
+
 # Avoir DEJA une adresse ne veut pas dire qu'il n'y a rien a imposer.
 #
 # Un gabarit fabrique a partir d'une VM deployee emporte le reseau de cette VM —
@@ -399,6 +433,12 @@ if true; then
             fi
         fi
     fi
+fi
+
+# Rien d'impose et toujours pas d'adresse : la machine est censee faire du DHCP.
+if [ -z "${ADR:-}" ] && ! adresse_utilisable; then
+    CARTE=$(premiere_carte)
+    [ -n "$CARTE" ] && activer_dhcp "$CARTE"
 fi
 
 SCRIPT=/run/osiris-firstboot.sh
@@ -530,10 +570,14 @@ neutraliser_adresse_installeur() {
     local f=${OSIRIS_INTERFACES:-/etc/network/interfaces}
     local hosts=${OSIRIS_HOSTS:-/etc/hosts}
     local ip
+    # Les deux sorties sans rien faire le DISENT : une ligne absente du journal
+    # de scellement laissait se demander si l'etape avait seulement tourne.
     if [ ! -f "$f" ]; then
+        echo "[OSIRIS] Adresse de construction : rien a retirer ($f absent, reseau gere sans ifupdown)."
         return 0
     fi
     if ! grep -Eq '^[[:space:]]*iface[[:space:]]+[^[:space:]]+[[:space:]]+inet6?[[:space:]]+static' "$f"; then
+        echo "[OSIRIS] Adresse de construction : rien a retirer (aucune adresse fixe dans $f)."
         return 0
     fi
     # La meme adresse figure dans /etc/hosts (l'installeur l'y associe au nom) :
@@ -559,6 +603,21 @@ OSIRIS_INTERFACES_EOF
     echo "[OSIRIS] Adresse de construction retiree de $f : chaque clone recevra la sienne."
 }
 
+# L'annonce du scellement passe, comme tout appel de l'agent, par le nom HTTPS
+# epingle sur l'adresse d'OSIRIS. Un `curl` nu dependait du DNS de la VM de
+# construction : sur un VLAN qui ne resout pas ce nom, le gabarit n'etait pas
+# enregistre, et il fallait epingler le nom a la main dans /etc/hosts.
+# (L'agent grave a son propre `curl_osiris` : le here-doc est fige, il ne voit
+# pas les fonctions de ce script.)
+curl_annonce() {
+    local opts=() hote
+    case "$OSIRIS_URL" in
+        https://*) hote=${OSIRIS_URL#https://}; hote=${hote%%/*}; hote=${hote%%:*}
+                   [ -n "$OSIRIS_IP" ] && opts+=(--resolve "$hote:443:$OSIRIS_IP") ;;
+    esac
+    curl "${opts[@]}" "$@"
+}
+
 if [ "$SEAL" -eq 1 ]; then
     echo "[OSIRIS] Scellement du template..."
     # Le gabarit s'annonce a OSIRIS, qui ne proposera en clone nu QUE les modeles
@@ -570,7 +629,7 @@ if [ "$SEAL" -eq 1 ]; then
     # decoupe au premier demarrage. Constate ici, sur le disque, et non declare.
     _lvm=false
     command -v vgs > /dev/null 2>&1 && vgs {{ vg }} > /dev/null 2>&1 && _lvm=true
-    if [ -n "$_uuid" ] && curl -sf -X POST "$OSIRIS_URL/bootstrap/sealed" \
+    if [ -n "$_uuid" ] && curl_annonce -sf -X POST "$OSIRIS_URL/bootstrap/sealed" \
             -H "Content-Type: application/json" --max-time 15 \
             -d "{\"uuid\":\"$_uuid\",\"empreinte\":\"{{ empreinte }}\",\"os\":\"linux\",\"nom\":\"$(hostname)\",\"lvm\":$_lvm}" > /dev/null; then
         echo "[OSIRIS] Gabarit enregistre aupres d'OSIRIS (agent {{ empreinte }}, LVM : $_lvm)."
