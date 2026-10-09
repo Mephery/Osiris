@@ -2822,6 +2822,47 @@ async def vm_status(mac: str, _: User = Depends(get_current_user)):
     }
 
 
+@app.get("/machines/{mac}/adresse")
+async def adresse_machine(mac: str, _: User = Depends(get_current_user)):
+    """L'adresse où joindre la machine, et d'où on la tient — de la plus sûre à
+    la moins sûre :
+
+    - « constatee » : lue EN DIRECT par l'hyperviseur (agent invité, VMware Tools)
+      sur la carte de la fiche. Vraie maintenant.
+    - « remontee »  : celle que la machine a vue sur elle-même au premier démarrage.
+      Seule source sans agent invité ; un bail DHCP a pu changer depuis.
+    - « declaree »  : celle saisie à la création. Rien ne prouve qu'elle est portée.
+    """
+    import asyncio
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        h = session.get(Hypervisor, machine.hypervisor_id) if machine.hypervisor_id else None
+        profil = session.get(Profile, machine.profile_id) if machine.profile_id else None
+    # Le compte à proposer dans « ssh compte@ip » : celui du profil, sous Linux
+    compte = (profil.default_user or "") if profil and machine.os != "windows" else ""
+    declaree = (machine.ip_cidr or "").split("/")[0].strip()
+    if h and machine.proxmox_vm_id:
+        try:
+            live = await asyncio.wait_for(_provider(h).adresses_de_la_carte(
+                h, machine.proxmox_node, machine.proxmox_vm_id, clean_mac), timeout=15)
+        except Exception:      # noqa: BLE001 — pas d'agent, VM éteinte, hyperviseur muet
+            live = []
+        if live:
+            return {"ip": declaree if declaree in live else live[0], "ips": live,
+                    "source": "constatee", "le": None, "compte": compte}
+    if machine.ip_constatee:
+        at = machine.ip_constatee_at
+        return {"ip": machine.ip_constatee, "ips": [machine.ip_constatee], "source": "remontee",
+                "le": (at if at.tzinfo else at.replace(tzinfo=timezone.utc)).isoformat() if at else None,
+                "compte": compte}
+    if declaree:
+        return {"ip": declaree, "ips": [declaree], "source": "declaree", "le": None, "compte": compte}
+    return {"ip": "", "ips": [], "source": "", "le": None, "compte": compte}
+
+
 class SnapshotCreateBody(SQLModel):
     name: str
     description: str = ""
@@ -3047,6 +3088,15 @@ def post_smoke_tests(mac: str, data: dict, jeton: Optional[str] = Header(None, a
             raise HTTPException(status_code=404, detail="Machine introuvable")
         machine.smoke_status = overall
         machine.smoke_results = json.dumps(tests, ensure_ascii=False)
+        # L'IP vue par la machine elle-même : seule source en DHCP sans agent invité
+        ip = str(data.get("ip") or "").strip()
+        try:
+            adr = ipaddress.IPv4Address(ip)
+            if not (adr.is_loopback or adr.is_link_local or adr.is_unspecified or adr.is_multicast):
+                machine.ip_constatee = ip
+                machine.ip_constatee_at = datetime.now(timezone.utc)
+        except ValueError:
+            pass
         session.add(machine)
         session.commit()
     import threading
@@ -5066,6 +5116,17 @@ class ProxmoxProvider:
     """Hyperviseur Proxmox VE, piloté par jeton d'API."""
 
     label = "Proxmox VE"
+
+    @staticmethod
+    async def adresses_de_la_carte(h: Hypervisor, node: str, vm_id: int, mac_plain: str) -> list[str]:
+        """IPv4 que l'agent invité voit sur la carte de CETTE MAC. Filtrer par la
+        MAC de la fiche vaut contrôle d'identité : une VM étrangère ne la porte pas.
+        Sans agent, Proxmox répond en erreur : l'appelant retombe sur la suite."""
+        rep = await _proxmox_get(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/agent/network-get-interfaces")
+        return [a["ip-address"] for itf in (rep or {}).get("result", [])
+                if (itf.get("hardware-address") or "").lower().replace(":", "") == mac_plain
+                for a in itf.get("ip-addresses", [])
+                if a.get("ip-address-type") == "ipv4" and not a.get("ip-address", "").startswith("127.")]
 
     @staticmethod
     async def test(h: Hypervisor) -> dict:

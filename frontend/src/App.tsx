@@ -1568,6 +1568,7 @@ export default function App() {
           <MachineDetailPanel
             key={detailMac}
             machine={machine}
+            token={auth.token}
             isAdmin={auth.role === 'admin'}
             profileName={profileName(machine.profile_id)}
             deployLog={deployLogs[machine.mac] ?? []}

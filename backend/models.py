@@ -333,6 +333,12 @@ class Machine(SQLModel, table=True):
     # Smoke tests post-deploiement
     smoke_status: str = Field(default="")   # "" | "ok" | "warnings"
     smoke_results: str = Field(default="")  # JSON : [{"name": "...", "ok": true, "detail": "..."}]
+    # IPv4 que la machine a CONSTATÉE sur elle-même au premier démarrage (route par
+    # défaut), remontée avec ses tests. Seule source en DHCP quand l'hyperviseur ne
+    # peut pas la lire (pas d'agent invité, machine physique). Peut avoir changé
+    # depuis : la date dit de quand elle date.
+    ip_constatee: str = Field(default="")
+    ip_constatee_at: Optional[datetime] = Field(default=None)
     # Pack de drivers a injecter au deploiement (choisi/confirme par l'operateur).
     # Si defini + pack telecharge : injection ciblee ; sinon fallback = tout le dossier drivers.
     driver_pack_id: Optional[int] = Field(default=None, foreign_key="driver_pack.id")

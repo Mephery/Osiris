@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import type { Machine, DeploymentEvent, SnapshotEntry } from './types'
+import { authHeader } from './types'
+import { commandeSsh, provenanceAdresse, type AdresseMachine } from './adresseMachine'
 import { IcoX, IcoTerminal, IcoCamera, IcoDownload } from './icons'
+
+const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 interface VmProps {
   consoleUrl: string
@@ -25,6 +29,7 @@ interface VmProps {
 
 interface MachineDetailPanelProps {
   machine: Machine
+  token: string
   isAdmin: boolean
   profileName: string | null
   deployLog: string[]
@@ -47,7 +52,7 @@ const copy = (text: string, label: string) => {
 }
 
 export function MachineDetailPanel({
-  machine, isAdmin, profileName, deployLog, onDownloadLog, history, bitlocker, onFetchBitlockerKey,
+  machine, token, isAdmin, profileName, deployLog, onDownloadLog, history, bitlocker, onFetchBitlockerKey,
   lapsPassword, onFetchLapsPassword, onSaveUserName, onSaveUserEmail, onSaveNotes, onClose, vm,
 }: MachineDetailPanelProps) {
   const logRef = useRef<HTMLPreElement | null>(null)
@@ -55,6 +60,18 @@ export function MachineDetailPanel({
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [deployLog])
+
+  // Lue à l'ouverture et quand la machine change de statut : une VM qui vient de
+  // finir son déploiement a peut-être enfin une adresse à montrer.
+  const [adresse, setAdresse] = useState<AdresseMachine | null>(null)
+  useEffect(() => {
+    let annule = false
+    fetch(`${API_URL}/machines/${machine.mac}/adresse`, { headers: authHeader(token) })
+      .then(r => r.ok ? r.json() : null)
+      .then((a: AdresseMachine | null) => { if (!annule) setAdresse(a) })
+      .catch(() => {})
+    return () => { annule = true }
+  }, [machine.mac, machine.status, token])
 
   return (
     <div className="osiris-sheet-overlay" onClick={e => { if (e.target === e.currentTarget) onClose() }}>
@@ -75,6 +92,42 @@ export function MachineDetailPanel({
         </div>
 
         <div className="osiris-sheet-body p-5 space-y-4">
+          {/* ── Adresse IP : d'où on la tient, et la commande pour s'y connecter ── */}
+          <div>
+            <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Adresse IP</p>
+            {adresse === null ? (
+              <p className="text-[10px] font-mono text-slate-700">Lecture…</p>
+            ) : (() => {
+              const prov = provenanceAdresse(adresse)
+              const ssh = commandeSsh(adresse)
+              return (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {adresse.ip && (
+                      <button onClick={() => copy(adresse.ip, 'Adresse')} title="Copier l'adresse"
+                        className="text-sm font-mono text-white hover:text-blue-300 cursor-pointer">
+                        {adresse.ip}
+                      </button>
+                    )}
+                    <span className={`text-[10px] font-mono ${prov.sure ? 'text-green-400' : 'text-amber-500'}`}>
+                      {prov.sure ? '●' : '○'} {prov.texte}
+                    </span>
+                  </div>
+                  {adresse.ips.length > 1 && (
+                    <p className="text-[10px] font-mono text-slate-500">Autres adresses de la carte : {adresse.ips.filter(i => i !== adresse.ip).join(', ')}</p>
+                  )}
+                  {ssh && (
+                    <button onClick={() => copy(ssh, 'Commande SSH')}
+                      className="osiris-btn text-[10px] px-2 py-0.5 font-mono flex items-center gap-1"
+                      title="Copier la commande de connexion">
+                      <IcoTerminal cls="w-3 h-3" /> {ssh}
+                    </button>
+                  )}
+                </div>
+              )
+            })()}
+          </div>
+
           {/* ── Journal de déploiement (style terminal) ── */}
           <div>
             <div className="flex items-center justify-between mb-1.5">

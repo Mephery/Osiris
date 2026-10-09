@@ -689,6 +689,21 @@ class VSphereProvider:
 
 
     @staticmethod
+    async def adresses_de_la_carte(h: Hypervisor, node: str, vm_id: int, mac_plain: str) -> list[str]:
+        """IPv4 que VMware Tools voit sur la carte de CETTE MAC. Filtrer par la MAC
+        de la fiche vaut contrôle d'identité : une VM étrangère ne la porte pas."""
+        def work():
+            si = _connect(h)
+            vm = _find_vm(si, int(vm_id))
+            if vm is None:
+                return []
+            lus = _proprietes(si, [vm], vim.VirtualMachine, ["guest.net"])
+            return [ip for nic in ((lus[0].get("guest.net") if lus else None) or [])
+                    if (nic.macAddress or "").lower().replace(":", "") == mac_plain
+                    for ip in (nic.ipAddress or []) if "." in ip and ":" not in ip]
+        return await _run(work)
+
+    @staticmethod
     async def destroy_vm(h: Hypervisor, node: str, vm_id: Any,
                          nom_attendu: str = "", strict: bool = False) -> None:
         """Suppression best-effort : ne masque jamais l'erreur d'origine.
