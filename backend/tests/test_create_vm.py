@@ -86,12 +86,18 @@ def _patch_proxmox(monkeypatch, captured: dict, *, iso_distante: int | None = 40
         return {}
 
     async def fake_wait(h, node, upid, max_wait=120):
-        captured["wait_max"] = max_wait
+        # La plus longue attente demandée : la création de la VM attend aussi sa
+        # tâche, après le téléchargement de l'ISO.
+        captured["wait_max"] = max(captured.get("wait_max", 0), max_wait)
 
     monkeypatch.setattr(main, "_proxmox_get", fake_get)
     monkeypatch.setattr(main, "_proxmox_post", fake_post)
     monkeypatch.setattr(main, "_proxmox_delete", fake_delete)
     monkeypatch.setattr(main, "_proxmox_wait_task", fake_wait)
+
+
+async def _attente_immediate(h, node, upid, max_wait=120):
+    """La tâche Proxmox est finie tout de suite (la création attend sa tâche)."""
 
 
 def test_create_vm_windows_hardware(client, admin_headers, monkeypatch, tmp_path):
@@ -313,6 +319,7 @@ def test_la_fiche_est_ecrite_avant_le_moindre_appel_proxmox(client, admin_header
 
     monkeypatch.setattr(main, "_proxmox_get", fake_get)
     monkeypatch.setattr(main, "_proxmox_post", fake_post)
+    monkeypatch.setattr(main, "_proxmox_wait_task", _attente_immediate)
 
     resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
         "hostname": "srv-linux", "client": "Acme", "os": "ubuntu",
@@ -345,6 +352,7 @@ def test_echec_hyperviseur_detruit_la_vm_retire_la_fiche_et_laisse_une_trace(
 
     monkeypatch.setattr(main, "_proxmox_get", fake_get)
     monkeypatch.setattr(main, "_proxmox_post", fake_post)
+    monkeypatch.setattr(main, "_proxmox_wait_task", _attente_immediate)
 
     destroyed: list = []
 
@@ -503,3 +511,36 @@ def test_les_disques_multiples_sont_refuses_sous_windows(client, admin_headers, 
     })
     assert resp.status_code == 422
     assert "Linux" in resp.json()["detail"]
+
+
+def test_windows_attend_la_creation_avant_de_demarrer(client, admin_headers,
+                                                      monkeypatch, tmp_path):
+    """La création est une TÂCHE Proxmox, qui range aussi la VM dans le pool. Le
+    jeton n'ayant de droits QUE par le pool, démarrer avant la fin de la tâche
+    donnait 403 VM.PowerMgmt et une VM sans fiche (FIT, 09/10)."""
+    hv_id = _make_hypervisor()
+    captured: dict = {}
+    _iso_bidon(tmp_path, monkeypatch)
+    _patch_proxmox(monkeypatch, captured)
+    ordre = []
+    post, wait = main._proxmox_post, main._proxmox_wait_task
+
+    async def post_trace(h, path, data=None):
+        ordre.append("creation" if path.endswith("/qemu") else
+                     "demarrage" if path.endswith("/status/start") else "autre")
+        return await post(h, path, data)
+
+    async def wait_trace(h, node, upid, max_wait=120):
+        ordre.append("attente")
+        return await wait(h, node, upid, max_wait)
+
+    monkeypatch.setattr(main, "_proxmox_post", post_trace)
+    monkeypatch.setattr(main, "_proxmox_wait_task", wait_trace)
+
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "SRV-WIN", "client": "Acme", "os": "windows",
+        "node": "pve", "storage": "local-lvm", "boot_mode": "pxe",
+    })
+    assert resp.status_code == 201, resp.text
+    i = ordre.index("creation")
+    assert ordre[i + 1] == "attente" and "demarrage" in ordre[i + 2:], ordre

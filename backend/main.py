@@ -6794,7 +6794,13 @@ async def _provision_vm(h: Hypervisor, body, vm_id: int, mac_colons: str,
             vm_config["ide2"] = f"{body.iso},media=cdrom"
         vm_config["smbios1"] = _smbios_avec_jeton(None, jeton)
         _ajouter_pool(h, vm_config)
-        await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu", vm_config)
+        # La création est une TÂCHE Proxmox, et l'ajout au pool en fait partie.
+        # Démarrer sans l'attendre, c'est démarrer une VM qui n'est pas encore dans
+        # le pool — or le jeton n'a de droits QUE par le pool : 403 VM.PowerMgmt,
+        # VM laissée sans fiche (vu le 09/10 sur FIT). Les clones attendaient déjà.
+        upid = await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu", vm_config)
+        if isinstance(upid, str):
+            await _proxmox_wait_task(h, body.node, upid)
         await _proxmox_post(h, f"/api2/json/nodes/{body.node}/qemu/{vm_id}/status/start")
 
     elif body.boot_mode == "template":
