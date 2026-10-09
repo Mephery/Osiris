@@ -22,7 +22,8 @@ from typing import Optional
 from urllib.parse import quote
 from xml.sax.saxutils import escape
 from passlib.hash import sha512_crypt
-from fastapi import HTTPException, FastAPI, Request, Response, Depends, Header, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import HTTPException, FastAPI, Request, Response, Depends, Header, WebSocket, WebSocketDisconnect, BackgroundTasks, Query
+from fastapi.concurrency import run_in_threadpool
 import jetons
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -2743,8 +2744,31 @@ def update_machine(mac: str, patch: MachinePatch, current_user: User = Depends(g
         }
 
 
-@app.delete("/machines/{mac}", status_code=204)
-async def delete_machine(mac: str, destroy_proxmox: bool = False, current_user: User = Depends(require_admin)):
+@app.get("/machines/{mac}/zabbix")
+def etat_zabbix_machine(mac: str, _: User = Depends(require_admin)):
+    """L'hôte Zabbix de la machine, pour la fenêtre de suppression : existe-t-il,
+    est-il dans le groupe d'OSIRIS (seul cas où OSIRIS y touchera) ?"""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        hostname = machine.hostname
+    return zabbix.etat_hote(hostname)
+
+
+@app.delete("/machines/{mac}")
+async def delete_machine(mac: str, destroy_proxmox: bool = False, zabbix_action: str = Query("rien", alias="zabbix"),
+                         current_user: User = Depends(require_admin)):
+    """Supprime la fiche, et sur demande la VM et/ou son hôte Zabbix.
+
+    `zabbix` : rien | desactiver | supprimer. Traité APRÈS la destruction de la VM
+    (une VM qui refuse de mourir garde ainsi sa supervision) et AVANT la fiche. Un
+    échec Zabbix n'arrête pas la suppression — la VM est peut-être déjà détruite,
+    et une fiche sans VM serait pire — mais il est rendu à l'opérateur."""
+    if zabbix_action not in zabbix.ACTIONS_RETRAIT:
+        raise HTTPException(status_code=422, detail=(
+            f"Choix Zabbix inconnu : {zabbix_action} (attendu : {', '.join(zabbix.ACTIONS_RETRAIT)})."))
     clean_mac = validate_mac(mac)
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
@@ -2779,13 +2803,22 @@ async def delete_machine(mac: str, destroy_proxmox: bool = False, current_user: 
         # VM toujours allumée et affichait « supprimée » : vu le 25/09.
         await _provider(h).destroy_vm(h, node, vm_id, nom_attendu=nom_attendu, strict=True)
 
+    # Appel synchrone (urllib) : hors de la boucle, comme tout appel bloquant.
+    try:
+        resultat_zabbix = await run_in_threadpool(zabbix.retirer_hote, hostname, zabbix_action)
+    except Exception as e:      # noqa: BLE001 — rendu à l'opérateur, pas avalé
+        _hv_log.warning("Zabbix : hôte %s non traité (%s) : %s", hostname, zabbix_action, e)
+        resultat_zabbix = f"echec: {e}"
+
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if machine:
             _log(session, current_user, "delete_machine", target_mac=clean_mac,
-                 details={"hostname": hostname, "client": client, "destroy_proxmox": destroy_proxmox})
+                 details={"hostname": hostname, "client": client, "destroy_proxmox": destroy_proxmox,
+                          "zabbix": resultat_zabbix})
             session.delete(machine)
             session.commit()
+    return {"zabbix": resultat_zabbix}
 
 
 class VmPowerBody(SQLModel):

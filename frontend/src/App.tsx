@@ -27,6 +27,8 @@ import { OrganisationsSection } from './OrganisationsSection'
 import { SkeletonRows } from './Skeleton'
 import { MachineDetailPanel } from './MachineDetailPanel'
 import { ResumeProfil } from './ResumeProfil'
+import { SectionZabbix } from './SectionZabbix'
+import { choixEffectif, choixPossible, decrireResultat, type ChoixZabbix, type EtatZabbix } from './zabbixRetrait'
 import { CreationVm } from './CreationVm'
 import { correspondDate, correspondProfil, correspondType, raisonATraiter } from './filtresMachines'
 import { profilParDefaut } from './vmForm'
@@ -74,6 +76,10 @@ export default function App() {
   // Confirmation suppression
   const [deletingMac, setDeletingMac]         = useState<string | null>(null)
   const [deleteDestroyVm, setDeleteDestroyVm] = useState(false)
+  // Hôte Zabbix de la machine à supprimer : état lu à l'ouverture, choix de
+  // l'opérateur (null = présélection, cf. choixEffectif)
+  const [zabbixEtat, setZabbixEtat]           = useState<EtatZabbix | null>(null)
+  const [zabbixChoisi, setZabbixChoisi]       = useState<ChoixZabbix | null>(null)
   const [vmPowerState, setVmPowerState]       = useState<Record<string, { status: string; cpu: number; mem_mb: number } | null>>({})
   const [vmPowerLoading, setVmPowerLoading]   = useState<Record<string, boolean>>({})
   const [snapshots, setSnapshots]             = useState<SnapshotEntry[]>([])
@@ -626,18 +632,38 @@ export default function App() {
 
   // ── Suppression machine ─────────────────────────────────────────────────────
 
+  // L'état Zabbix est lu à l'ouverture de la fenêtre : la section ne s'affiche
+  // que s'il y a vraiment un hôte à traiter.
+  const ouvrirSuppression = (mac: string) => {
+    setDeletingMac(mac)
+    setDeleteDestroyVm(false)
+    setZabbixEtat(null)
+    setZabbixChoisi(null)
+    fetch(`${API_URL}/machines/${mac}/zabbix`, { headers: authHeader(auth.token) })
+      .then(r => (r.ok ? r.json() : null))
+      .then(setZabbixEtat)
+      .catch(() => setZabbixEtat(null))
+  }
+
+  const fermerSuppression = () => { setDeletingMac(null); setDeleteDestroyVm(false) }
+
   const handleDelete = (mac: string) => {
-    const url = `${API_URL}/machines/${mac}${deleteDestroyVm ? '?destroy_proxmox=true' : ''}`
-    fetch(url, { method: 'DELETE', headers: authHeader(auth.token) })
-      .then(async (res) => {
-        // Le serveur dit pourquoi (VM qui n'a pas pu être détruite, numéro
-        // attribué à une autre VM…) : « Erreur suppression » ne laissait rien à faire.
-        if (!res.ok) {
-          const corps = await res.json().catch(() => ({}))
-          throw new Error(typeof corps.detail === 'string' ? corps.detail : 'Erreur suppression')
-        }
+    const params = new URLSearchParams()
+    if (deleteDestroyVm) params.set('destroy_proxmox', 'true')
+    if (choixPossible(zabbixEtat)) params.set('zabbix', choixEffectif(zabbixChoisi, deleteDestroyVm))
+    const hostname = machines.find(m => m.mac === mac)?.hostname ?? mac
+    // Le serveur dit pourquoi (VM qui n'a pas pu être détruite, numéro attribué
+    // à une autre VM…) : « Erreur suppression » ne laissait rien à faire.
+    fetch(`${API_URL}/machines/${mac}${params.size ? `?${params}` : ''}`,
+          { method: 'DELETE', headers: authHeader(auth.token) })
+      .then(r => lireReponse<{ zabbix?: string } | null>(r, 'Erreur suppression'))
+      .then((corps) => {
+        fermerSuppression()
+        fetchAll(auth.token, selectedOrg)
+        const msg = decrireResultat(corps?.zabbix, hostname)
+        if (msg && corps?.zabbix?.startsWith('echec')) toast.warning(msg, { duration: 15000 })
+        else if (msg) toast.success(msg)
       })
-      .then(() => { setDeletingMac(null); setDeleteDestroyVm(false); fetchAll(auth.token, selectedOrg) })
       .catch((err) => toast.error(err.message, { duration: 10000 }))
   }
 
@@ -1543,7 +1569,7 @@ export default function App() {
                           )}
                           <button onClick={() => openEdit(machine)} className="osiris-action-btn" title="Modifier"><IcoPencil /></button>
                           {auth.role === 'admin' && (
-                            <button onClick={() => { setDeletingMac(machine.mac); setDeleteDestroyVm(false) }} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
+                            <button onClick={() => ouvrirSuppression(machine.mac)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                           )}
                         </div>
                       </div>
@@ -1847,8 +1873,14 @@ aa:bb:cc:11:22:33,PC-MARTIN,Autre Client,debian,`}</pre>
                   </label>
                 )
               })()}
+              <SectionZabbix
+                etat={zabbixEtat}
+                hostname={machines.find(m => m.mac === deletingMac)?.hostname ?? deletingMac}
+                choix={choixEffectif(zabbixChoisi, deleteDestroyVm)}
+                onChoix={setZabbixChoisi}
+              />
               <div className="flex gap-3 justify-end">
-                <button onClick={() => { setDeletingMac(null); setDeleteDestroyVm(false) }} className="osiris-btn-ghost">Annuler</button>
+                <button onClick={fermerSuppression} className="osiris-btn-ghost">Annuler</button>
                 <button onClick={() => handleDelete(deletingMac!)} className="osiris-btn osiris-btn--danger">Supprimer</button>
               </div>
             </div>

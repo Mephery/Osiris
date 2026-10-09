@@ -118,7 +118,7 @@ def test_une_vm_allumee_est_bien_supprimee_avec_sa_fiche(client, test_machine, a
 
     resp = client.delete(f"/machines/{MAC}?destroy_proxmox=true", headers=admin_headers)
 
-    assert resp.status_code == 204, resp.text
+    assert resp.status_code == 200, resp.text
     assert any(a.startswith("DELETE") and "purge=1" in a for a in appels)
     with Session(engine) as session:
         assert session.exec(select(Machine).where(Machine.mac == MAC)).first() is None

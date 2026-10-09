@@ -7,8 +7,9 @@ Zabbix par l'API : bon groupe, modèle selon l'OS, et surtout le **bon proxy** �
 la supervision de septembre était muette parce qu'un hôte pointait sur le proxy
 d'un autre site (`proxy.get` résout ici le proxy à partir du `zabbix_server` de
 l'organisation / de l'hyperviseur). L'opération est **idempotente** (create ou
-update) et ne **supprime jamais** rien : le jeton `s_osiris` n'a volontairement
-pas `host.delete`.
+update). Il ne désactive ou ne supprime un hôte QUE sur demande de l'opérateur, à
+la suppression de la machine (cf. `retirer_hote`) — et `host.delete` n'est permis
+que si le rôle du jeton `s_osiris` l'autorise.
 
 Volontairement en `urllib` (stdlib) : `requests` n'est pas une dépendance de
 production déclarée, et un client synchrone suffit — l'appel part d'une tâche de
@@ -204,3 +205,82 @@ def register_deployed_host(*, hostname: str, os_type: str, collector: str,
     except Exception as exc:      # noqa: BLE001 — on avale volontairement
         _log.warning("Zabbix : enregistrement de %r échoué : %s", hostname, exc)
         return f"error:{exc}"
+
+
+# ── Sort de l'hôte quand la machine quitte OSIRIS ─────────────────────────────
+# Sans ça, chaque VM supprimée laissait un hôte orphelin qui alertait « agent
+# injoignable » jusqu'à ce que quelqu'un le retire à la main. Le choix revient à
+# l'opérateur : DÉSACTIVER garde l'historique d'un vrai serveur, SUPPRIMER
+# nettoie une VM de test.
+#
+# Garde-fou : un NOM ne prouve pas une identité (même leçon que les numéros de VM
+# recyclés par Proxmox). OSIRIS n'agit que sur un hôte rangé dans SON groupe : un
+# vrai serveur du même nom, ajouté à la main ailleurs, reste intact.
+
+ACTIONS_RETRAIT = ("rien", "desactiver", "supprimer")
+
+
+def _dans_groupe_osiris(noms: list) -> bool:
+    g = ZABBIX_DEPLOYED_GROUP
+    return any(n == g or n.startswith(g + "/") for n in noms)
+
+
+def _hote_detaille(hostname: str) -> Optional[dict]:
+    """L'hôte et ses groupes. `selectHostGroups` depuis Zabbix 6.2, `selectGroups`
+    avant : on essaie le récent, puis l'ancien."""
+    for cle, champ in (("selectHostGroups", "hostgroups"), ("selectGroups", "groups")):
+        try:
+            found = _call("host.get", {"output": ["hostid", "host", "status"],
+                                       "filter": {"host": [hostname]}, cle: ["name"]})
+        except RuntimeError:
+            continue
+        if not found:
+            return None
+        h = found[0]
+        return {"hostid": h["hostid"], "actif": str(h.get("status")) == "0",
+                "groupes": [g["name"] for g in h.get(champ) or []]}
+    raise RuntimeError("Zabbix host.get : groupes de l'hôte illisibles")
+
+
+def etat_hote(hostname: str) -> dict:
+    """Ce que la fenêtre de suppression doit montrer. Ne lève pas : un Zabbix
+    injoignable ne doit pas empêcher d'ouvrir la fenêtre."""
+    if not zabbix_configure():
+        return {"configure": False}
+    try:
+        h = _hote_detaille(hostname)
+    except Exception as exc:      # noqa: BLE001
+        return {"configure": True, "erreur": str(exc)}
+    if not h:
+        return {"configure": True, "existe": False}
+    return {"configure": True, "existe": True, "actif": h["actif"],
+            "gere": _dans_groupe_osiris(h["groupes"]), "groupes": h["groupes"]}
+
+
+def retirer_hote(hostname: str, action: str) -> str:
+    """Applique le choix de l'opérateur. Renvoie « inchange », « absent »,
+    « non-gere », « desactive » ou « supprime ». LÈVE en cas d'échec : l'appelant
+    doit pouvoir le dire à l'opérateur, qui croirait sinon l'hôte retiré."""
+    if action not in ACTIONS_RETRAIT:
+        raise ValueError(f"action Zabbix inconnue : {action}")
+    if action == "rien" or not zabbix_configure():
+        return "inchange"
+    h = _hote_detaille(hostname)
+    if not h:
+        return "absent"
+    if not _dans_groupe_osiris(h["groupes"]):
+        _log.warning("Zabbix : %r hors du groupe %r (%s) — laissé intact",
+                     hostname, ZABBIX_DEPLOYED_GROUP, ", ".join(h["groupes"]))
+        return "non-gere"
+    try:
+        if action == "desactiver":
+            _call("host.update", {"hostid": h["hostid"], "status": 1})   # 1 = désactivé
+            return "desactive"
+        _call("host.delete", [h["hostid"]])
+        return "supprime"
+    except RuntimeError as exc:
+        if "No permissions" in str(exc):
+            raise RuntimeError(
+                f"le rôle Zabbix du jeton OSIRIS n'autorise pas "
+                f"{'host.delete' if action == 'supprimer' else 'host.update'}") from exc
+        raise
