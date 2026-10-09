@@ -143,3 +143,29 @@ def test_les_acces_du_site_comptent_comme_une_porte(monkeypatch):
     body = SimpleNamespace(os="debian")
     main._refuser_vm_sans_acces(body, Hypervisor(name="s", url="u", ssh_root_keys=RSA))
     main._refuser_vm_sans_acces(body, Hypervisor(name="s", url="u", ssh_password_login=True))
+
+
+# ── Fiche : quel compte porte le mot de passe ─────────────────────────────────
+
+def test_la_fiche_dit_quel_compte_porte_le_mot_de_passe(client, admin_headers):
+    """Le même emplacement sert au root de secours ou au compte du profil : la
+    fiche ne doit pas annoncer « root » quand root n'a justement aucun mot de passe."""
+    from models import Machine, Profile
+    with Session(engine) as s:
+        p = Profile(name="p", os="debian", default_user="humans")
+        avec = Hypervisor(name="nova", url="u", ssh_password_login=True)
+        sans = Hypervisor(name="namek", url="u")
+        s.add_all([p, avec, sans])
+        s.commit()
+        s.add_all([
+            Machine(mac="aa:bb:cc:00:00:01", client="Acme", os="debian", hostname="vm-a",
+                    profile_id=p.id, hypervisor_id=avec.id),
+            Machine(mac="aa:bb:cc:00:00:02", client="Acme", os="debian", hostname="vm-b",
+                    profile_id=p.id, hypervisor_id=sans.id),
+            Machine(mac="aa:bb:cc:00:00:03", client="Acme", os="windows", hostname="pc-c"),
+        ])
+        s.commit()
+    r = client.get("/machines", headers=admin_headers)
+    assert r.status_code == 200, r.text
+    par_nom = {m["hostname"]: m["compte_mdp"] for m in r.json()}
+    assert par_nom == {"vm-a": "humans", "vm-b": "root", "pc-c": ""}

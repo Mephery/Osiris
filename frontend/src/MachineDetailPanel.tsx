@@ -205,7 +205,9 @@ export function MachineDetailPanel({
               <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">
                 {machine.os === 'windows'
                   ? 'Mot de passe admin local (LAPS)'
-                  : 'Mot de passe root (secours console)'}
+                  : machine.compte_mdp && machine.compte_mdp !== 'root'
+                    ? `Mot de passe de ${machine.compte_mdp} (SSH et console)`
+                    : 'Mot de passe root (secours console)'}
               </p>
               {machine.has_laps ? (
                 <div className="space-y-1.5">

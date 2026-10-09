@@ -2618,6 +2618,19 @@ def get_all_machines(org_id: Optional[int] = None):
             dates = [d for d in (utc(derniers.get(m.mac)), utc(m.created_at)) if d]
             return max(dates).isoformat() if dates else None
 
+        # Le compte qui porte le mot de passe conservé d'une VM Linux : root (secours
+        # console), ou le compte du profil quand le site autorise le SSH par mot de
+        # passe (cf. `Hypervisor.ssh_password_login`) — root n'en a alors aucun.
+        hv_mdp = {h.id for h in session.exec(select(Hypervisor)).all() if h.ssh_password_login}
+        comptes_profil = {p.id: p.default_user for p in session.exec(select(Profile)).all()}
+
+        def compte_du_mdp(m: Machine) -> str:
+            if m.os == "windows":
+                return ""
+            if m.hypervisor_id in hv_mdp and comptes_profil.get(m.profile_id):
+                return comptes_profil[m.profile_id]
+            return "root"
+
         def tests_en_echec(m: Machine) -> list[str]:
             try:
                 return [t.get("name", "") for t in json.loads(m.smoke_results or "[]") if not t.get("ok")]
@@ -2638,6 +2651,7 @@ def get_all_machines(org_id: Optional[int] = None):
                 "ip_cidr": m.ip_cidr, "gateway": m.gateway, "dns_servers": m.dns_servers,
                 "has_bitlocker": bool(m.bitlocker_key),
                 "has_laps": bool(m.laps_password),
+                "compte_mdp": compte_du_mdp(m),
                 "hypervisor_id": m.hypervisor_id,
                 "proxmox_vm_id": m.proxmox_vm_id,
                 "proxmox_node": m.proxmox_node,

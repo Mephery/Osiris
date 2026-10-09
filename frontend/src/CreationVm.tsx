@@ -244,7 +244,12 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   // Sans profil, le serveur retomberait sur le plus ancien de l'OS ; sans accès,
   // il refuserait. Dans les deux cas, autant le dire ici, bouton grisé.
   const vmSansProfil = !profilEffectif
-  const vmInaccessible = vmSansProfil || Boolean(profilEffectif?.resume?.alerte)
+  // Les accès du SITE (clés root, mot de passe du compte du profil) sont des
+  // portes au même titre que celles du profil : le serveur les compte aussi.
+  const hvCourant = hypervisors.find(h => h.id === Number(vmHvId))
+  const accesDuSite = vmForm.os !== 'windows' && Boolean(
+    hvCourant?.ssh_root_keys?.trim() || (hvCourant?.ssh_password_login && profilEffectif?.default_user))
+  const vmInaccessible = vmSansProfil || (Boolean(profilEffectif?.resume?.alerte) && !accesDuSite)
   const manquants = champsManquants(vmForm, Boolean(vmHvId), vmNode)
   // Linux seulement : sous Windows, la liste n'est pas envoyée
   const disquesInvalides = vmForm.os !== 'windows' && erreursDisques(vmForm.disques).length > 0

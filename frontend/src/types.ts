@@ -101,6 +101,9 @@ export interface Machine {
   hw_cpu?: string;
   has_bitlocker?: boolean;
   has_laps?: boolean;
+  /** Linux : compte qui porte le mot de passe conservé (root, ou le compte du
+   *  profil quand le site autorise le SSH par mot de passe). */
+  compte_mdp?: string;
   user_name?: string;
   user_email?: string;
   /** Installer l'agent Zabbix au premier démarrage (sans effet si l'organisation
