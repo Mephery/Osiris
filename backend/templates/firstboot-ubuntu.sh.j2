@@ -157,6 +157,33 @@ IPV6
 sysctl -p /etc/sysctl.d/99-osiris-disable-ipv6.conf > /dev/null 2>&1 \
     || _log "AVERTISSEMENT : application sysctl IPv6 differee au prochain redemarrage"
 
+# Le sysctl ne suffit PAS la ou netplan pilote systemd-networkd (Ubuntu) : netplan
+# lui demande par defaut une adresse de lien local IPv6 (fe80::) sur chaque carte,
+# et networkd remet alors disable_ipv6=0 sur la carte elle-meme, reglage « all »
+# ou pas. Constate le 09/10 : HUMNKLPR03 (Ubuntu) gardait son fe80:: quand
+# HUMNVLPR01 (Debian, ifupdown) etait conforme.
+# On le dit donc a netplan, carte par carte : ni lien local, ni annonces de
+# routeur. `netplan set` ecrit son propre fichier, fusionne avec ceux de l'image
+# et de l'agent sans les reecrire. Pas de `ipv6.disable=1` au noyau : sans pile
+# IPv6, un service qui ecoute sur [::] (nginx par defaut) refuse de demarrer.
+if command -v netplan > /dev/null 2>&1; then
+    _cartes_v6=$(netplan get ethernets 2>/dev/null | awk -F: '/^[^ #-][^:]*:/ {print $1}')
+    if [ -n "$_cartes_v6" ]; then
+        for _c in $_cartes_v6; do
+            netplan set "ethernets.${_c}.link-local=[]" > /dev/null 2>&1 \
+                && netplan set "ethernets.${_c}.accept-ra=false" > /dev/null 2>&1 \
+                || _log "AVERTISSEMENT : netplan n'a pas accepte la coupure IPv6 sur ${_c}"
+        done
+        if netplan apply > /dev/null 2>&1; then
+            # La carte reconfiguree peut garder l'adresse deja posee : on reapplique.
+            sysctl -p /etc/sysctl.d/99-osiris-disable-ipv6.conf > /dev/null 2>&1 || true
+            _log "IPv6 coupe aussi dans netplan (lien local, annonces de routeur) : ${_cartes_v6//$'\n'/ }"
+        else
+            _log "AVERTISSEMENT : netplan apply a echoue - coupure IPv6 netplan effective au redemarrage"
+        fi
+    fi
+fi
+
 {% if profile.ntp_servers %}
 # ── Serveurs de temps du profil ───────────────────────────────────────────────
 # cloud-init les pose sur le chemin « clone + cloud-init » ; un clone NU n'a que
