@@ -19,7 +19,7 @@ interface InfrastructureTabProps {
 
 
 export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: InfrastructureTabProps) {
-  const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '' })
+  const [newHv, setNewHv]               = useState({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '', ssh_root_keys: '', ssh_password_login: false })
   const [hvTestResult, setHvTestResult] = useState<Record<number, { ok: boolean; version?: string; proxmox_version?: string; nodes?: ProxmoxNode[]; storages?: ClusterStorage[]; error?: string } | null>>({})
   // Fiche en cours d'édition. Il n'existait AUCUN moyen de modifier un hyperviseur
   // enregistré : ni ici, ni ailleurs dans l'UI. Tout champ ajouté après coup — le
@@ -39,7 +39,7 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeader(token) },
       body: JSON.stringify(newHv),
-    }).then(r => lireReponse(r, 'Création refusée')).then(() => { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '' }); toast.success('Hyperviseur ajouté') })
+    }).then(r => lireReponse(r, 'Création refusée')).then(() => { onRefreshHypervisors(); setNewHv({ name: '', url: '', type: 'proxmox', token_id: '', token_secret: '', tls_verify: true, ca_cert: '', pool: '', snippets_storage: '', callback_url: '', zabbix_server: '', ssh_root_keys: '', ssh_password_login: false }); toast.success('Hyperviseur ajouté') })
       .catch((e: Error) => toast.error(e.message))
   }
 
@@ -52,7 +52,8 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
     setEditHv({ name: h.name, url: h.url, token_id: h.token_id, token_secret: '', ca_cert: '',
                 tls_verify: h.tls_verify, pool: h.pool ?? '',
                 snippets_storage: h.snippets_storage ?? '', callback_url: h.callback_url ?? '',
-                zabbix_server: h.zabbix_server ?? '' })
+                zabbix_server: h.zabbix_server ?? '',
+                ssh_root_keys: h.ssh_root_keys ?? '', ssh_password_login: h.ssh_password_login ?? false })
   }
 
   const handleSaveHv = (e: React.FormEvent) => {
@@ -223,6 +224,19 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
                       onChange={e => setEditHv({ ...editHv, ca_cert: e.target.value })}
                       className="osiris-input text-[10px] font-mono col-span-2"
                       title="Coller le PEM complet, lignes BEGIN/END comprises. Un certificat d'autorité est public : ce n'est pas un secret." />
+                    <textarea rows={2}
+                      placeholder="Clés SSH root du site (une par ligne) — posées sur chaque VM Linux, connexion par clé uniquement"
+                      value={editHv.ssh_root_keys ?? ''}
+                      onChange={e => setEditHv({ ...editHv, ssh_root_keys: e.target.value })}
+                      className="osiris-input text-[10px] font-mono col-span-2"
+                      title="Le serveur PXE ou le bastion du site entre en root sur toutes les VM Linux de cet hyperviseur, quel que soit le profil. Root n'a jamais de mot de passe : ces clés sont sa seule porte. S'applique aux VM déployées après l'enregistrement." />
+                    <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer col-span-2"
+                      title="Mot de passe aléatoire pour le compte d'administration du profil (jamais root), lisible sur la fiche de la machine. Remplace le mot de passe root de secours. S'applique aux VM déployées après l'enregistrement.">
+                      <input type="checkbox" checked={editHv.ssh_password_login ?? false}
+                        onChange={e => setEditHv({ ...editHv, ssh_password_login: e.target.checked })}
+                        className="accent-blue-500" />
+                      Autoriser la connexion SSH par mot de passe pour le compte du profil (jamais root)
+                    </label>
                   </div>
                   <div className="flex items-center justify-between">
                     <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
@@ -422,6 +436,14 @@ export function InfrastructureTab({ token, hypervisors, onRefreshHypervisors }: 
             value={newHv.zabbix_server} onChange={e => setNewHv({ ...newHv, zabbix_server: e.target.value })}
             className="osiris-input text-xs font-mono col-span-2"
             title="Chaque site a son propre proxy Zabbix. Vise depuis l'hyperviseur, le collecteur est presque toujours un voisin du meme sous-reseau : la supervision ne traverse aucun pare-feu. Vide = celui de l'organisation de la machine." />
+          <textarea rows={2} placeholder="Clés SSH root du site (une par ligne) — optionnel"
+            value={newHv.ssh_root_keys} onChange={e => setNewHv({ ...newHv, ssh_root_keys: e.target.value })}
+            className="osiris-input text-[10px] font-mono col-span-2"
+            title="Le serveur PXE ou le bastion du site entre en root sur toutes les VM Linux de cet hyperviseur, quel que soit le profil. Connexion par clé uniquement." />
+          <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer col-span-2">
+            <input type="checkbox" checked={newHv.ssh_password_login} onChange={e => setNewHv({ ...newHv, ssh_password_login: e.target.checked })} className="accent-blue-500" />
+            Autoriser la connexion SSH par mot de passe pour le compte du profil (jamais root)
+          </label>
         </div>
         <div className="flex items-center justify-between">
           <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">

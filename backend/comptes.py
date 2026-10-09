@@ -91,3 +91,28 @@ def valider_compte(compte: Optional["CompteVm"], utilisateur_profil: str = "") -
     if erreur:
         raise HTTPException(status_code=422, detail=f"Compte de la VM : {erreur}.")
     return {"nom": nom, "cle_ssh": cle, "sudo": bool(compte.sudo)}
+
+
+def valider_cles_ssh(texte: str, quoi: str = "Clés SSH") -> str:
+    """Une liste de clés publiques, une par ligne, normalisée — ou un 422.
+
+    Chaque ligne est contrôlée comme la clé d'un compte : type connu, clé entière.
+    Ce n'est pas que de la politesse : la liste finit dans un script root, et une
+    ligne qui n'est pas une clé n'a rien à y faire."""
+    cles = []
+    for n, ligne in enumerate((texte or "").splitlines(), start=1):
+        morceaux = ligne.split()
+        if not morceaux or morceaux[0].startswith("#"):
+            continue
+        if len(morceaux) < 2 or morceaux[0] not in TYPES_CLE:
+            raise HTTPException(status_code=422, detail=(
+                f"{quoi}, ligne {n} : une clé publique commence par son type "
+                "(ssh-ed25519, ssh-rsa, ecdsa-…) — une clé par ligne."))
+        if _type_encode(morceaux[1]) != morceaux[0]:
+            raise HTTPException(status_code=422, detail=(
+                f"{quoi}, ligne {n} : la clé semble tronquée ou altérée — la recopier "
+                "entièrement depuis le fichier .pub."))
+        cle = " ".join(morceaux)
+        if cle not in cles:
+            cles.append(cle)
+    return "\n".join(cles)

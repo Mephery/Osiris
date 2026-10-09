@@ -239,6 +239,12 @@ export interface Hypervisor {
    *  visé depuis l'hyperviseur, c'est presque toujours un voisin du même
    *  sous-réseau, et la supervision ne traverse aucun pare-feu. */
   zabbix_server: string;
+  /** Clés publiques (une par ligne) posées chez root sur chaque VM Linux du site,
+   *  en clé uniquement : le serveur PXE ou le bastion du site entre partout. */
+  ssh_root_keys: string;
+  /** Mot de passe SSH pour le compte d'administration du profil (jamais root),
+   *  aléatoire et lisible sur la fiche de la machine. */
+  ssh_password_login: boolean;
   organization_id: number | null;
   created_at: string;
 }

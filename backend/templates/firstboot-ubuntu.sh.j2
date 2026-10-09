@@ -438,7 +438,7 @@ else
 fi
 {% endif %}
 
-{% if profile.set_root_password %}
+{% if profile.set_root_password and not mdp_ssh_site %}
 # ── Mot de passe root de secours ──────────────────────────────────────────────
 # Acces CONSOLE de secours, pour le jour ou le reseau ou SSH est tombe. Root
 # reste interdit en SSH (cf. durcissement plus bas) : ce mot de passe ne sert
@@ -862,6 +862,73 @@ if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet ss
 else
     _log "AVERTISSEMENT : sshd ne demarre pas — la machine sera injoignable en SSH"
 fi
+{% endif %}
+
+{% if cles_root_site or (mdp_ssh_site and profile.default_user) %}
+# ── Acces SSH du site (reglage de l'hyperviseur) ──────────────────────────────
+# Les portes d'entree propres au SITE ou tourne la VM (serveur PXE, bastion),
+# en plus de celles du profil. Pose APRES le durcissement serveur : c'est lui
+# qui fixe la regle generale, ce bloc n'y ouvre que ces exceptions-la.
+dpkg -s openssh-server > /dev/null 2>&1 || apt-get install -y openssh-server 2>&1 | tail -1
+_sshd_conf="${OSIRIS_SSHD_CONFIG:-/etc/ssh/sshd_config}"
+cp -a "$_sshd_conf" "$_sshd_conf.osiris-avant-site" 2>/dev/null || true
+{% if cles_root_site %}
+# Cles chez ROOT, en cle uniquement : root n'a jamais de mot de passe. Ajoutees
+# sans ecraser : l'image peut deja y porter les siennes.
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+while IFS= read -r _cle; do
+    [ -n "$_cle" ] || continue
+    grep -qxF "$_cle" /root/.ssh/authorized_keys || printf '%s\n' "$_cle" >> /root/.ssh/authorized_keys
+done << 'SSHEOF'
+{{ cles_root_site }}
+SSHEOF
+# `prohibit-password` et non `yes` : la cle ouvre, un mot de passe jamais.
+# Remplace le `no` du durcissement serveur s'il est passe avant.
+sed -i 's/^#*[[:space:]]*PermitRootLogin.*/PermitRootLogin prohibit-password/' "$_sshd_conf"
+grep -q '^PermitRootLogin' "$_sshd_conf" || echo 'PermitRootLogin prohibit-password' >> "$_sshd_conf"
+_log "Cles SSH root du site posees ({{ cles_root_site.splitlines() | length }} cle(s))"
+{% endif %}
+{% if mdp_ssh_site and profile.default_user %}
+# Mot de passe pour le compte d'administration du profil, et pour LUI seul :
+# la regle generale reste « cle uniquement ». Pose SEULEMENT si OSIRIS confirme
+# l'avoir enregistre — sinon personne ne le connaitrait.
+_mdp_site=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
+if curl -sf -X POST "$osiris_url/machines/$_osiris_mac/laps-password" \
+        -H "Content-Type: application/json" \
+        -d "{\"password\":\"$_mdp_site\"}" --max-time 15 > /dev/null; then
+    echo {{ profile.default_user | bash_squote }}":$_mdp_site" | chpasswd
+    passwd -u {{ profile.default_user | bash_squote }} > /dev/null 2>&1 || true
+    # `Match` en FIN de fichier : tout ce qui suit un Match lui appartient, et
+    # `Match all` referme le bloc pour qu'un ajout ulterieur reste general.
+    if ! grep -q '^# OSIRIS acces du site' "$_sshd_conf"; then
+        printf '\n# OSIRIS acces du site : mot de passe pour %s seulement\nMatch User %s\n    PasswordAuthentication yes\nMatch all\n' \
+            {{ profile.default_user | bash_squote }} {{ profile.default_user | bash_squote }} >> "$_sshd_conf"
+    fi
+    _log "Mot de passe SSH pose pour {{ profile.default_user }} (lisible sur la fiche OSIRIS)"
+else
+    _log "AVERTISSEMENT : OSIRIS n'a pas confirme l'enregistrement - pas de mot de passe pour {{ profile.default_user }}"
+fi
+unset _mdp_site
+{% endif %}
+# Une config refusee par sshd = plus aucun SSH sur la machine : on revient en
+# arriere plutot que de redemarrer dessus.
+mkdir -p /run/sshd && chmod 0755 /run/sshd
+if sshd -t 2>/dev/null; then
+    systemctl reset-failed ssh sshd 2>/dev/null || true
+    systemctl enable ssh > /dev/null 2>&1 || systemctl enable sshd > /dev/null 2>&1 || true
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+    # Ce que sshd applique VRAIMENT : un fichier de sshd_config.d lu avant le
+    # notre peut l'emporter, seul `sshd -T` le dit.
+    _osiris_log "sshd root : $(sshd -T -C user=root,host=osiris,addr=192.0.2.1 2>/dev/null | grep -i '^permitrootlogin' | tr -d '\n')"
+{% if mdp_ssh_site and profile.default_user %}
+    _osiris_log "sshd {{ profile.default_user }} : $(sshd -T -C user={{ profile.default_user | bash_squote }},host=osiris,addr=192.0.2.1 2>/dev/null | grep -i '^passwordauthentication' | tr -d '\n')"
+{% endif %}
+else
+    _log "AVERTISSEMENT : configuration SSH du site refusee par sshd - retour a la precedente"
+    cp -a "$_sshd_conf.osiris-avant-site" "$_sshd_conf" 2>/dev/null || true
+fi
+rm -f "$_sshd_conf.osiris-avant-site"
 {% endif %}
 
 {% if profile.post_script %}

@@ -204,6 +204,19 @@ class Hypervisor(SQLModel, table=True):
     # supervision a travers chaque pare-feu traverse. Vise depuis l'hyperviseur, le
     # collecteur est presque toujours un voisin du meme sous-reseau : aucune regle.
     zabbix_server: str = Field(default="")
+    # Acces SSH propres au SITE, poses sur chaque VM Linux de cet hyperviseur en
+    # plus de ce que porte le profil. Comme le collecteur, ils dependent de
+    # l'endroit ou la VM TOURNE : chaque site a son serveur d'administration (PXE,
+    # bastion) qui doit pouvoir entrer, quel que soit le profil choisi.
+    #
+    # Cles publiques (une par ligne) posees chez ROOT, en cle uniquement
+    # (`PermitRootLogin prohibit-password`) : root n'a jamais de mot de passe.
+    ssh_root_keys: str = Field(default="")
+    # Mot de passe aleatoire pour le compte d'administration du profil, conserve
+    # chiffre sur la fiche (a la place du mot de passe root de secours) et
+    # autorise en SSH pour CE compte seulement. L'acces « au cas ou » quand
+    # aucune cle n'est sous la main.
+    ssh_password_login: bool = Field(default=False)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

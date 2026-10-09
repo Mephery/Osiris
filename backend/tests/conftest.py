@@ -147,7 +147,7 @@ def vm_sans_acces_toleree(request, monkeypatch):
     if request.node.get_closest_marker("refus_acces"):
         return
     import main
-    monkeypatch.setattr(main, "_refuser_vm_sans_acces", lambda body: None)
+    monkeypatch.setattr(main, "_refuser_vm_sans_acces", lambda body, hyperviseur=None: None)
 
 
 @pytest.fixture(autouse=True)

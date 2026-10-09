@@ -39,7 +39,7 @@ from jinja2 import Environment, FileSystemLoader
 
 import pyotp
 import qrcode
-from comptes import COMPTE_GABARIT, CompteVm, valider_compte
+from comptes import COMPTE_GABARIT, CompteVm, valider_cles_ssh, valider_compte
 from disques import (DisqueVm, config_proxmox, disques_de, valider_disques,
                      schema_partition, valider_systeme, ROOT_GB_DEFAUT, SWAP_GB_DEFAUT,
                      VG_NOM)
@@ -2036,7 +2036,8 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
                              ip_attendue: str = "", disques: Optional[list] = None,
                              compte: Optional[dict] = None, jeton: str = "",
                              root_gb: Optional[int] = None,
-                             swap_gb: int = SWAP_GB_DEFAUT) -> str:
+                             swap_gb: int = SWAP_GB_DEFAUT,
+                             hyperviseur: Optional[Hypervisor] = None) -> str:
     """Le script de premier démarrage Linux, rendu à partir d'un contexte explicite.
 
     Volontairement sans accès à la base : le script est aussi embarqué dans le
@@ -2075,6 +2076,9 @@ def _firstboot_linux_content(*, hostname: str, mac: str, ou: str, profile_ctx: d
         root_gb=root_gb,
         swap_gb=swap_gb,
         compte_gabarit=COMPTE_GABARIT,
+        # Acces SSH du SITE (cf. `Hypervisor.ssh_root_keys`) : vides hors VM.
+        cles_root_site=(hyperviseur.ssh_root_keys or "").strip() if hyperviseur else "",
+        mdp_ssh_site=bool(hyperviseur and hyperviseur.ssh_password_login),
     )
 
 
@@ -2106,6 +2110,7 @@ def _render_linux_firstboot(mac: str, jeton: Optional[str] = None) -> Response:
         jeton=jeton_script,
         root_gb=machine.root_gb,
         swap_gb=machine.swap_gb or SWAP_GB_DEFAUT,
+        hyperviseur=hyperviseur,
     )
     return Response(content=content, media_type="text/plain")
 
@@ -4381,6 +4386,8 @@ class HypervisorCreate(SQLModel):
     snippets_storage: str = ""
     callback_url: str = ""
     zabbix_server: str = ""
+    ssh_root_keys: str = ""
+    ssh_password_login: bool = False
     organization_id: Optional[int] = None
 
 class HypervisorPatch(SQLModel):
@@ -4395,6 +4402,8 @@ class HypervisorPatch(SQLModel):
     snippets_storage: Optional[str] = None
     callback_url: Optional[str] = None
     zabbix_server: Optional[str] = None
+    ssh_root_keys: Optional[str] = None
+    ssh_password_login: Optional[bool] = None
     organization_id: Optional[int] = None
 
 
@@ -4416,6 +4425,8 @@ def _hypervisor_dict(h: Hypervisor) -> dict:
         "snippets_storage": h.snippets_storage or "",
         "callback_url": h.callback_url or "",
         "zabbix_server": h.zabbix_server or "",
+        "ssh_root_keys": h.ssh_root_keys or "",
+        "ssh_password_login": bool(h.ssh_password_login),
         "organization_id": h.organization_id,
         "created_at": h.created_at.isoformat(),
     }
@@ -4978,6 +4989,7 @@ def create_hypervisor(body: HypervisorCreate, current_user: User = Depends(requi
     if data.get("token_secret"):
         data["token_secret"] = encrypt(data["token_secret"])
     data["ca_cert"] = _valider_autorite(data.get("ca_cert"))
+    data["ssh_root_keys"] = valider_cles_ssh(data.get("ssh_root_keys"), "Clés SSH root du site")
     with Session(engine) as session:
         h = Hypervisor(**data)
         session.add(h)
@@ -4996,6 +5008,8 @@ def update_hypervisor(hv_id: int, patch: HypervisorPatch, current_user: User = D
         data = patch.model_dump(exclude_unset=True)
         if "ca_cert" in data:
             data["ca_cert"] = _valider_autorite(data["ca_cert"])
+        if "ssh_root_keys" in data:
+            data["ssh_root_keys"] = valider_cles_ssh(data["ssh_root_keys"], "Clés SSH root du site")
         # `_hypervisor_dict` masque le secret en « *** » : un client qui relit la
         # fiche puis la renvoie telle quelle chiffrerait ces trois étoiles, et OSIRIS
         # perdrait l'accès à l'hyperviseur — panne muette, dont la cause serait
@@ -5939,6 +5953,7 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str, jeton: str
         jeton=jeton,
         root_gb=body.root_gb if getattr(body, "_lvm", False) else None,
         swap_gb=getattr(body, "swap_gb", None) or SWAP_GB_DEFAUT,
+        hyperviseur=h,
     )
 
     return jinja_env.get_template("cloud-init-user-data.j2").render(
@@ -6038,7 +6053,7 @@ def _valider_adressage(body) -> None:
                 f"serveurs se séparent par des virgules : « 8.8.8.8, 1.1.1.1 »."))
 
 
-def _refuser_vm_sans_acces(body) -> None:
+def _refuser_vm_sans_acces(body, hyperviseur: Optional[Hypervisor] = None) -> None:
     """Refuse une VM dont le profil ne laisse aucune porte d'entrée.
 
     Une VM ne reçoit aucun mot de passe : sans clé SSH, sans domaine et sans root
@@ -6048,6 +6063,11 @@ def _refuser_vm_sans_acces(body) -> None:
     filet : il mesure ce que le gabarit apporte en plus, ce qu'on ne sait pas ici.
     """
     profile = _resolve_profile_for_vm(body)
+    # Les accès du SITE sont des portes au même titre que ceux du profil.
+    if hyperviseur and body.os != "windows" and (
+            (hyperviseur.ssh_root_keys or "").strip()
+            or (hyperviseur.ssh_password_login and profile.default_user)):
+        return
     with Session(engine) as session:
         alerte = _profile_summary(profile, session)["alerte"]
     if alerte:
@@ -6082,7 +6102,9 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     body.client = valider_texte_libre(body.client, "Client")
     body.ou = valider_texte_libre(body.ou, "OU")
     _valider_adressage(body)
-    _refuser_vm_sans_acces(body)
+    with Session(engine) as session:
+        _hv_acces = session.get(Hypervisor, hv_id)
+    _refuser_vm_sans_acces(body, _hv_acces)
     # Disques : Linux seulement pour l'instant. Validés ICI, avant tout appel à
     # l'hyperviseur, et normalisés une fois : l'hyperviseur, la fiche et le
     # premier démarrage liront la même liste.
