@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import type { Machine, DeploymentEvent, SnapshotEntry } from './types'
 import { authHeader } from './types'
+import { lireReponse } from './api'
 import { commandeSsh, provenanceAdresse, type AdresseMachine } from './adresseMachine'
 import { IcoX, IcoTerminal, IcoCamera, IcoDownload } from './icons'
 
@@ -64,6 +65,14 @@ export function MachineDetailPanel({
   // Lue à l'ouverture et quand la machine change de statut : une VM qui vient de
   // finir son déploiement a peut-être enfin une adresse à montrer.
   const [adresse, setAdresse] = useState<AdresseMachine | null>(null)
+  const [compteRetire, setCompteRetire] = useState(false)
+  const retirerCompte = (nom: string) => {
+    if (!confirm(`Retirer « ${nom} » de la fiche ?\n\nLe compte n'est PAS supprimé de la VM : la fiche cesse seulement de le recréer à chaque redéploiement.`)) return
+    fetch(`${API_URL}/machines/${machine.mac}/compte`, { method: 'DELETE', headers: authHeader(token) })
+      .then(r => lireReponse(r, 'Retrait refusé'))
+      .then(() => { setCompteRetire(true); toast.success(`« ${nom} » retiré de la fiche`) })
+      .catch((e: Error) => toast.error(e.message))
+  }
   useEffect(() => {
     let annule = false
     fetch(`${API_URL}/machines/${machine.mac}/adresse`, { headers: authHeader(token) })
@@ -249,6 +258,22 @@ export function MachineDetailPanel({
               ) : (
                 <span className="text-[10px] font-mono text-slate-700">Aucune cle enregistree</span>
               )}
+            </div>
+          )}
+
+          {/* ── Compte de la personne de cette VM : recréé à chaque redéploiement ── */}
+          {isAdmin && machine.compte_vm && !compteRetire && (
+            <div>
+              <p className="text-[9px] uppercase tracking-widest text-slate-600 mb-1.5">Compte de la VM</p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-mono text-white">{machine.compte_vm.nom}</span>
+                <span className="text-[10px] font-mono text-slate-500">{machine.compte_vm.sudo ? 'avec sudo' : 'sans sudo'} · recréé à chaque redéploiement</span>
+                <button onClick={() => retirerCompte(machine.compte_vm!.nom)}
+                  className="osiris-btn text-[10px] px-2 py-0.5"
+                  title="Le compte reste sur la VM : la fiche cesse seulement de le recréer. À faire quand il a été supprimé ou remplacé à la main.">
+                  Retirer de la fiche
+                </button>
+              </div>
             </div>
           )}
 

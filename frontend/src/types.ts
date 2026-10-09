@@ -104,6 +104,9 @@ export interface Machine {
   /** Linux : compte qui porte le mot de passe conservé (root, ou le compte du
    *  profil quand le site autorise le SSH par mot de passe). */
   compte_mdp?: string;
+  /** Compte de la personne de cette VM, tel que la fiche le recréerait à un
+   *  redéploiement (sans la clé). null = aucun. */
+  compte_vm?: { nom: string; sudo: boolean } | null;
   user_name?: string;
   user_email?: string;
   /** Installer l'agent Zabbix au premier démarrage (sans effet si l'organisation

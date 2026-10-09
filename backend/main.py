@@ -2652,6 +2652,10 @@ def get_all_machines(org_id: Optional[int] = None):
                 "has_bitlocker": bool(m.bitlocker_key),
                 "has_laps": bool(m.laps_password),
                 "compte_mdp": compte_du_mdp(m),
+                # Le compte de la personne de cette VM (nom + sudo, jamais la clé) :
+                # sans lui, rien ne disait qu'un redéploiement le recréerait.
+                "compte_vm": ({k: v for k, v in json.loads(m.compte).items() if k != "cle_ssh"}
+                              if m.compte else None),
                 "hypervisor_id": m.hypervisor_id,
                 "proxmox_vm_id": m.proxmox_vm_id,
                 "proxmox_node": m.proxmox_node,
@@ -3051,6 +3055,26 @@ def laps_due(mac: str, jeton: Optional[str] = Header(None, alias=jetons.ENTETE))
             return {"due": False}
         due, due_at = _rotation_laps_due(session, machine)
         return {"due": due, **({"due_at": due_at.isoformat()} if due_at else {})}
+
+
+@app.delete("/machines/{mac}/compte", status_code=204)
+def retirer_compte_vm(mac: str, current_user: User = Depends(require_admin)):
+    """Retire de la fiche le compte de la personne de cette VM.
+
+    N'agit PAS sur la machine : le compte qui y existe reste en place. Sert quand
+    il a été supprimé ou remplacé à la main — sans quoi un redéploiement le
+    recréerait, avec sa clé et son éventuel sudo."""
+    clean_mac = validate_mac(mac)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            raise HTTPException(status_code=404, detail="Machine introuvable")
+        ancien = json.loads(machine.compte).get("nom", "") if machine.compte else ""
+        machine.compte = ""
+        session.add(machine)
+        _log(session, current_user, "retirer_compte_vm", target_mac=clean_mac,
+             details={"hostname": machine.hostname, "compte": ancien})
+        session.commit()
 
 
 @app.get("/machines/{mac}/laps-password")
