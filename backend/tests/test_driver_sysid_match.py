@@ -193,6 +193,8 @@ def test_le_nom_du_firstboot_sert_de_dernier_recours(resolution):
     {"hw_sysid": "Standard PC (Q35 + ICH9, 2009)"},       # VM QEMU
     {"hw_sysid": "Modele Jamais Vu 9000"},                # hors catalogue
 ])
-def test_sans_correspondance_on_retombe_sur_le_dossier_complet(resolution, champs):
-    """Repli sûr : lent, mais il ne manque jamais un pilote."""
-    assert _dir(**champs) == "drivers"
+def test_sans_correspondance_on_n_injecte_rien(resolution, champs):
+    """Plus de repli « tout le dossier » : 40 Go et des heures de DISM (26 h
+    estimées au banc le 08/10) pour installer surtout les pilotes d'autres
+    modèles. Sans pack, pilotes intégrés + Windows Update."""
+    assert _dir(**champs) == ""

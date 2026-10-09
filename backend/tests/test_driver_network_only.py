@@ -82,7 +82,7 @@ def test_dossier_absent_rend_liste_vide(tmp_path, monkeypatch):
 
 # ── Rendu du template WinPE ────────────────────────────────────────────────────
 
-def _render(driver_dir, net_driver_infs):
+def _render(driver_dir, net_driver_infs, est_vm=False):
     return main.jinja_env.get_template("winpe-deploy.cmd.j2").render(
         machine=SimpleNamespace(hostname="TESTPC", client="Acme"),
         profile={"tv_suffix": "", "win_image": ""},
@@ -93,6 +93,7 @@ def _render(driver_dir, net_driver_infs):
         locale="fr-FR",
         driver_dir=driver_dir,
         net_driver_infs=net_driver_infs,
+        est_vm=est_vm,
     )
 
 
@@ -115,6 +116,6 @@ def test_rendu_pack_normal_garde_le_recurse(pack):
 
 
 def test_rendu_vm_n_injecte_rien(pack):
-    out = _render("", None)
+    out = _render("", None, est_vm=True)
     assert "injection de drivers ignoree" in out
     assert "/Add-Driver" not in out

@@ -38,9 +38,10 @@ def test_une_vm_ne_se_voit_attribuer_aucun_dossier_de_pilotes(test_machine):
     assert main._resolve_driver_dir(_fait_de_la_machine_une_vm()) == ""
 
 
-def test_une_machine_physique_garde_le_repli_historique(test_machine):
-    """Le poste physique, lui, a toujours besoin de ses pilotes constructeurs."""
-    assert main._resolve_driver_dir(test_machine) == "drivers"
+def test_une_machine_physique_sans_pack_ne_recoit_plus_tout_le_dossier(test_machine):
+    """Le repli « tout le dossier » coûtait des heures de DISM (cf.
+    test_repli_pilotes.py) : sans pack prêt, rien n'est injecté."""
+    assert main._resolve_driver_dir(test_machine) == ""
 
 
 def test_le_script_winpe_dune_vm_ne_lance_aucun_dism_add_driver(client, test_machine):
@@ -59,10 +60,13 @@ def test_le_script_winpe_dune_vm_ne_lance_aucun_dism_add_driver(client, test_mac
     assert "pilotes+constructeurs+inutiles" in script
 
 
-def test_le_script_dune_machine_physique_injecte_toujours(client, test_machine):
+def test_le_script_dune_machine_physique_sans_pack_le_dit(client, test_machine):
+    """Pas de DISM sur la racine du partage, mais une raison dans le journal —
+    différente de celle d'une VM."""
     _image_windows_prete()
 
     script = client.get(f"/winpe-script/{MAC}").text
 
-    assert "/Add-Driver" in script
-    assert "Z:\\drivers\\" in script
+    assert "/Add-Driver" not in script
+    assert "Aucun+pack+de+pilotes+pret" in script
+    assert "pilotes+constructeurs+inutiles" not in script

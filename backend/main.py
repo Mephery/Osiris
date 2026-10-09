@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 # Copyright (c) 2026 Coline Derycke. See LICENSE.
 import asyncio
+import anyio
 import base64
 import urllib.parse
 import uuid as uuid_lib
@@ -3926,17 +3927,30 @@ def _build_winpe_script(mac: str) -> Response:
             media_type="text/plain", status_code=503,
         )
 
-    # Dossier de drivers a injecter (relatif au partage Z:).
-    # Par defaut "drivers" = tout le dossier (comportement historique, fallback sur).
-    # Si la machine a un pack explicite ET telecharge : injection ciblee de ce seul pack.
+    # Dossier de drivers a injecter (relatif au partage Z:) : le pack pret de ce
+    # modele, ou rien (VM, ou aucun pack pret — cf. _resolve_driver_dir).
     driver_dir = _resolve_driver_dir(machine)
+
+    # Poste physique sans pack pret : on dit POURQUOI dans le journal, et si le
+    # catalogue connait son pack, on le telecharge pour le prochain de ce modele.
+    sans_pack = ""
+    if not driver_dir and not machine.proxmox_vm_id:
+        modele = (machine.hw_sysid or machine.hw_model or "modele inconnu").strip()
+        with Session(engine) as dsession:
+            pack = _pack_au_catalogue(dsession, machine)
+            if pack and _telecharger_pour_la_suite(pack):
+                sans_pack = f"pack {pack.model or pack.model_key} en cours de telechargement pour le prochain deploiement"
+            elif pack:
+                sans_pack = f"pack {pack.model or pack.model_key} au catalogue, a telecharger depuis l onglet Pilotes"
+            else:
+                sans_pack = f"aucun pack au catalogue pour {modele}"
 
     # Pack marque "reseau seul" : on ne passe au template que la liste des pilotes
     # reseau (Class=Net, sans co-installeur), qu'il injectera un a un au lieu du
     # dossier entier — le pack complet fige la passe sysprep sur certains modeles
     # recents (cf. DriverPack.network_only). None = injection normale du dossier.
     net_driver_infs = None
-    if driver_dir and driver_dir != "drivers":
+    if driver_dir:
         with Session(engine) as dsession:
             pack = _resolve_driver_pack(dsession, machine)
             if pack and pack.network_only:
@@ -3955,12 +3969,19 @@ def _build_winpe_script(mac: str) -> Response:
         locale=locale,
         driver_dir=driver_dir,
         net_driver_infs=net_driver_infs,
+        est_vm=bool(machine.proxmox_vm_id),
+        # Ecrit tel quel dans un .cmd (echo + URL curl) : un nom de modele peut porter
+        # « & » (qui enchaine une AUTRE commande), « % » ou des parentheses. On ne
+        # laisse passer qu'un jeu de caracteres sans effet pour cmd.
+        sans_pack=re.sub(r"[^A-Za-z0-9 ._:-]", "", sans_pack),
     )
     return Response(content=content, media_type="text/plain")
 
 
-def _pack_for_sysid(session: Session, sysid: str) -> Optional[DriverPack]:
-    """Pack prêt dont le catalogue revendique cet identifiant matériel.
+def _pack_for_sysid(session: Session, sysid: str,
+                    statuts: tuple = ("ready",)) -> Optional[DriverPack]:
+    """Pack prêt (ou, avec `statuts`, simplement au catalogue) dont le catalogue
+    revendique cet identifiant matériel.
 
     Les constructeurs publient un identifiant qui lève l'ambiguïté des noms
     commerciaux : chez Lenovo, un ThinkPad T15 est un Machine Type 20S6/20S7 et
@@ -3976,7 +3997,7 @@ def _pack_for_sysid(session: Session, sysid: str) -> Optional[DriverPack]:
 
     packs = session.exec(
         select(DriverPack)
-        .where(DriverPack.status == "ready", DriverPack.hw_ids != "")
+        .where(DriverPack.status.in_(statuts), DriverPack.hw_ids != "")
         .order_by(DriverPack.os_code.desc())   # Windows11 avant Windows10
     ).all()
     for pack in packs:
@@ -3986,7 +4007,8 @@ def _pack_for_sysid(session: Session, sysid: str) -> Optional[DriverPack]:
     return None
 
 
-def _pack_for_model_name(session: Session, name: str) -> Optional[DriverPack]:
+def _pack_for_model_name(session: Session, name: str,
+                         statuts: tuple = ("ready",)) -> Optional[DriverPack]:
     """Pack pret dont le nom de modele correspond a celui remonte par la machine.
 
     Chez Dell et HP, le catalogue publie un CODE comme identifiant materiel (systemID
@@ -4000,18 +4022,17 @@ def _pack_for_model_name(session: Session, name: str) -> Optional[DriverPack]:
     est silencieuse. Or DISM n'installe que les .inf dont l'identifiant materiel
     correspond, donc un pack "presque bon" ne fait pas de degats, il installe des
     pilotes INCOMPLETS — un peripherique muet qu'on ne decouvre qu'a la livraison.
-    Le repli historique (tout le dossier) ne coute lui que du temps. Dans le doute, on
-    ne cible donc rien.
+    Sans pack, WinPE n'injecte rien et Windows Update complete : dans le doute, on ne
+    cible donc rien.
     """
     key = normalize_model(name)
     if len(key) < 6:      # trop court pour discriminer quoi que ce soit
         return None
-    packs = session.exec(
+    packs = [p for p in session.exec(
         select(DriverPack)
-        .where(DriverPack.status == "ready", DriverPack.local_path != "",
-               DriverPack.model_key != "")
+        .where(DriverPack.status.in_(statuts), DriverPack.model_key != "")
         .order_by(DriverPack.os_code.desc())   # Windows11 avant Windows10
-    ).all()
+    ).all() if p.status != "ready" or p.local_path]
     # L'egalite l'emporte toujours sur un prefixe, quel que soit l'ordre des packs.
     return next((p for p in packs if p.model_key == key), None) or next(
         (p for p in packs
@@ -4043,8 +4064,14 @@ def _resolve_driver_pack(session: Session, machine: Machine) -> Optional[DriverP
 
 def _resolve_driver_dir(machine: Machine) -> str:
     """Chemin du dossier de drivers a injecter, relatif au partage SMB (Z:), en
-    notation Windows (backslashes). '' = ne rien injecter (VM) ; 'drivers' = tout
-    le dossier (fallback historique) ; 'drivers\\<vendor>\\<key>' = pack cible.
+    notation Windows (backslashes). '' = ne rien injecter (VM, ou aucun pack pret
+    pour ce modele) ; 'drivers\\<vendor>\\<key>' = pack cible.
+
+    Il n'y a plus de repli « tout le dossier » : DISM y passait des HEURES (40 Go,
+    2 276 .inf en octobre 2026 — 26 h estimees au banc le 08/10), WinPE semblait
+    fige, et le poste recevait surtout les pilotes d'autres modeles. Sans pack,
+    Windows demarre sur ses pilotes integres et Windows Update complete — comme
+    pour un pack « reseau seul ».
 
     Sans court-circuit VM, on retombe sur le fallback et DISM injecte les ~36 GB du
     dossier entier — 2046 fichiers .inf a travers SMB, des heures de travail pour du
@@ -4055,12 +4082,50 @@ def _resolve_driver_dir(machine: Machine) -> str:
     with Session(engine) as session:
         pack = _resolve_driver_pack(session, machine)
     if not pack or pack.status != "ready" or not pack.local_path:
-        return "drivers"
+        return ""
     share = WIN_SHARE_PATH.rstrip("/")
     if not pack.local_path.startswith(share):
-        return "drivers"
+        return ""
     rel = pack.local_path[len(share):].lstrip("/")
-    return rel.replace("/", "\\") or "drivers"
+    return rel.replace("/", "\\")
+
+
+def _pack_au_catalogue(session: Session, machine: Machine) -> Optional[DriverPack]:
+    """Pour un poste SANS pack pret : celui qui lui irait, s'il existe au catalogue
+    sans etre telecharge (cas courant : quelques packs telecharges sur pres de
+    deux mille connus). Memes regles strictes que `_resolve_driver_pack`."""
+    if machine.proxmox_vm_id:
+        return None
+    if machine.driver_pack_id:
+        return session.get(DriverPack, machine.driver_pack_id)
+    statuts = ("available", "error", "downloading")
+    return (_pack_for_sysid(session, machine.hw_sysid, statuts)
+            or _pack_for_model_name(session, machine.hw_sysid, statuts)
+            or _pack_for_model_name(session, machine.hw_model, statuts))
+
+
+# Packs dont le telechargement a deja ete demande par un deploiement : WinPE peut
+# redemander son script avant que le worker n'ait passe le pack en `downloading`.
+_packs_demandes: set = set()
+
+
+def _telecharger_pour_la_suite(pack: DriverPack) -> bool:
+    """Lance en tache de fond le telechargement d'un pack qu'un deploiement vient de
+    reclamer : ce poste-ci part sans, le prochain de ce modele l'aura. Vrai si le
+    telechargement est lance ou deja en cours. Ne leve jamais : un deploiement ne
+    doit pas echouer pour ca."""
+    if pack.status == "downloading" or pack.id in _packs_demandes:
+        return True
+    if pack.status not in ("available", "error") or arq_pool is None:
+        return False
+    try:
+        # Route synchrone (thread de FastAPI) : la file arq vit dans la boucle principale.
+        anyio.from_thread.run(arq_pool.enqueue_job, "download_driver_pack", pack.id)
+    except Exception as e:      # noqa: BLE001
+        _hv_log.warning("Telechargement du pack %s non lance : %s", pack.id, e)
+        return False
+    _packs_demandes.add(pack.id)
+    return True
 
 
 # GUID de la classe « Net » (cartes reseau, filaires ET Wi-Fi), tel qu'il apparait
