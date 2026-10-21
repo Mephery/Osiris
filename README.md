@@ -180,6 +180,32 @@ npm install
 npm run build          # génère dist/ servi par Caddy
 ```
 
+#### En production : un compte de service dédié
+
+L'API répond à des machines non authentifiées : elle ne doit pas tourner sous le
+compte des administrateurs. Si ce compte a `sudo`, une faille dans l'API donne
+root. On crée donc un compte `osiris` sans shell ni sudo (hormis les scripts VPN,
+cf. `deploy/README.md`), qui n'écrit que là où l'API en a besoin :
+
+```bash
+sudo useradd --system --user-group --home-dir /var/lib/osiris --shell /usr/sbin/nologin osiris
+sudo usermod -aG osiris "$USER"      # l'administrateur garde la main sur les fichiers générés
+sudo apt install acl
+# Écriture pour osiris ET l'administrateur, y compris sur les fichiers créés plus tard
+for d in /opt/osiris/backend/static /srv/data; do
+  sudo setfacl -R -m u:osiris:rwX,u:"$USER":rwX "$d"
+  sudo find "$d" -type d -exec setfacl -m d:u:osiris:rwX,d:u:"$USER":rwX {} +
+done
+sudo setfacl -m u:osiris:r /opt/osiris/backend/.env
+# Le code doit être lisible par osiris (sauf .env, déjà couvert ci-dessus)
+find /opt/osiris/backend -path /opt/osiris/backend/venv -prune -o ! -name .env -type f ! -perm -o=r -print0 | xargs -0 -r chmod o+r
+```
+
+Puis `User=osiris` / `Group=osiris` dans `osiris-api.service` et
+`osiris-worker.service`, et `force user = osiris` dans le partage Samba
+`[windows]`. ⚠️ Un fichier de code en `600` (umask restrictif à la création)
+fait échouer le démarrage sur un `PermissionError` d'Alembic.
+
 Au premier démarrage (Docker ou direct), OSIRIS crée automatiquement :
 - Un compte admin depuis `ADMIN_EMAIL` / `ADMIN_PASSWORD`
 - Deux profils par défaut (Ubuntu + Windows)

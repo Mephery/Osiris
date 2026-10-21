@@ -32,10 +32,11 @@ sudo install -o root -g root -m 440 deploy/osiris-vpn.sudoers    /etc/sudoers.d/
 sudo visudo -c
 ```
 
-`humans` (compte qui fait tourner osiris-api) n'obtient de sudo NOPASSWD que
-sur ces trois scripts précis — pas de sudo générique. Les scripts vivent hors
-de `/opt/osiris` (qui appartient à `humans`) pour que ce compte ne puisse pas
-se donner root en modifiant le script qu'il a le droit d'exécuter en sudo.
+`osiris` (compte de service qui fait tourner osiris-api et le worker, cf.
+README principal) n'obtient de sudo NOPASSWD que sur ces trois scripts
+précis — pas de sudo générique. Les scripts vivent hors de `/opt/osiris` pour
+que ce compte ne puisse pas se donner root en modifiant le script qu'il a le
+droit d'exécuter en sudo.
 
 ## 3. NAT + routage
 
