@@ -1264,9 +1264,8 @@ Les fichiers Windows sont servis via Samba (requis : protocole NT1 pour WinPE) :
    # LECTURE SEULE pour les invités : chaque PC exécute en WinPE ce qui est ici
    # (curl.exe, osiris-deploy.cmd). En écriture, n'importe qui sur le réseau
    # faisait exécuter ce qu'il voulait aux déploiements suivants.
-   read only = yes
+   read only = yes            # pour tous : les administrateurs déposent par SSH (scp, VS Code)
    guest ok = yes
-   write list = humans        # administrateurs, avec un mot de passe Samba (smbpasswd -a)
    force user = osiris
    min protocol = NT1
    ntlm auth = yes
