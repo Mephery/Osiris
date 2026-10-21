@@ -14,6 +14,8 @@ os.environ.setdefault("ADMIN_PASSWORD", "testadminpass")
 os.environ.setdefault("OSIRIS_BASE_URL", "http://localhost:8000")
 os.environ.setdefault("OSIRIS_IP", "127.0.0.1")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
+# Jamais de surveillance des tunnels en test : elle agit sur les vrais (sudo).
+os.environ["OSIRIS_VPN_SURVEILLANCE"] = "0"
 
 import pytest
 from fastapi.testclient import TestClient

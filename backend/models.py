@@ -88,6 +88,13 @@ class VpnTunnel(SQLModel, table=True):
     enabled: bool = Field(default=True)
     status: str = Field(default="unknown")            # unknown | active | inactive | failed
     last_applied_at: Optional[datetime] = Field(default=None)
+    # Session ouverte A DUREE LIMITEE : le tunnel porte le compte d'une personne sur le
+    # pare-feu du client, il ne doit pas rester connecte en dehors des deploiements.
+    # Ferme a `expires_at` (minuterie systemd, meme API arretee) ou apres un temps sans
+    # activite de deploiement de l'organisation (cf. vpn.raison_de_fermer).
+    expires_at: Optional[datetime] = Field(default=None)
+    closed_at: Optional[datetime] = Field(default=None)
+    close_reason: str = Field(default="")             # "" | expiree | inactif | manuel | hors_osiris
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

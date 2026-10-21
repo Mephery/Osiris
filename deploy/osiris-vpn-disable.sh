@@ -11,6 +11,7 @@ if ! [[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]]; then
     exit 1
 fi
 
+systemctl stop "osiris-vpn-expire-${SLUG}.timer" 2>/dev/null || true
 systemctl disable --now "openvpn-client@${SLUG}" 2>/dev/null || true
 rm -f "/etc/openvpn/client/${SLUG}.conf" "/etc/openvpn/client/${SLUG}.auth"
 install -o root -g root -m 644 "$DNSMASQ_SRC" /etc/dnsmasq.d/osiris-vpn-domains.conf

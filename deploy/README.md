@@ -1,8 +1,12 @@
 # Tunnels VPN clients — déploiement
 
 Remplace le script PowerShell MDT (bascule d'un seul VPN à la fois côté
-Windows) par des tunnels OpenVPN permanents sur la VM Debian OSIRIS, pilotés
-depuis l'UI web. Chaque organisation peut avoir un tunnel ; toutes les
+Windows) par des tunnels OpenVPN sur la VM Debian OSIRIS, pilotés depuis
+l'UI web. Un tunnel n'est PAS permanent : il s'ouvre pour une durée choisie
+(« Ouvrir pour… ») et se referme seul à l'échéance (minuterie systemd, même
+API arrêtée) ou après un temps sans déploiement dans l'organisation. Il porte
+le compte d'une personne sur le pare-feu du client : connecté en continu, il
+ressemble à un compte volé. Chaque organisation peut avoir un tunnel ; toutes les
 machines déployées sur le VLAN 10.0.0.0/24 peuvent joindre tous les
 domaines AD clients simultanément, sans sélection manuelle.
 
@@ -23,12 +27,13 @@ lit `/etc/openvpn/client/<nom>.conf` — c'est ce qu'utilise `backend/vpn.py`.
 ```bash
 sudo install -o root -g root -m 700 deploy/osiris-vpn-apply.sh   /usr/local/sbin/osiris-vpn-apply.sh
 sudo install -o root -g root -m 700 deploy/osiris-vpn-disable.sh /usr/local/sbin/osiris-vpn-disable.sh
+sudo install -o root -g root -m 700 deploy/osiris-vpn-session.sh /usr/local/sbin/osiris-vpn-session.sh
 sudo install -o root -g root -m 440 deploy/osiris-vpn.sudoers    /etc/sudoers.d/osiris-vpn
 sudo visudo -c
 ```
 
 `humans` (compte qui fait tourner osiris-api) n'obtient de sudo NOPASSWD que
-sur ces deux scripts précis — pas de sudo générique. Les scripts vivent hors
+sur ces trois scripts précis — pas de sudo générique. Les scripts vivent hors
 de `/opt/osiris` (qui appartient à `humans`) pour que ce compte ne puisse pas
 se donner root en modifiant le script qu'il a le droit d'exécuter en sudo.
 

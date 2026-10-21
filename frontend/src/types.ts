@@ -67,6 +67,11 @@ export interface VpnTunnel {
   enabled: boolean;
   status: string;
   last_applied_at: string | null;
+  expires_at: string | null;
+  closed_at: string | null;
+  close_reason: '' | 'expiree' | 'inactif' | 'manuel' | 'hors_osiris';
+  inactivite_min: number;
+  durees_heures: number[];
 }
 
 export interface WimFile {

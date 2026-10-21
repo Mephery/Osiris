@@ -4,9 +4,15 @@
 Gestion des tunnels VPN site-à-site par organisation.
 
 Chaque VpnTunnel correspond à un client distant (ex: Acme) : un fichier
-.ovpn permanent (un par client, tous actifs simultanément — contrairement à
-l'ancien script PowerShell qui basculait un seul VPN à la fois), une route
+.ovpn (un par client, plusieurs ouverts en même temps si besoin — contrairement
+à l'ancien script PowerShell qui basculait un seul VPN à la fois), une route
 vers le réseau du client, et un DNS interne à interroger pour son domaine AD.
+
+Une session n'est jamais permanente : le tunnel s'authentifie avec le compte
+d'une personne sur le pare-feu du client, et connecté jour et nuit il ressemble
+à un compte volé. Il s'ouvre pour une durée bornée (minuterie systemd posée
+par le script root, qui ferme même si l'API est arrêtée) et OSIRIS le referme
+plus tôt quand l'organisation ne déploie plus rien (cf. raison_de_fermer).
 
 L'application des changements sur le système (fichiers sous /etc, services
 systemd) passe par deux scripts root minimalistes (deploy/osiris-vpn-*.sh)
@@ -17,6 +23,7 @@ import os
 import re
 import subprocess
 import tempfile
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlmodel import Session, select
@@ -28,6 +35,23 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
 
 VPN_APPLY_SCRIPT = "/usr/local/sbin/osiris-vpn-apply.sh"
 VPN_DISABLE_SCRIPT = "/usr/local/sbin/osiris-vpn-disable.sh"
+VPN_SESSION_SCRIPT = "/usr/local/sbin/osiris-vpn-session.sh"
+
+# Durée d'une session : proposée par défaut, et plafond accepté (prolongations comprises).
+DUREE_PAR_DEFAUT = timedelta(hours=4)
+DUREE_MAX = timedelta(hours=12)
+
+
+def delai_inactivite() -> timedelta:
+    """Temps sans aucune activité de déploiement au bout duquel on referme.
+
+    30 min couvrent sans peine les phases muettes d'un déploiement Windows (reboot
+    WinPE → specialize → OOBE avant que le premier démarrage écrive à nouveau)."""
+    try:
+        minutes = int(os.environ.get("OSIRIS_VPN_INACTIVITE_MIN", "30"))
+    except ValueError:
+        minutes = 30
+    return timedelta(minutes=max(5, minutes))
 
 # Chemins ABSOLUS obligatoires : l'unité systemd fixe PATH=/opt/osiris/backend/venv/bin
 # uniquement, donc ni /usr/bin ni /bin. Appeler "sudo" ou "systemctl" par leur nom lève
@@ -55,6 +79,11 @@ def render_ovpn_config(raw_config: str, route_cidr: str, slug: str) -> str:
         for line in lines
     ]
     content = "\n".join(lines)
+    # Sans lui, en UDP, la fermeture côté OSIRIS n'est pas annoncée : le pare-feu du
+    # client garde une session fantôme jusqu'à son propre délai. OpenVPN 2.6 l'ignore
+    # (simple NOTICE) sur une connexion TCP de secours.
+    if not re.search(r"^\s*explicit-exit-notify\b", content, re.MULTILINE):
+        content += "\nexplicit-exit-notify 2"
     if route_cidr:
         network = ipaddress.ip_network(route_cidr, strict=False)
         route_line = f"route {network.network_address} {network.netmask}"
@@ -128,9 +157,10 @@ def _write_temp(content: str, mode: int = 0o600) -> str:
     return path
 
 
-def apply_tunnel(session: Session, tunnel: VpnTunnel, totp_code: Optional[str] = None) -> None:
+def apply_tunnel(session: Session, tunnel: VpnTunnel, totp_code: Optional[str] = None,
+                 duree: timedelta = DUREE_PAR_DEFAUT) -> None:
     """Écrit la conf OpenVPN + le fichier d'identifiants + le snippet dnsmasq
-    à jour, puis (re)démarre le tunnel et recharge dnsmasq. Le code TOTP,
+    à jour, puis (re)démarre le tunnel pour `duree` et recharge dnsmasq. Le code TOTP,
     quand fourni, n'est utilisé que pour construire ce fichier éphémère : il
     n'est jamais persisté (ni en base, ni dans les logs d'audit).
     Lève RuntimeError si le script root échoue, ValueError si les paramètres
@@ -152,7 +182,8 @@ def apply_tunnel(session: Session, tunnel: VpnTunnel, totp_code: Optional[str] =
             password += totp_code
         auth_path = _write_temp(render_auth_file(tunnel.vpn_username, password))
     try:
-        cmd = [SUDO_BIN, "-n", VPN_APPLY_SCRIPT, tunnel.slug, ovpn_path, dnsmasq_path, auth_path or "-"]
+        cmd = [SUDO_BIN, "-n", VPN_APPLY_SCRIPT, tunnel.slug, ovpn_path, dnsmasq_path,
+               auth_path or "-", str(int(duree.total_seconds()))]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
     finally:
         os.unlink(ovpn_path)
@@ -179,6 +210,63 @@ def disable_tunnel(session: Session, tunnel: VpnTunnel) -> None:
         os.unlink(dnsmasq_path)
     if result.returncode != 0:
         raise RuntimeError(f"Échec de la désactivation du tunnel : {result.stderr.strip()[:500]}")
+
+
+def _session_script(slug: str, *args: str) -> None:
+    if not SLUG_RE.match(slug):
+        raise ValueError("Slug de tunnel invalide")
+    result = subprocess.run(
+        [SUDO_BIN, "-n", VPN_SESSION_SCRIPT, slug, *args],
+        capture_output=True, text=True, timeout=20,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Échec de la commande de session VPN : {result.stderr.strip()[:500]}")
+
+
+def close_tunnel(slug: str) -> None:
+    """Ferme la session (le service s'arrête, la configuration reste en place pour
+    la prochaine ouverture). La minuterie d'échéance est désarmée."""
+    _session_script(slug, "stop")
+
+
+def rearm_expiry(slug: str, duree: timedelta) -> None:
+    """Reporte l'échéance d'une session ouverte, sans la couper ni redemander de TOTP."""
+    _session_script(slug, "expire", str(int(duree.total_seconds())))
+
+
+def _utc(moment: Optional[datetime]) -> Optional[datetime]:
+    """Les colonnes mélangent avisé (TIMESTAMPTZ) et naïf-UTC (journal de déploiement)."""
+    if moment is None:
+        return None
+    return moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment
+
+
+def raison_de_fermer(maintenant: datetime, ouvert_le: Optional[datetime],
+                     expire_le: Optional[datetime], derniere_activite: Optional[datetime],
+                     deploiement_en_attente: bool, inactivite: timedelta) -> Optional[str]:
+    """Pourquoi refermer une session ouverte maintenant — ou None pour la laisser.
+
+    - `expiree` : la durée choisie à l'ouverture est écoulée. Plafond DUR, même au
+      milieu d'un déploiement : c'est ce qui garantit à l'admin du pare-feu qu'une
+      session ne dure jamais plus que demandé. On le repousse avec « Prolonger ».
+    - `inactif` : aucune activité de déploiement dans l'organisation depuis
+      `inactivite`, comptée depuis l'ouverture ou la dernière ligne de journal. Une
+      machine qui vient de démarrer en PXE et n'a encore rien écrit (statut
+      deploying, journal vide) suspend ce délai : WinPE met quelques minutes à
+      charger, et le plafond dur borne de toute façon une machine bloquée là.
+    """
+    maintenant = _utc(maintenant)
+    expire_le = _utc(expire_le)
+    if expire_le is not None and maintenant >= expire_le:
+        return "expiree"
+    if deploiement_en_attente:
+        return None
+    reperes = [m for m in (_utc(ouvert_le), _utc(derniere_activite)) if m is not None]
+    if not reperes:
+        return None
+    if maintenant - max(reperes) >= inactivite:
+        return "inactif"
+    return None
 
 
 def tunnel_status(slug: str) -> str:

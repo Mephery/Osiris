@@ -309,6 +309,7 @@ export default function App() {
   const [vpnTunnels, setVpnTunnels] = useState<VpnTunnel[]>([])
   const [newVpnTunnel, setNewVpnTunnel] = useState({ organization_id: 0, name: '', ovpn_config: '', remote_dns: '', route_cidr: '', vpn_username: '', vpn_password: '', requires_totp: false, enabled: true })
   const [applyingTunnelId, setApplyingTunnelId] = useState<number | null>(null)
+  const [dureeTunnel, setDureeTunnel] = useState<Record<number, number>>({})
 
   // Login 2FA
   const [pendingTotp, setPendingTotp] = useState<{temp_token: string} | null>(null)
@@ -1239,12 +1240,32 @@ export default function App() {
         {activeTab === 'admin' && auth.role === 'admin' && adminSubTab === 'vpn' && (
           <div className="osiris-table-wrap p-5 space-y-3">
             <h2 className="text-xs font-bold uppercase tracking-widest text-slate-500">Tunnels VPN clients</h2>
-            <p className="text-[10px] text-slate-600">Un tunnel OpenVPN permanent par client. OSIRIS route automatiquement les machines déployées vers le bon domaine AD (DNS split-horizon + route classless), sans bascule manuelle.</p>
+            <p className="text-[10px] text-slate-600">Un tunnel OpenVPN par client, à ouvrir le temps des déploiements : il se connecte avec un compte sur le pare-feu du client, et se referme seul à l'échéance ou quand plus aucune machine de l'organisation ne se déploie. OSIRIS route automatiquement les machines vers le bon domaine AD (DNS split-horizon + route classless).</p>
             {vpnTunnels.length > 0 && (
               <div className="space-y-1">
                 {vpnTunnels.map((t) => {
                   const orgName = orgs.find(o => o.id === t.organization_id)?.name ?? `Org #${t.organization_id}`
-                  const statusColor = t.status === 'active' ? 'text-emerald-400' : t.status === 'failed' ? 'text-red-400' : 'text-slate-500'
+                  const ouvert = t.status === 'active'
+                  const statusColor = ouvert ? 'text-emerald-400' : t.status === 'failed' ? 'text-red-400' : 'text-slate-500'
+                  const heure = (iso: string | null) => iso ? new Date(iso).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : ''
+                  const jour = (iso: string | null) => iso ? new Date(iso).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) : ''
+                  const raisons: Record<string, string> = {
+                    expiree: 'durée écoulée', inactif: `aucun déploiement depuis ${t.inactivite_min} min`,
+                    manuel: 'fermé à la main', hors_osiris: 'arrêté hors OSIRIS',
+                  }
+                  const duree = dureeTunnel[t.id] ?? 4
+                  const action = (chemin: string, corps: object | null, succes: string) => {
+                    setApplyingTunnelId(t.id)
+                    fetch(`${API_URL}/vpn-tunnels/${t.id}/${chemin}`, {
+                      method: 'POST',
+                      headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
+                      body: corps ? JSON.stringify(corps) : undefined,
+                    })
+                      .then(r => lireReponse(r, 'Action sur le tunnel refusée'))
+                      .then(() => { fetchVpnTunnels(auth.token); toast.success(succes) })
+                      .catch((e) => toast.error(e.message))
+                      .finally(() => setApplyingTunnelId(null))
+                  }
                   return (
                     <div key={t.id} className="flex items-center justify-between py-1.5 px-3 border border-slate-800/60 rounded text-xs">
                       <div>
@@ -1253,31 +1274,44 @@ export default function App() {
                         {t.route_cidr && <span className="text-slate-600 ml-2 font-mono text-[9px]">{t.route_cidr}</span>}
                         {t.remote_dns && <span className="text-slate-700 ml-2 font-mono text-[9px]">DNS {t.remote_dns}</span>}
                         {t.requires_totp && <span className="ml-2 text-[9px] text-amber-400">TOTP requis</span>}
-                        <span className={`ml-3 font-mono text-[9px] ${statusColor}`}>{t.status}</span>
+                        {ouvert
+                          ? <span className={`ml-3 text-[9px] ${statusColor}`}>ouvert jusqu'à {heure(t.expires_at)}</span>
+                          : <span className={`ml-3 text-[9px] ${statusColor}`}>
+                              {t.status === 'failed' ? 'échec' : 'fermé'}
+                              {t.closed_at && t.close_reason && ` le ${jour(t.closed_at)} à ${heure(t.closed_at)} (${raisons[t.close_reason] ?? t.close_reason})`}
+                            </span>}
                         {!t.enabled && <span className="ml-2 text-[9px] text-slate-700">(désactivé)</span>}
                       </div>
                       <div className="flex items-center gap-1.5">
-                        <button
-                          disabled={applyingTunnelId === t.id}
-                          onClick={() => {
-                            let totp_code: string | null = null
-                            if (t.requires_totp) {
-                              totp_code = window.prompt(`Code TOTP actuel pour "${t.name}" (jamais stocké, utilisé une seule fois) :`)
-                              if (!totp_code) return
-                            }
-                            setApplyingTunnelId(t.id)
-                            fetch(`${API_URL}/vpn-tunnels/${t.id}/apply`, {
-                              method: 'POST',
-                              headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ totp_code }),
-                            })
-                              .then(async r => { if (!r.ok) throw new Error((await r.json()).detail || 'Erreur'); return r.json() })
-                              .then(() => { fetchVpnTunnels(auth.token); toast.success('Tunnel appliqué') })
-                              .catch((e) => toast.error(e.message || 'Échec de l\'application du tunnel'))
-                              .finally(() => setApplyingTunnelId(null))
-                          }}
-                          className="osiris-btn text-[10px] px-2 py-1"
-                        >{applyingTunnelId === t.id ? '...' : 'Appliquer'}</button>
+                        {ouvert ? (
+                          <>
+                            <button disabled={applyingTunnelId === t.id} onClick={() => action('extend', { heures: 1 }, 'Session prolongée d\'une heure')}
+                              title="Repousse la fermeture d'une heure, sans couper ni redemander de code TOTP"
+                              className="osiris-btn text-[10px] px-2 py-1">+1 h</button>
+                            <button disabled={applyingTunnelId === t.id} onClick={() => action('close', null, 'Tunnel fermé')}
+                              className="osiris-btn text-[10px] px-2 py-1">Fermer</button>
+                          </>
+                        ) : (
+                          <>
+                            <select value={duree} onChange={e => setDureeTunnel({ ...dureeTunnel, [t.id]: parseInt(e.target.value) })}
+                              title={`Le tunnel se ferme seul à l'échéance, ou plus tôt après ${t.inactivite_min} min sans déploiement dans l'organisation`}
+                              className="osiris-input text-[10px] py-0.5">
+                              {t.durees_heures.map(h => <option key={h} value={h}>{h} h</option>)}
+                            </select>
+                            <button
+                              disabled={applyingTunnelId === t.id}
+                              onClick={() => {
+                                let totp_code: string | null = null
+                                if (t.requires_totp) {
+                                  totp_code = window.prompt(`Code TOTP actuel pour "${t.name}" (jamais stocké, utilisé une seule fois) :`)
+                                  if (!totp_code) return
+                                }
+                                action('apply', { totp_code, duree_heures: duree }, `Tunnel ouvert pour ${duree} h`)
+                              }}
+                              className="osiris-btn text-[10px] px-2 py-1"
+                            >{applyingTunnelId === t.id ? '...' : 'Ouvrir'}</button>
+                          </>
+                        )}
                         <button onClick={() => fetch(`${API_URL}/vpn-tunnels/${t.id}`, { method: 'DELETE', headers: authHeader(auth.token) }).then(async r => { if (r.ok) { fetchVpnTunnels(auth.token); toast.success('Tunnel supprimé') } else { toast.error((await r.json()).detail || 'Erreur') } })} className="osiris-action-btn osiris-action-btn--danger"><IcoX /></button>
                       </div>
                     </div>

@@ -125,8 +125,10 @@ async def lifespan(app: FastAPI):
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
     arq_pool = await create_pool(RedisSettings.from_dsn(redis_url))
     verif = asyncio.create_task(_verifier_routes_machines())
+    tunnels = asyncio.create_task(_surveiller_tunnels_vpn())
     yield
     verif.cancel()
+    tunnels.cancel()
     await arq_pool.aclose()
 
 limiter = Limiter(key_func=get_remote_address)
@@ -701,6 +703,27 @@ async def _send_webhook(url: str, machine: Machine, status: str):
         pass  # les webhooks sont best-effort
 
 
+def _signaler_tunnel_ferme(session: Session, machine: Machine) -> None:
+    """Prévient dans le journal du déploiement qu'il va échouer à la jonction.
+
+    Les tunnels ne restent plus ouverts en permanence : lancer un poste à joindre au
+    domaine en oubliant d'ouvrir celui de son organisation est désormais l'erreur
+    attendue. Le dire dès le démarrage PXE, pas après 40 min sur un 0x54b."""
+    if not machine.organization_id or not machine.profile_id:
+        return
+    profil = session.get(Profile, machine.profile_id)
+    if not profil or not profil.join_domain:
+        return
+    tunnel = session.exec(
+        select(VpnTunnel).where(VpnTunnel.organization_id == machine.organization_id)).first()
+    if not tunnel or not tunnel.enabled or tunnel.status == "active":
+        return
+    _append_log_line(session, machine.mac, machine.deploy_log_run, _stamp(
+        f"ATTENTION : le tunnel VPN « {tunnel.name} » est fermé — la jonction au "
+        f"domaine échouera. L'ouvrir maintenant dans Administration › Tunnels VPN : "
+        f"l'installation a le temps, la jonction n'a lieu qu'au premier démarrage."))
+
+
 def _record_deploy_event(session: Session, machine: Machine, status: str):
     """Enregistre un événement de déploiement (sans commit)."""
     profile_name = ""
@@ -966,8 +989,14 @@ class VpnTunnelPatch(SQLModel):
     requires_totp: Optional[bool] = None
     enabled: Optional[bool] = None
 
+VPN_DUREES_HEURES = (1, 2, 4, 8, 12)   # proposées à l'ouverture ; 4 h par défaut
+
 class VpnTunnelApply(SQLModel):
     totp_code: Optional[str] = None
+    duree_heures: int = int(vpn.DUREE_PAR_DEFAUT.total_seconds() // 3600)
+
+class VpnTunnelExtend(SQLModel):
+    heures: int = 1
 
 def _serialize_vpn_tunnel(t: VpnTunnel) -> dict:
     return {
@@ -975,6 +1004,9 @@ def _serialize_vpn_tunnel(t: VpnTunnel) -> dict:
         "has_config": bool(t.ovpn_config), "remote_dns": t.remote_dns, "route_cidr": t.route_cidr,
         "vpn_username": t.vpn_username, "has_password": bool(t.vpn_password), "requires_totp": t.requires_totp,
         "enabled": t.enabled, "status": t.status, "last_applied_at": t.last_applied_at,
+        "expires_at": t.expires_at, "closed_at": t.closed_at, "close_reason": t.close_reason,
+        "inactivite_min": int(vpn.delai_inactivite().total_seconds() // 60),
+        "durees_heures": list(VPN_DUREES_HEURES),
     }
 
 @app.get("/vpn-tunnels", dependencies=[Depends(get_current_user)])
@@ -1082,6 +1114,11 @@ def delete_vpn_tunnel(tunnel_id: int, current_user: User = Depends(require_admin
 def apply_vpn_tunnel(tunnel_id: int, body: VpnTunnelApply = VpnTunnelApply(), current_user: User = Depends(require_admin)):
     if body.totp_code is not None and not re.fullmatch(r"\d{4,8}", body.totp_code):
         raise HTTPException(status_code=400, detail="Code TOTP invalide")
+    if body.duree_heures not in VPN_DUREES_HEURES:
+        raise HTTPException(status_code=400, detail=(
+            f"Durée d'ouverture invalide : {body.duree_heures} h. "
+            f"Choix possibles : {', '.join(str(h) for h in VPN_DUREES_HEURES)} h."))
+    duree = timedelta(hours=body.duree_heures)
     with Session(engine) as session:
         tunnel = session.get(VpnTunnel, tunnel_id)
         if not tunnel:
@@ -1089,7 +1126,7 @@ def apply_vpn_tunnel(tunnel_id: int, body: VpnTunnelApply = VpnTunnelApply(), cu
         if not tunnel.ovpn_config:
             raise HTTPException(status_code=400, detail="Aucune configuration .ovpn enregistrée pour ce tunnel")
         try:
-            vpn.apply_tunnel(session, tunnel, totp_code=body.totp_code)
+            vpn.apply_tunnel(session, tunnel, totp_code=body.totp_code, duree=duree)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except RuntimeError as e:
@@ -1097,12 +1134,146 @@ def apply_vpn_tunnel(tunnel_id: int, body: VpnTunnelApply = VpnTunnelApply(), cu
             session.add(tunnel)
             session.commit()
             raise HTTPException(status_code=502, detail=str(e))
+        maintenant = datetime.now(timezone.utc)
         tunnel.status = vpn.tunnel_status(tunnel.slug)
-        tunnel.last_applied_at = datetime.now(timezone.utc)
+        tunnel.last_applied_at = maintenant
+        tunnel.expires_at = maintenant + duree
+        tunnel.closed_at = None
+        tunnel.close_reason = ""
         session.add(tunnel)
-        _log(session, current_user, "apply_vpn_tunnel", details={"organization_id": tunnel.organization_id, "name": tunnel.name})
+        _log(session, current_user, "apply_vpn_tunnel", details={
+            "organization_id": tunnel.organization_id, "name": tunnel.name, "duree_heures": body.duree_heures})
         session.commit()
         return _serialize_vpn_tunnel(tunnel)
+
+@app.post("/vpn-tunnels/{tunnel_id}/close")
+def close_vpn_tunnel(tunnel_id: int, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        tunnel = session.get(VpnTunnel, tunnel_id)
+        if not tunnel:
+            raise HTTPException(status_code=404, detail="Tunnel introuvable")
+        try:
+            vpn.close_tunnel(tunnel.slug)
+        except (RuntimeError, ValueError) as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        tunnel.status = vpn.tunnel_status(tunnel.slug)
+        tunnel.closed_at = datetime.now(timezone.utc)
+        tunnel.close_reason = "manuel"
+        session.add(tunnel)
+        _log(session, current_user, "close_vpn_tunnel", details={"organization_id": tunnel.organization_id, "name": tunnel.name})
+        session.commit()
+        return _serialize_vpn_tunnel(tunnel)
+
+@app.post("/vpn-tunnels/{tunnel_id}/extend")
+def extend_vpn_tunnel(tunnel_id: int, body: VpnTunnelExtend, current_user: User = Depends(require_admin)):
+    """Repousse l'échéance d'une session ouverte — sans la couper, donc sans TOTP."""
+    if not 1 <= body.heures <= 4:
+        raise HTTPException(status_code=400, detail="Prolongation possible de 1 à 4 heures à la fois")
+    with Session(engine) as session:
+        tunnel = session.get(VpnTunnel, tunnel_id)
+        if not tunnel:
+            raise HTTPException(status_code=404, detail="Tunnel introuvable")
+        if vpn.tunnel_status(tunnel.slug) != "active":
+            raise HTTPException(status_code=409, detail=(
+                "Le tunnel est fermé : il n'y a rien à prolonger. L'ouvrir à nouveau."))
+        maintenant = datetime.now(timezone.utc)
+        depart = max(maintenant, vpn._utc(tunnel.expires_at) or maintenant)
+        echeance = min(depart + timedelta(hours=body.heures), maintenant + vpn.DUREE_MAX)
+        try:
+            vpn.rearm_expiry(tunnel.slug, echeance - maintenant)
+        except (RuntimeError, ValueError) as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        tunnel.expires_at = echeance
+        session.add(tunnel)
+        _log(session, current_user, "extend_vpn_tunnel", details={
+            "organization_id": tunnel.organization_id, "name": tunnel.name, "heures": body.heures})
+        session.commit()
+        return _serialize_vpn_tunnel(tunnel)
+
+
+def _activite_de_deploiement(session: Session, organization_id: int) -> tuple:
+    """(dernière ligne de journal d'une machine de l'organisation, une machine
+    vient-elle de démarrer un déploiement sans avoir encore rien écrit ?)"""
+    machines = session.exec(select(Machine).where(Machine.organization_id == organization_id)).all()
+    if not machines:
+        return None, False
+    derniere = session.exec(
+        select(func.max(DeployLogLine.timestamp))
+        .where(DeployLogLine.mac.in_([m.mac for m in machines]))
+    ).one()
+    en_attente = False
+    for m in machines:
+        if m.status != "deploying":
+            continue
+        a_ecrit = session.exec(
+            select(func.count()).select_from(DeployLogLine)
+            .where(DeployLogLine.mac == m.mac, DeployLogLine.run == m.deploy_log_run)
+        ).one()
+        if not a_ecrit:
+            en_attente = True
+            break
+    return derniere, en_attente
+
+
+def _tour_tunnels_vpn() -> None:
+    """Une passe de surveillance : referme ce qui doit l'être, constate ce qui
+    s'est fermé sans OSIRIS (minuterie d'échéance, plantage, arrêt à la main)."""
+    log = logging.getLogger("osiris.vpn")
+    with Session(engine) as session:
+        for tunnel in session.exec(select(VpnTunnel)).all():
+            etat = vpn.tunnel_status(tunnel.slug)
+            maintenant = datetime.now(timezone.utc)
+            if etat == "active":
+                if tunnel.expires_at is None:
+                    # Ouvert avant les sessions limitées, ou à la main : on lui donne
+                    # l'échéance par défaut plutôt que de le laisser sans fin.
+                    tunnel.expires_at = maintenant + vpn.DUREE_PAR_DEFAUT
+                    try:
+                        vpn.rearm_expiry(tunnel.slug, vpn.DUREE_PAR_DEFAUT)
+                    except (RuntimeError, ValueError) as e:
+                        log.warning("Tunnel %s : échéance non armée (%s)", tunnel.slug, e)
+                derniere, en_attente = _activite_de_deploiement(session, tunnel.organization_id)
+                raison = vpn.raison_de_fermer(
+                    maintenant, tunnel.last_applied_at, tunnel.expires_at,
+                    derniere, en_attente, vpn.delai_inactivite())
+                if raison:
+                    try:
+                        vpn.close_tunnel(tunnel.slug)
+                    except (RuntimeError, ValueError) as e:
+                        log.error("Tunnel %s : fermeture automatique impossible (%s)", tunnel.slug, e)
+                        continue
+                    etat = vpn.tunnel_status(tunnel.slug)
+                    tunnel.closed_at = maintenant
+                    tunnel.close_reason = raison
+                    _log_systeme(session, "vpn_ferme_auto", details={
+                        "organization_id": tunnel.organization_id, "name": tunnel.name, "raison": raison})
+            elif tunnel.status == "active" and tunnel.closed_at is None:
+                # On le croyait ouvert et il ne l'est plus, sans qu'OSIRIS l'ait fermé.
+                echeance = vpn._utc(tunnel.expires_at)
+                raison = ("expiree" if echeance and maintenant >= echeance - timedelta(minutes=2)
+                          else "hors_osiris")
+                tunnel.closed_at = maintenant
+                tunnel.close_reason = raison
+                _log_systeme(session, "vpn_ferme_auto", details={
+                    "organization_id": tunnel.organization_id, "name": tunnel.name, "raison": raison})
+            tunnel.status = etat
+            session.add(tunnel)
+        session.commit()
+
+
+async def _surveiller_tunnels_vpn() -> None:
+    # Coupée par les tests : TestClient exécute le lifespan, et cette boucle pilote
+    # les VRAIS tunnels de la machine (sudo) d'après la base qu'elle a sous la main.
+    if os.environ.get("OSIRIS_VPN_SURVEILLANCE", "1") == "0":
+        return
+    while True:
+        try:
+            await run_in_threadpool(_tour_tunnels_vpn)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger("osiris.vpn").exception("Surveillance des tunnels VPN en échec")
+        await asyncio.sleep(60)
 
 @app.get("/vpn-tunnels/{tunnel_id}/status")
 def get_vpn_tunnel_status(tunnel_id: int, current_user: User = Depends(require_admin)):
@@ -1895,6 +2066,7 @@ def get_boot_script(request: Request, mac: str | None = None):
 
         machine.status = "deploying"
         _record_deploy_event(session, machine, "deploying")
+        _signaler_tunnel_ferme(session, machine)
         session.add(machine)
         session.commit()
 
