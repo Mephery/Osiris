@@ -168,6 +168,9 @@ SSH_PUBKEY      = os.environ.get("OSIRIS_SSH_PUBKEY", "").strip()
 ADMIN_EMAIL     = os.environ.get("ADMIN_EMAIL", "admin@osiris.local")
 ADMIN_PASSWORD  = os.environ.get("ADMIN_PASSWORD", "changeme")
 WIN_SHARE_PATH  = os.environ.get("WIN_SHARE_PATH", "/srv/data/windows")
+# Seul dépôt où WinPE écrit : le partage `windows` est en lecture seule pour les
+# invités, sinon n'importe qui sur le réseau remplaçait ce que les PC exécutent.
+CAPTURE_SHARE_PATH = os.environ.get("CAPTURE_SHARE_PATH", "/srv/data/captures")
 
 
 def _mot_de_passe_installation() -> str:
@@ -4475,8 +4478,7 @@ async def import_machines(request: Request, current_user: User = Depends(require
 def register_capture(mac: str, wim_name: str):
     """Enregistre une MAC en mode capture. Au prochain boot WinPE elle recevra le script de capture."""
     clean_mac = validate_mac(mac)
-    if not wim_name.endswith(".wim"):
-        wim_name = wim_name + ".wim"
+    wim_name = _nom_de_capture(wim_name)
     _capture_jobs[clean_mac] = {
         "mac": clean_mac,
         "wim_name": wim_name,
@@ -4493,6 +4495,39 @@ def register_capture(mac: str, wim_name: str):
     return {"mac": clean_mac, "wim_name": wim_name, "status": "waiting"}
 
 
+# Images que DISM et WinPE lisent sous ce nom exact : une capture qui les écrase
+# casse tous les déploiements suivants (install.wim l'a déjà été plusieurs fois).
+NOMS_DE_CAPTURE_INTERDITS = {"install.wim", "boot.wim"}
+
+
+def _nom_de_capture(wim_name: str) -> str:
+    """Nom du .wim capturé : il finit dans un `set` du script WinPE et dans un
+    chemin de fichier, donc ni séparateur, ni caractère interprété par cmd."""
+    wim_name = wim_name.strip()
+    if not wim_name.lower().endswith(".wim"):
+        wim_name += ".wim"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}\.wim", wim_name):
+        raise HTTPException(status_code=400, detail=(
+            "Nom d'image invalide : lettres, chiffres, point, tiret et souligné "
+            "uniquement (ex. Golden_Image.wim)."))
+    if wim_name.lower() in NOMS_DE_CAPTURE_INTERDITS:
+        raise HTTPException(status_code=400, detail=(
+            f"« {wim_name} » est l'image que lisent les déploiements : la capture "
+            f"l'écraserait. Choisir un autre nom (ex. Golden_Image.wim)."))
+    return wim_name
+
+
+def _ranger_capture(wim_name: str) -> None:
+    """Déplace l'image capturée du dépôt vers le partage des déploiements.
+
+    Lève RuntimeError si elle n'y est pas : WinPE a annoncé un succès, mais rien
+    n'est arrivé, et le dire vaut mieux qu'une image de référence fantôme."""
+    source = os.path.join(CAPTURE_SHARE_PATH, wim_name)
+    if not os.path.isfile(source):
+        raise RuntimeError(f"{wim_name} introuvable dans le dépôt des captures")
+    os.replace(source, os.path.join(WIN_SHARE_PATH, wim_name))
+
+
 @app.get("/capture", dependencies=[Depends(require_admin)])
 def list_captures():
     """Liste les jobs de capture en cours."""
@@ -4504,11 +4539,43 @@ async def capture_done(mac: str, success: bool = True, jeton: Optional[str] = He
     """Appelé par le script WinPE à la fin de la capture."""
     clean_mac = validate_mac(mac)
     _controler_jeton_mac(clean_mac, jeton, "capture-done")
-    if clean_mac in _capture_jobs:
-        _capture_jobs[clean_mac]["status"] = "done" if success else "failed"
-        _capture_jobs[clean_mac]["finished_at"] = datetime.now(timezone.utc).isoformat()
+    job = _capture_jobs.get(clean_mac)
+    erreur = ""
+    if job:
+        # Rangée seulement pour une capture réellement lancée (script servi) : la
+        # route est appelée sans identifiant, elle ne doit pas permettre de pousser
+        # vers le partage un fichier déposé par n'importe qui dans le dépôt.
+        if success and job["status"] == "capturing":
+            try:
+                await run_in_threadpool(_ranger_capture, job["wim_name"])
+            except (RuntimeError, OSError) as e:
+                success, erreur = False, str(e)
+        job["status"] = "done" if success else "failed"
+        job["finished_at"] = datetime.now(timezone.utc).isoformat()
+        if erreur:
+            job["error"] = erreur
     await manager.broadcast({"type": "capture_done", "mac": clean_mac, "success": success})
     return {"ok": True}
+
+
+@app.post("/capture/{mac}/ranger", dependencies=[Depends(require_admin)])
+def ranger_capture(mac: str):
+    """Range à la main une image capturée hors du script (capture manuelle depuis
+    WinPE après un échec) : elle a atterri dans le dépôt, pas dans le partage."""
+    clean_mac = validate_mac(mac)
+    job = _capture_jobs.get(clean_mac)
+    if not job:
+        raise HTTPException(status_code=404, detail="Aucune capture enregistrée pour cette machine")
+    try:
+        _ranger_capture(job["wim_name"])
+    except RuntimeError as e:
+        raise HTTPException(status_code=404, detail=(
+            f"{e} : la capture manuelle doit écrire Z:\\{job['wim_name']}, "
+            f"avec Z: le dépôt \\\\{OSIRIS_IP}\\captures."))
+    job["status"] = "done"
+    job.pop("error", None)
+    job["finished_at"] = datetime.now(timezone.utc).isoformat()
+    return job
 
 
 @app.delete("/capture/{mac}", dependencies=[Depends(require_admin)])

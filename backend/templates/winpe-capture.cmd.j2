@@ -17,9 +17,11 @@ echo.
 X:\curl.exe -sf "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Mode+capture+demarre+:+%WIM_NAME%" >nul 2>&1
 
 REM ── Connexion au partage SMB ──────────────────────────────────────────────
+REM Le depot des captures, et non le partage "windows" : celui-ci est en lecture
+REM seule. OSIRIS range l'image dans "windows" a la fin (capture/done).
 echo [OSIRIS] Connexion au partage SMB...
 :retry_smb
-net use Z: \\%OSIRIS_IP%\windows /user:guest "" 2>nul
+net use Z: \\%OSIRIS_IP%\captures /user:guest "" 2>nul
 if errorlevel 1 (
     echo [OSIRIS] Partage SMB pas encore pret, nouvelle tentative dans 5s...
     ping -n 6 127.0.0.1 >nul
@@ -199,7 +201,7 @@ echo.
 echo  =============================================
 echo    Capture terminee avec succes !
 echo.
-echo    Fichier cree : \\%OSIRIS_IP%\windows\%WIM_NAME%
+echo    Fichier cree : \\%OSIRIS_IP%\windows\%WIM_NAME% (range par OSIRIS)
 echo.
 echo    Dans OSIRIS :
 echo    Administration > Profils > profil Windows

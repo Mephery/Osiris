@@ -1261,11 +1261,29 @@ Les fichiers Windows sont servis via Samba (requis : protocole NT1 pour WinPE) :
 # smb.conf (serveur de fichiers OSIRIS, pas le DC Samba)
 [windows]
    path = /srv/data/windows
+   # LECTURE SEULE pour les invités : chaque PC exécute en WinPE ce qui est ici
+   # (curl.exe, osiris-deploy.cmd). En écriture, n'importe qui sur le réseau
+   # faisait exécuter ce qu'il voulait aux déploiements suivants.
    read only = yes
    guest ok = yes
+   write list = humans        # administrateurs, avec un mot de passe Samba (smbpasswd -a)
+   force user = osiris
    min protocol = NT1
    ntlm auth = yes
+
+[captures]
+   # Seul dépôt écrit par WinPE (mode capture). OSIRIS range l'image dans
+   # [windows] à la fin (POST /capture/{mac}/done) : rien d'ici n'est exécuté.
+   path = /srv/data/captures
+   browseable = no
+   read only = no
+   guest ok = yes
+   force user = osiris
 ```
+
+Le dépôt se crée avec `sudo install -d -o osiris -g osiris -m 2775 /srv/data/captures`
+(chemin modifiable par `CAPTURE_SHARE_PATH`). Après une capture manuelle depuis WinPE,
+le bouton « Ranger l'image » de l'onglet Capture fait ce rangement.
 
 ### Pilotes réseau pour WinPE
 

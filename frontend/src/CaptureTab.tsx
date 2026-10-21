@@ -9,7 +9,7 @@ import { lireReponse } from './api'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
-interface CaptureJob { mac: string; wim_name: string; status: string; registered_at: string; finished_at?: string }
+interface CaptureJob { mac: string; wim_name: string; status: string; registered_at: string; finished_at?: string; error?: string }
 
 export function CaptureTab({ token, machines, refreshSignal }: { token: string; machines: Machine[]; refreshSignal: number }) {
   const [captureJobs, setCaptureJobs] = useState<CaptureJob[]>([])
@@ -48,7 +48,7 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
         } else if (j.status === 'done') {
           toast.success(`Capture terminée : ${j.wim_name}`)
         } else if (j.status === 'failed') {
-          toast.error(`Capture échouée : ${j.mac} — voir le fallback manuel`)
+          toast.error(`Capture échouée : ${j.mac} — ${j.error ?? 'voir le fallback manuel'}`)
         }
       }
       prevStatuses.current[j.mac] = j.status
@@ -65,6 +65,13 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
         setCaptureStep(4)
         toast.success('Machine enregistrée en mode capture — démarrez-la en PXE !')
       })
+      .catch((e: Error) => toast.error(e.message))
+  }
+
+  const handleRangerCapture = (mac: string) => {
+    fetch(`${API_URL}/capture/${mac}/ranger`, { method: 'POST', headers: authHeader(token) })
+      .then(r => lireReponse(r, 'Rangement refusé'))
+      .then(() => { fetchCaptures(); toast.success('Image rangée : elle apparaît dans le sélecteur') })
       .catch((e: Error) => toast.error(e.message))
   }
 
@@ -196,7 +203,7 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
             <li>
               Lancer la capture DISM (adaptez la lettre <span className="font-mono">C:</span> et le nom du WIM) :
               <pre className="mt-1 text-[10px] bg-slate-950 border border-slate-800 rounded px-3 py-2 text-emerald-400 font-mono overflow-x-auto">{'dism /Capture-Image /ImageFile:Z:\\golden.wim /CaptureDir:C:\\ /Name:"Golden" /ScratchDir:X:\\ /CheckIntegrity'}</pre>
-              <span className="text-slate-500">Z: est le partage OSIRIS déjà monté par le script (les WIM y atterrissent). Le fichier apparaîtra ensuite dans le sélecteur d'image de déploiement.</span>
+              <span className="text-slate-500">Z: est le dépôt des captures, déjà monté par le script (<span className="font-mono">\\osiris\captures</span> : le partage des déploiements est en lecture seule). Gardez le nom du WIM enregistré dans le job, puis cliquez sur <span className="text-slate-300">Ranger l'image</span> dans la liste ci-dessous : il apparaîtra dans le sélecteur d'image de déploiement.</span>
             </li>
           </ol>
           <p className="text-[10px] text-amber-600 font-mono">
@@ -228,11 +235,16 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
                      job.status === 'capturing' ? 'Capture en cours…' :
                      job.status === 'done' ? 'Terminé' : 'Échec'}
                   </span>
+                  {job.error && <p className="mt-1 text-[10px] text-red-400 font-mono">{job.error}</p>}
                 </td>
                 <td className="px-4 py-2 font-mono text-xs text-slate-600">
                   {new Date(job.registered_at).toLocaleString('fr-FR')}
                 </td>
                 <td className="px-4 py-2">
+                  {job.status === 'failed' && (
+                    <button onClick={() => handleRangerCapture(job.mac)} className="osiris-btn text-[10px] px-2 py-1 mr-1.5"
+                      title="Après une capture manuelle : déplace l'image du dépôt des captures vers le partage des déploiements">Ranger l'image</button>
+                  )}
                   <button onClick={() => handleDeleteCapture(job.mac)} className="osiris-action-btn osiris-action-btn--danger" title="Supprimer"><IcoX /></button>
                 </td>
               </tr>
