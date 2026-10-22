@@ -292,35 +292,50 @@ _log "Supervision Zabbix : agent actif vers {{ zabbix.server }}"
 # cette commande nue faisait declencher le piege ERR et marquait en echec un
 # deploiement par ailleurs parfaitement reussi — constate le 17/09.
 _apt_update || _log "AVERTISSEMENT : depots injoignables - on poursuit avec le cache local"
-# D'abord les depots de la distribution (Debian fournit encore l'agent), puis le
-# paquet servi par OSIRIS. Aucun depot tiers n'est ajoute a la machine.
+# D'abord le paquet servi par OSIRIS, un par distribution, puis les depots de la
+# distribution en dernier recours. L'ordre inverse a servi pendant deux mois :
+# Debian 12 fournit bien un agent... en 6.0, installe sans un mot alors que le
+# serveur etait passe en 8.0 (constate le 22/10, agent muet). Le paquet d'OSIRIS
+# est celui que l'operateur a choisi pour SON serveur ; celui des depots, non.
+# Aucun depot tiers n'est ajoute a la machine : elle n'a pas a joindre
+# repo.zabbix.com depuis le reseau du client, souvent filtre. Seules les
+# dependances viennent des depots de la distribution.
+# Sous-shell : /etc/os-release definit NAME, ID, VERSION... qu'on ne veut pas
+# voir ecraser des variables du script.
+_zbx_distro=$( . /etc/os-release 2>/dev/null && echo "${ID:-}${VERSION_ID:-}" ) || _zbx_distro=""
+_zbx_fichier="zabbix-agent2-${_zbx_distro}.deb"
+_zbx_deb=/tmp/osiris-zabbix-agent.deb
 _zbx_pkg=""
-for _p in zabbix-agent2 zabbix-agent; do
-    if apt-get install -y "$_p" > /dev/null 2>&1; then _zbx_pkg="$_p"; break; fi
-done
+_log "Agent Zabbix : recuperation de $_zbx_fichier depuis OSIRIS..."
+# Trois issues bien distinctes, qu'un seul message confondait : paquet absent
+# d'OSIRIS, telecharge mais pas installable (ses dependances viennent des depots,
+# sans listes a jour elles manquent), ou installe.
+if [ -z "$_zbx_distro" ]; then
+    _log "AVERTISSEMENT : distribution non identifiee (/etc/os-release illisible)"
+elif ! curl -sf -o "$_zbx_deb" --max-time 120 "$osiris_url/static/installers/$_zbx_fichier"; then
+    _log "AVERTISSEMENT : $_zbx_fichier absent d'OSIRIS"
+    _log "  -> le deposer dans backend/static/installers/ (voir README, « Agent Zabbix »)"
+# apt-get install d'un fichier met aussi a jour un agent deja grave dans le gabarit.
+elif _zbx_sortie=$(apt-get install -y "$_zbx_deb" 2>&1); then
+    _zbx_pkg="zabbix-agent2"
+    _log "Agent Zabbix installe depuis OSIRIS ($_zbx_fichier)."
+else
+    _log "AVERTISSEMENT : $_zbx_fichier recupere sur OSIRIS mais non installable"
+    _osiris_log "apt zabbix : $(printf '%s' "$_zbx_sortie" | tail -3 | tr '\n' ' ')"
+fi
+rm -f "$_zbx_deb"
 if [ -z "$_zbx_pkg" ]; then
-    # Ubuntu 24.04 « noble » ne fournit PLUS d'agent Zabbix : le paquet a ete
-    # retire des depots (verifie le 2026-08-05, seul `pcp-export-zabbix-agent`
-    # subsiste). On sert donc le .deb depuis OSIRIS, exactement comme le MSI
-    # WithSecure et le zip DellBIOSProvider cote Windows : aucune VM n'a besoin
-    # de joindre repo.zabbix.com depuis le reseau du client, souvent filtre.
-    # Les dependances, elles, viennent des depots de la distribution.
-    _zbx_deb=/tmp/osiris-zabbix-agent.deb
-    _log "Agent absent des depots de la distribution - recuperation depuis OSIRIS..."
-    # Deux echecs bien distincts, qu'un seul message confondait : le paquet
-    # introuvable sur OSIRIS, ou telecharge mais pas installable — ses
-    # dependances viennent des depots, et sans listes a jour elles manquent.
-    if ! curl -sf -o "$_zbx_deb" --max-time 120 "$osiris_url/static/installers/zabbix-agent2.deb"; then
-        _log "AVERTISSEMENT : agent Zabbix introuvable, ni dans les depots ni sur OSIRIS"
-        _log "  -> deposer le paquet dans backend/static/installers/zabbix-agent2.deb (voir README)"
-    elif _zbx_sortie=$(apt-get install -y "$_zbx_deb" 2>&1); then
-        _zbx_pkg="zabbix-agent2"
-        _log "Agent Zabbix installe depuis OSIRIS."
+    # Dernier recours. Ubuntu 24.04 n'en fournit plus (verifie le 2026-08-05) ;
+    # Debian, si, mais souvent plus ancien que le serveur : le smoke test de
+    # version le dira.
+    for _p in zabbix-agent2 zabbix-agent; do
+        if apt-get install -y "$_p" > /dev/null 2>&1; then _zbx_pkg="$_p"; break; fi
+    done
+    if [ -n "$_zbx_pkg" ]; then
+        _log "AVERTISSEMENT : agent pris dans les depots de la distribution ($_zbx_pkg) - version peut-etre trop ancienne"
     else
-        _log "AVERTISSEMENT : paquet Zabbix recupere sur OSIRIS mais non installable"
-        _osiris_log "apt zabbix : $(printf '%s' "$_zbx_sortie" | tail -3 | tr '\n' ' ')"
+        _log "AVERTISSEMENT : agent Zabbix introuvable, ni sur OSIRIS ni dans les depots"
     fi
-    rm -f "$_zbx_deb"
 fi
 if [ -n "$_zbx_pkg" ]; then
     if [ "$_zbx_pkg" = "zabbix-agent2" ]; then
@@ -1133,6 +1148,30 @@ if systemctl is-active --quiet zabbix-agent2 2>/dev/null || systemctl is-active 
 else
     _add_test "Agent Zabbix" false "Service inactif ou absent"
 fi
+
+# Version de l'agent face a celle du serveur. « Actif » et « 10051 joignable »
+# restaient verts sur un agent 6.0 qu'un serveur 8.0 n'entendait plus.
+_zbx_ver=""
+for _p in zabbix-agent2 zabbix-agent; do
+    _v=$(dpkg-query -W -f='${Status}|${Version}' "$_p" 2>/dev/null) || continue
+    case "$_v" in "install ok installed|"*) _zbx_ver="${_v#*|}"; break ;; esac
+done
+_zbx_ver="${_zbx_ver#*:}"; _zbx_ver="${_zbx_ver%%-*}"; _zbx_ver="${_zbx_ver%%+*}"   # 1:6.0.14+dfsg-1 -> 6.0.14
+_zbx_maj="${_zbx_ver%%.*}"
+{% if zabbix.serveur_major %}
+case "$_zbx_maj" in
+    ''|*[!0-9]*) _add_test "Version agent Zabbix" false "version illisible (agent absent ?)" ;;
+    *) if [ "$_zbx_maj" -lt {{ zabbix.serveur_major | int }} ]; then
+           _add_test "Version agent Zabbix" false "agent $_zbx_ver plus ancien que le serveur {{ zabbix.serveur_major | int }}.x"
+       else
+           _add_test "Version agent Zabbix" true "agent $_zbx_ver (serveur {{ zabbix.serveur_major | int }}.x)"
+       fi ;;
+esac
+{% else %}
+# Version du serveur inconnue d'OSIRIS (API Zabbix non configuree ou muette) :
+# on affiche sans juger.
+_add_test "Version agent Zabbix" true "agent ${_zbx_ver:-inconnu} (version du serveur inconnue)"
+{% endif %}
 
 # Joignabilite du collecteur : teste la regle de pare-feu, pas seulement l'agent.
 # C'est le seul moyen de distinguer « agent mal configure » de « flux bloque ».

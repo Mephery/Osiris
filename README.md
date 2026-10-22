@@ -1086,8 +1086,9 @@ les VM : aucune règle à écrire, aucun filtre à traverser.
 
 L'organisation reste le défaut, et le seul réglage possible pour une machine physique.
 
-Le premier démarrage installe `zabbix-agent2` (ou `zabbix-agent` à défaut) depuis les
-dépôts de la distribution, puis écrit un fichier à part —
+Le premier démarrage installe `zabbix-agent2` depuis le paquet servi par OSIRIS (voir
+« Agent Zabbix » plus bas ; les dépôts de la distribution en dernier recours), puis
+écrit un fichier à part —
 `/etc/zabbix/zabbix_agent2.d/osiris.conf` — qu'une mise à jour du paquet n'écrase pas :
 
 ```
@@ -1104,9 +1105,11 @@ autoriser, pour tout le sous-réseau.
 `HostMetadata` est là pour l'**auto-enregistrement** côté Zabbix : une action qui filtre
 sur `osiris linux` crée l'hôte et lui applique le bon modèle sans intervention.
 
-Deux smoke tests remontent dans la fiche machine : l'agent tourne, et le collecteur est
-joignable en 10051. Le second teste la **règle de pare-feu**, ce qui distingue un agent
-mal configuré d'un flux bloqué.
+Trois smoke tests remontent dans la fiche machine : l'agent tourne, sa **version** n'est
+pas plus ancienne que celle du serveur, et le collecteur est joignable en 10051. Le
+dernier teste la **règle de pare-feu**, ce qui distingue un agent mal configuré d'un flux
+bloqué. La version du serveur est lue par l'API (`apiinfo.version`, mise en cache une
+heure) ; sans `ZABBIX_API_URL`, la version de l'agent est affichée sans être jugée.
 
 ---
 
@@ -1213,27 +1216,29 @@ et l'importe — sans accès Internet depuis le poste du client.
 
 Nécessaire seulement si une organisation a un collecteur Zabbix renseigné.
 
-**Ubuntu 24.04 « noble » ne fournit plus d'agent Zabbix** — le paquet a été retiré des
-dépôts (vérifié le 2026-08-05 ; seul `pcp-export-zabbix-agent`, qui est autre chose,
-subsiste). Le firstboot essaie donc d'abord les dépôts de la distribution — Debian les
-fournit encore — puis retombe sur le paquet **servi par OSIRIS**, comme le MSI WithSecure
-et le module DellBIOSProvider côté Windows.
+Le firstboot installe **d'abord le paquet servi par OSIRIS**, un fichier par
+distribution, et ne se rabat sur les dépôts de la distribution qu'en dernier recours. Ces
+dépôts sont la cause du problème : Ubuntu 24.04 n'en fournit plus (vérifié le 2026-08-05),
+et Debian 12 fournit un agent 6.0 — installé sans un mot face à un serveur 8.0, et muet
+(constaté le 22/10). Le smoke test de version signale désormais ce cas.
 
 Aucun dépôt tiers n'est ajouté aux machines : elles n'ont pas à joindre `repo.zabbix.com`
 depuis le réseau du client, souvent filtré. Seules les dépendances viennent des dépôts de
 la distribution.
 
-Récupérer le paquet correspondant à la distribution déployée sur
-[zabbix.com/download](https://www.zabbix.com/download) (section *Agent*, paquet
-`zabbix-agent2` pour Ubuntu 24.04), puis :
+Le nom du fichier est `zabbix-agent2-<ID><VERSION_ID>.deb`, d'après `/etc/os-release` de la
+machine. Récupérer, pour chaque distribution déployée, le paquet `zabbix-agent2` de la
+**même version majeure que le serveur** sur [repo.zabbix.com](https://repo.zabbix.com/zabbix/)
+(`<version>/release/<debian|ubuntu>/pool/main/z/zabbix/`), puis :
 
 ```bash
-cp zabbix-agent2_*_amd64.deb backend/static/installers/zabbix-agent2.deb
+cp zabbix-agent2_*+debian12_amd64.deb     backend/static/installers/zabbix-agent2-debian12.deb
+cp zabbix-agent2_*+ubuntu24.04_amd64.deb  backend/static/installers/zabbix-agent2-ubuntu24.04.deb
 ```
 
-Le nom de fichier est **fixe** : le firstboot ne connaît pas le numéro de version. Pour
-mettre à jour l'agent, il suffit de remplacer ce fichier — aucun template de VM n'est à
-refabriquer.
+**À chaque montée de version du serveur Zabbix**, remplacer ces fichiers : aucun gabarit
+n'est à refabriquer (`apt-get install` d'un fichier met aussi à jour un agent déjà gravé
+dans le gabarit). Les machines déjà déployées, elles, se mettent à jour à la main.
 
 ### Images Ubuntu
 

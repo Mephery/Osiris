@@ -122,6 +122,9 @@ async def lifespan(app: FastAPI):
     _seed_admin()
     _seed_default_profiles()
     _seed_apps()
+    # Amorce le cache : sans lui, le premier déploiement après un redémarrage
+    # ne saurait pas juger la version de son agent Zabbix.
+    zabbix.version_majeure_serveur()
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
     arq_pool = await create_pool(RedisSettings.from_dsn(redis_url))
     verif = asyncio.create_task(_verifier_routes_machines())
@@ -2322,6 +2325,10 @@ def _zabbix_context(machine: Machine, org: Optional[Organization],
         # Lu par l'action d'auto-enregistrement côté Zabbix pour ranger l'hôte
         # dans le bon groupe / modèle sans avoir à le créer à la main.
         "metadata": f"osiris linux {org.slug if org else ''}".strip(),
+        # Un agent plus ancien que le serveur se tait sans rien dire : les tests
+        # « service actif » et « 10051 joignable » restent verts (constaté le
+        # 22/10 après le passage 6 → 8). Le firstboot compare donc les deux.
+        "serveur_major": zabbix.version_majeure_serveur(),
     }
 
 

@@ -566,15 +566,22 @@ def test_les_tailles_sont_bien_en_octets():
 
 
 # ── Agent Zabbix servi par OSIRIS ──────────────────────────────────────────
-# Ubuntu 24.04 « noble » ne fournit plus d'agent Zabbix (vérifié le 2026-08-05).
-# Le firstboot retombe donc sur le .deb servi par OSIRIS, comme le MSI WithSecure
-# côté Windows : aucune VM n'a à joindre repo.zabbix.com depuis le réseau client.
+# Un .deb par distribution, servi par OSIRIS EN PREMIER ; les dépôts de la
+# distribution en dernier recours. L'ordre inverse a installé en silence l'agent
+# 6.0 de Debian 12 face à un serveur 8.0 (constaté le 22/10, agent muet).
 
-def test_l_agent_est_recupere_depuis_osiris_si_absent_des_depots():
+def test_le_paquet_d_osiris_passe_avant_les_depots_de_la_distribution():
     script = _firstboot_ubuntu_rendu()
-    assert "/static/installers/zabbix-agent2.deb" in script
-    # Les dépôts de la distribution restent essayés d'abord (Debian les fournit).
-    assert script.index("apt-get install -y \"$_p\"") < script.index("zabbix-agent2.deb")
+    assert '/static/installers/$_zbx_fichier' in script
+    assert script.index("$_zbx_fichier") < script.index('apt-get install -y "$_p"')
+
+
+def test_un_paquet_par_distribution():
+    """Un .deb Ubuntu ne s'installe pas proprement sur Debian (et inversement)."""
+    script = _firstboot_ubuntu_rendu()
+    assert '_zbx_fichier="zabbix-agent2-${_zbx_distro}.deb"' in script
+    # Lu dans un sous-shell : os-release écraserait NAME, ID, VERSION du script.
+    assert '_zbx_distro=$( . /etc/os-release' in script
 
 
 def test_aucun_depot_tiers_n_est_ajoute_a_la_machine():
@@ -593,12 +600,97 @@ def test_aucun_depot_tiers_n_est_ajoute_a_la_machine():
 def test_l_echec_dit_quoi_faire():
     """« aucun paquet disponible » n'indiquait aucune action à l'opérateur."""
     script = _firstboot_ubuntu_rendu()
-    assert "backend/static/installers/zabbix-agent2.deb" in script
+    assert "le deposer dans backend/static/installers/" in script
+
+
+def test_le_repli_sur_les_depots_est_signale():
+    """L'agent des dépôts est justement celui qui était trop ancien : le dire."""
+    script = _firstboot_ubuntu_rendu()
+    assert "agent pris dans les depots de la distribution" in script
 
 
 def test_la_configuration_suit_l_installation_par_deb():
     """Le .deb installe zabbix-agent2 : la conf doit viser le bon service."""
     script = _firstboot_ubuntu_rendu()
-    apres = script.split("zabbix-agent2.deb", 1)[1]
+    apres = script.split("$_zbx_fichier", 1)[1]
     assert '_zbx_pkg="zabbix-agent2"' in apres
     assert 'if [ -n "$_zbx_pkg" ]; then' in apres
+
+
+def _rendu_avec_serveur(major):
+    from jinja2 import Environment, FileSystemLoader
+    import main
+    env = Environment(loader=FileSystemLoader("templates"), trim_blocks=True,
+                      lstrip_blocks=True, autoescape=False)
+    env.filters["bash_squote"] = main.jinja_env.filters["bash_squote"]
+    return env.get_template("firstboot-ubuntu.sh.j2").render(
+        machine=type("M", (), {"hostname": "SRV-TEST", "mac": "aabbccddeeff", "ou": ""})(),
+        profile={"locale": "fr_FR.UTF-8", "keyboard": "fr", "timezone": "Europe/Paris",
+                 "default_user": "osiris", "join_domain": False, "domain": "",
+                 "domain_join_user": "", "domain_join_password": "", "post_script": "",
+                 "ssh_authorized_keys": "", "extra_packages": ""},
+        osiris_url="http://osiris", osiris_ip="10.0.0.1", tv_password="",
+        linux_apps=[], zabbix={"server": "10.0.0.2", "hostname": "SRV-TEST",
+                               "metadata": "osiris linux hc", "serveur_major": major},
+        disques=[], root_password="",
+    )
+
+
+def _test_de_version(script, version_dpkg):
+    """Exécute le smoke test de version tel que rendu, dpkg-query simulé."""
+    import subprocess
+    bloc = script.split("# Version de l'agent face", 1)[1].split("# Joignabilite du collecteur", 1)[0]
+    prelude = (
+        '_add_test() { echo "$2|$3"; }\n'
+        f'dpkg-query() {{ [ "${{@: -1}}" = zabbix-agent2 ] && printf "install ok installed|{version_dpkg}"; }}\n'
+    )
+    res = subprocess.run(["bash", "-c", prelude + bloc], capture_output=True, text=True)
+    return res.stdout.strip()
+
+
+def test_un_agent_plus_ancien_que_le_serveur_est_en_echec():
+    assert _test_de_version(_rendu_avec_serveur(8), "1:6.0.14+dfsg-1+b1") == \
+        "false|agent 6.0.14 plus ancien que le serveur 8.x"
+
+
+def test_un_agent_a_jour_est_vert():
+    assert _test_de_version(_rendu_avec_serveur(8), "1:8.0.0~rc2-1+debian12") == \
+        "true|agent 8.0.0~rc2 (serveur 8.x)"
+
+
+def test_version_du_serveur_inconnue_on_affiche_sans_juger():
+    assert _test_de_version(_rendu_avec_serveur(None), "1:7.0.9-1+ubuntu24.04") == \
+        "true|agent 7.0.9 (version du serveur inconnue)"
+
+
+def test_version_du_serveur_ne_bloque_jamais(monkeypatch):
+    """Rendu depuis `create_vm` (async) : aucun appel réseau sur le chemin."""
+    import threading
+    import zabbix
+    lu = threading.Event()
+    monkeypatch.setattr(zabbix, "ZABBIX_API_URL", "http://zabbix.invalid/api_jsonrpc.php")
+    monkeypatch.setattr(zabbix, "_version_serveur", None)
+    monkeypatch.setattr(zabbix, "_version_demandee_a", 0.0)
+
+    def appel_lent(method, params, auth=True):
+        lu.wait(5)
+        return "8.0.0"
+    monkeypatch.setattr(zabbix, "_call", appel_lent)
+    assert zabbix.version_majeure_serveur() is None   # cache vide : on n'attend pas
+    lu.set()
+    for _ in range(50):
+        if zabbix._version_serveur is not None:
+            break
+        threading.Event().wait(0.05)
+    assert zabbix.version_majeure_serveur() == 8
+
+
+def test_version_du_serveur_garde_la_derniere_valeur_si_zabbix_tombe(monkeypatch):
+    import zabbix
+    monkeypatch.setattr(zabbix, "_version_serveur", 8)
+
+    def panne(method, params, auth=True):
+        raise OSError("injoignable")
+    monkeypatch.setattr(zabbix, "_call", panne)
+    zabbix._lire_version_serveur()
+    assert zabbix._version_serveur == 8

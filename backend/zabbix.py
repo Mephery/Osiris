@@ -18,6 +18,8 @@ fond, après la réponse HTTP à la machine.
 import json
 import logging
 import os
+import threading
+import time
 import urllib.request
 from typing import Optional
 
@@ -86,6 +88,49 @@ def _api_major() -> int:
         return int(str(_call("apiinfo.version", [], auth=False)).split(".")[0])
     except Exception:
         return 6   # défaut prudent : nomenclature 6.x
+
+
+# Version majeure du serveur, pour juger l'agent installé au premier démarrage.
+# Lue en arrière-plan et gardée en cache : le script de firstboot est rendu
+# aussi depuis `create_vm`, une route async — un appel réseau bloquant là
+# figerait toute l'API le temps du délai (15 s si Zabbix ne répond pas).
+_VERSION_TTL = 3600
+_version_serveur: Optional[int] = None
+_version_demandee_a = 0.0
+_version_verrou = threading.Lock()
+
+
+def _lire_version_serveur() -> None:
+    global _version_serveur
+    try:
+        v = int(str(_call("apiinfo.version", [], auth=False)).split(".")[0])
+    except Exception as e:
+        # On garde la dernière valeur connue : une panne passagère de Zabbix ne
+        # doit pas faire disparaître le contrôle de version des déploiements.
+        _log.warning("Zabbix : version du serveur illisible (%s)", e)
+        return
+    _version_serveur = v
+
+
+def version_majeure_serveur() -> Optional[int]:
+    """Version majeure du serveur Zabbix (ex. 8), ou None si inconnue.
+
+    Ne bloque JAMAIS : renvoie la valeur en cache et relance une lecture en tâche
+    de fond quand elle a plus d'une heure. Le tout premier appel renvoie donc
+    None — le firstboot affiche alors la version de l'agent sans la juger.
+    """
+    global _version_demandee_a
+    if not ZABBIX_API_URL:
+        return None
+    with _version_verrou:
+        perimee = (_version_demandee_a == 0.0
+                   or time.monotonic() - _version_demandee_a > _VERSION_TTL)
+        if perimee:
+            _version_demandee_a = time.monotonic()
+    if perimee:
+        threading.Thread(target=_lire_version_serveur, daemon=True,
+                         name="zabbix-version").start()
+    return _version_serveur
 
 
 def _proxy_fields(collector: str) -> dict:
