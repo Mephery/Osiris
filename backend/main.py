@@ -4588,6 +4588,23 @@ def delete_capture(mac: str):
 
 # ── Drivers constructeurs ──────────────────────────────────────────────────────
 
+def _sans_doublons_win10(packs: list[DriverPack]) -> list[DriverPack]:
+    """Retire les packs Windows 10 encore au catalogue quand le même modèle a un
+    pack Windows 11 : on ne déploie que du Windows 11, le doublon ne fait que
+    rallonger la liste et tendre un piège.
+
+    On garde en revanche :
+    - le Win10 d'un modèle SANS pack Win11 : c'est le repli des vieux modèles,
+      leurs pilotes Win10 passent souvent sous Win11 ;
+    - un Win10 téléchargé, en cours ou en erreur : il est sur le disque ou
+      demande une action, le cacher le rendrait invisible.
+    """
+    avec_w11 = {(p.vendor, p.model_key) for p in packs if p.os_code == "Windows11"}
+    return [p for p in packs
+            if not (p.os_code == "Windows10" and p.status == "available"
+                    and (p.vendor, p.model_key) in avec_w11)]
+
+
 @app.get("/drivers", dependencies=[Depends(get_current_user)])
 def list_driver_packs(vendor: Optional[str] = None, os_code: Optional[str] = None):
     """Liste les packs de drivers connus (après sync catalogue)."""
@@ -4598,6 +4615,8 @@ def list_driver_packs(vendor: Optional[str] = None, os_code: Optional[str] = Non
         if os_code:
             query = query.where(DriverPack.os_code == os_code)
         packs = session.exec(query.order_by(DriverPack.vendor, DriverPack.model)).all()
+        if os_code != "Windows10":
+            packs = _sans_doublons_win10(packs)
         return [
             {
                 "id": p.id, "vendor": p.vendor, "model": p.model,
