@@ -104,3 +104,19 @@ def test_count_inf_vaut_zero_sur_une_extraction_ratee(tmp_path):
     _touch(str(tmp_path / "[0]"))
     _touch(str(tmp_path / "CERTIFICATE"))
     assert _count_inf(str(tmp_path)) == 0
+
+
+# ── Dossier de destination ─────────────────────────────────────────────────
+
+def test_win10_et_win11_d_un_meme_modele_ont_des_dossiers_distincts():
+    """Un dossier partagé faisait s'effacer les packs Win10/Win11 l'un l'autre,
+    et deux téléchargements simultanés se marchaient dessus dans le même .new."""
+    from worker import _driver_pack_dir
+    w10 = _driver_pack_dir("hp", "elitebook8x5g8", "Windows10")
+    w11 = _driver_pack_dir("hp", "elitebook8x5g8", "Windows11")
+    assert w10 != w11
+    assert not w10.startswith(w11) and not w11.startswith(w10)
+    # Voisins, jamais emboîtés : l'ancien dossier <model_key> est injecté
+    # récursivement et ne doit pas englober les nouveaux.
+    assert os.path.dirname(w10) == os.path.dirname(w11)
+    assert w11.endswith(os.path.join("hp", "elitebook8x5g8-windows11"))

@@ -4634,7 +4634,7 @@ async def download_pack(pack_id: int, current_user: User = Depends(require_admin
     """
     Lance le téléchargement d'un pack de drivers spécifique en tâche de fond.
     Durée : 5-30 min selon la taille (300 MB à 3 GB) et la bande passante.
-    Le pack est extrait dans /srv/data/windows/drivers/<vendor>/<model_key>/
+    Le pack est extrait dans /srv/data/windows/drivers/<vendor>/<model_key>-<os_code>/
     et sera automatiquement injecté par WinPE lors du prochain déploiement.
     """
     with Session(engine) as session:

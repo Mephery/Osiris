@@ -459,10 +459,13 @@ async def download_iso(ctx, image_id: int):
             os.unlink(iso_path)
         _update(status="ready", progress=100)
 
-    except Exception as exc:
-        _update(status="failed", error=str(exc))
+    except (Exception, asyncio.CancelledError) as exc:
         if not local_file and os.path.exists(iso_path):
             os.unlink(iso_path)
+        if isinstance(exc, asyncio.CancelledError):
+            _update(status="failed", error="téléchargement interrompu (délai dépassé ou worker arrêté)")
+            raise
+        _update(status="failed", error=str(exc))
 
 
 # ── Catalogue de drivers Dell ───────────────────────────────────────────────
@@ -674,10 +677,27 @@ async def sync_dell_catalog(ctx):
     return {"synced": len(packs)}
 
 
+def _driver_pack_dir(vendor: str, model_key: str, os_code: str) -> str:
+    """Dossier d'un pack : un par modèle ET par OS.
+
+    Les packs Win10 et Win11 d'un même modèle partageaient <vendor>/<model_key> :
+    chaque téléchargement effaçait le pack de l'autre OS, et deux téléchargements
+    simultanés extrayaient dans le même dossier .new (le second échouait, errno 2,
+    en laissant un pack tronqué mêlé à l'autre).
+
+    Dossier VOISIN et non sous-dossier : les packs déjà en place gardent
+    <vendor>/<model_key>, qui est injecté récursivement — un sous-dossier par OS
+    s'y retrouverait englobé. model_key est alphanumérique, le tiret ne peut
+    donc pas créer de collision avec un autre modèle.
+    """
+    return os.path.join(DRIVERS_BASE_PATH, vendor,
+                        f"{model_key}-{(os_code or 'inconnu').lower()}")
+
+
 async def download_driver_pack(ctx, pack_id: int):
     """
     Télécharge et extrait le pack de drivers d'un modèle précis
-    dans le dossier Samba /srv/data/windows/drivers/<vendor>/<model_key>/.
+    dans le dossier Samba /srv/data/windows/drivers/<vendor>/<model_key>-<os_code>/.
 
     Le format varie selon le constructeur : CAB auto-extractible chez Dell et HP,
     installeur Inno Setup chez Lenovo. _extract_driver_archive choisit l'outil.
@@ -696,8 +716,9 @@ async def download_driver_pack(ctx, pack_id: int):
         download_url  = pack.download_url
         vendor        = pack.vendor
         model_key     = pack.model_key
+        os_code       = pack.os_code
 
-    dest_dir     = os.path.join(DRIVERS_BASE_PATH, vendor, model_key)
+    dest_dir     = _driver_pack_dir(vendor, model_key, os_code)
     staging_dest = f"{dest_dir}.new"   # voisin de dest_dir => rename atomique
     archive_path = f"/tmp/osiris_drivers_{pack_id_}.bin"   # CAB (Dell/HP) ou EXE (Lenovo)
 
@@ -745,11 +766,16 @@ async def download_driver_pack(ctx, pack_id: int):
         _set_status("ready", local_path=dest_dir)
         return {"status": "ready", "path": dest_dir, "inf_count": inf_count}
 
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         if os.path.exists(archive_path):
             os.unlink(archive_path)
         shutil.rmtree(f"{archive_path}.d", ignore_errors=True)
         shutil.rmtree(staging_dest, ignore_errors=True)
+        # Annulation (délai arq dépassé, arrêt du worker) : sans ce statut le pack
+        # resterait "downloading" à vie et l'API refuserait toute relance (409).
+        if isinstance(exc, asyncio.CancelledError):
+            _set_status("error", error="téléchargement interrompu (délai dépassé ou worker arrêté)")
+            raise
         _set_status("error", error=str(exc))
         return {"error": str(exc)[:300]}
 
@@ -937,3 +963,6 @@ class WorkerSettings:
     functions      = [download_iso, sync_dell_catalog, download_driver_pack,
                       sync_hp_catalog, sync_lenovo_catalog]
     redis_settings = RedisSettings.from_dsn(os.environ.get("REDIS_URL", "redis://localhost:6379"))
+    # Défaut arq = 300 s : un pack HP d'1 Go ou une ISO de 6 Go n'y tient pas,
+    # le job était tué en plein téléchargement.
+    job_timeout    = 3 * 3600
