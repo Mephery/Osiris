@@ -72,9 +72,9 @@ images_json() {
 # Passe par l'adresse d'OSIRIS que le cache porte lui-meme : son Caddy relaie
 # vers le vrai OSIRIS, comme pour les PC. Aucun chemin reseau de plus a ouvrir.
 rendre_compte() {
-    local ok=$1 erreur=$2 duree=$3 octets=$4 corps
-    corps=$(printf '{"ok":%s,"erreur":"%s","duree_s":%s,"octets_recus":%s,"images":%s}' \
-        "$ok" "$(json_echappe "$erreur")" "$duree" "$octets" "$(images_json)")
+    local ok=$1 erreur=$2 duree=$3 octets=$4 inachevee=${5:-false} corps
+    corps=$(printf '{"ok":%s,"erreur":"%s","inachevee":%s,"duree_s":%s,"octets_recus":%s,"images":%s}' \
+        "$ok" "$(json_echappe "$erreur")" "$inachevee" "$duree" "$octets" "$(images_json)")
     if ! curl -sf --max-time 30 -X POST -H "Content-Type: application/json" \
             -H "X-Osiris-Site-Jeton: $SITE_JETON" --data "$corps" \
             "http://$OSIRIS_IP/sites/rapport" >/dev/null; then
@@ -92,6 +92,7 @@ fi
 debut=$(date +%s)
 octets=0
 erreur=""
+inachevee=false
 for module in "${MODULES[@]}"; do
     mkdir -p "$RACINE/$module"
     restant=$(secondes_restantes)
@@ -110,6 +111,7 @@ for module in "${MODULES[@]}"; do
     octets=$(( octets + ${recus:-0} ))
     if [ $code -eq 124 ]; then
         erreur="fenetre de nuit terminee pendant le module $module (reprise la nuit prochaine)"
+        inachevee=true
         break
     elif [ $code -ne 0 ]; then
         erreur="rsync $module : code $code - $(tail -n 2 <<<"$sortie" | tr '\n' ' ')"
@@ -124,6 +126,8 @@ if [ -z "$erreur" ]; then
     rendre_compte true "" "$duree" "$octets" || exit 1
 else
     echo "ECHEC : $erreur" >&2
-    rendre_compte false "$erreur" "$duree" "$octets"
+    # Octets : rsync coupe en route ne donne pas ses chiffres, ceux des modules
+    # precedents sont donc un minimum, pas le total.
+    rendre_compte false "$erreur" "$duree" "$octets" "$inachevee"
     exit 1
 fi

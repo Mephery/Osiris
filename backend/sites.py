@@ -113,6 +113,17 @@ def etat(site, attendues: list[dict], maintenant: Optional[datetime] = None) -> 
         code, message = "jamais", (
             "Le cache n'a encore jamais rendu compte : il n'est pas installé, "
             "ou sa première copie n'est pas terminée.")
+    elif site.erreur and site.inachevee:
+        # Combien de temps sans copie complète : c'est ce qui sépare « première copie
+        # en cours » de « la fenêtre est trop courte pour ce site ».
+        reference = reussie or _aware(site.cree_le) or maintenant
+        jours = int((maintenant - reference).total_seconds() // 86400)
+        code, message = "inachevee", (
+            "Copie inachevée : la fenêtre de nuit s'est terminée avant la fin. Ce qui a été "
+            "reçu est gardé, et la nuit prochaine reprend là. Normal pour une première copie "
+            "ou une grosse image" + (
+                f" ; mais aucune copie complète depuis {jours} j : la fenêtre ou le débit "
+                "sont trop justes pour ce site." if jours >= 3 else "."))
     elif site.erreur:
         code, message = "echec", (
             f"La dernière copie a échoué : {site.erreur}. "

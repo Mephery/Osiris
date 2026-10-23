@@ -74,6 +74,30 @@ export interface VpnTunnel {
   durees_heures: number[];
 }
 
+/** État d'un cache de site, calculé par OSIRIS (cf. backend/sites.py). */
+export type CodeEtatSite = 'jamais' | 'inachevee' | 'echec' | 'en_retard' | 'images_differentes' | 'a_jour';
+
+export interface EcartImage {
+  nom: string;
+  probleme: string;
+  /** Image modifiée après la dernière copie : la copie de cette nuit l'apportera. */
+  attendue_cette_nuit: boolean;
+}
+
+export interface Site {
+  id: number;
+  nom: string;
+  cree_le: string;
+  rapport_le: string | null;
+  copie_reussie_le: string | null;
+  erreur: string;
+  duree_s: number;
+  octets_recus: number;
+  etat: { code: CodeEtatSite; message: string; ecarts: EcartImage[] };
+  /** Présent UNE fois : dans la réponse de création ou de renouvellement. */
+  jeton?: string;
+}
+
 export interface WimFile {
   name: string;
   size_mb: number;

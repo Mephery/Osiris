@@ -147,6 +147,31 @@ def test_une_copie_ratee_garde_la_liste_de_la_derniere_reussite(client, admin_he
     assert etat["ecarts"] == []
 
 
+def test_copie_coupee_par_la_fenetre_n_est_pas_une_panne(client, admin_headers, partage):
+    """Une première copie dure plusieurs nuits : la montrer « en échec » ferait
+    chercher une panne là où la copie reprend simplement la nuit suivante."""
+    jeton = _creer(client, admin_headers)["jeton"]
+    _rapport(client, jeton, ok=False, inachevee=True, erreur="fenetre de nuit terminee pendant le module windows")
+    etat = _etat(client, admin_headers)
+    assert etat["code"] == "inachevee"
+    assert "reprend" in etat["message"]
+
+
+def test_copie_inachevee_depuis_des_jours_le_dit(partage):
+    site = Site(nom="Paris", cree_le=datetime.now(timezone.utc) - timedelta(days=5),
+                rapport_le=datetime.now(timezone.utc), erreur="fenetre terminee", inachevee=True)
+    etat = sites.etat(site, [])
+    assert etat["code"] == "inachevee"
+    assert "depuis 5 j" in etat["message"]
+
+
+def test_une_vraie_erreur_reste_un_echec_meme_apres_une_copie_inachevee(client, admin_headers, partage):
+    jeton = _creer(client, admin_headers)["jeton"]
+    _rapport(client, jeton, ok=False, inachevee=True, erreur="fenetre terminee")
+    _rapport(client, jeton, ok=False, erreur="rsync windows : code 255")
+    assert _etat(client, admin_headers)["code"] == "echec"
+
+
 def test_la_reussite_suivante_efface_l_erreur(client, admin_headers, partage):
     jeton = _creer(client, admin_headers)["jeton"]
     _rapport(client, jeton, ok=False, erreur="fenetre terminee")

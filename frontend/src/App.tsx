@@ -21,6 +21,7 @@ import { JournalTab } from './JournalTab'
 import { CaptureTab } from './CaptureTab'
 import { DriversTab } from './DriversTab'
 import { InfrastructureTab } from './InfrastructureTab'
+import { SitesSection } from './SitesSection'
 import { SettingsModal } from './SettingsModal'
 import { ProfilesSection } from './ProfilesSection'
 import { OrganisationsSection } from './OrganisationsSection'
@@ -1175,11 +1176,14 @@ export default function App() {
 
         {/* ── Onglet Infrastructure ────────────────────────────────────────── */}
         {activeTab === 'infrastructure' && auth.role === 'admin' && (
-          <InfrastructureTab
-            token={auth.token}
-            hypervisors={hypervisors}
-            onRefreshHypervisors={() => fetchHypervisors(auth.token)}
-          />
+          <div className="space-y-6">
+            <InfrastructureTab
+              token={auth.token}
+              hypervisors={hypervisors}
+              onRefreshHypervisors={() => fetchHypervisors(auth.token)}
+            />
+            <SitesSection token={auth.token} />
+          </div>
         )}
 
         {/* ── Onglet Journal ───────────────────────────────────────────────── */}

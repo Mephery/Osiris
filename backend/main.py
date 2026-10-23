@@ -1315,6 +1315,7 @@ class RapportImage(SQLModel):
 class RapportCopie(SQLModel):
     ok: bool
     erreur: str = ""
+    inachevee: bool = False     # coupée par la fin de la fenêtre de nuit
     duree_s: int = 0
     octets_recus: int = 0
     images: list[RapportImage] = []
@@ -1397,6 +1398,7 @@ def report_site_copy(request: Request, data: RapportCopie,
         site.rapport_le = maintenant
         site.duree_s = max(0, data.duree_s)
         site.octets_recus = max(0, data.octets_recus)
+        site.inachevee = bool(data.inachevee and not data.ok)
         if data.ok:
             site.erreur = ""
             site.copie_reussie_le = maintenant

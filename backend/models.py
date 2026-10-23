@@ -574,6 +574,10 @@ class Site(SQLModel, table=True):
     rapport_le: Optional[datetime] = Field(default=None)
     copie_reussie_le: Optional[datetime] = Field(default=None)
     erreur: str = Field(default="")                # vide si la dernière copie a réussi
+    # La copie a été coupée par la fin de sa fenêtre de nuit : ce qui est reçu est
+    # gardé et la nuit suivante reprend. Normal pour une première copie — ce n'est
+    # pas une panne, et l'interface ne doit pas l'afficher comme telle.
+    inachevee: bool = Field(default=False)
     duree_s: int = Field(default=0)
     octets_recus: int = Field(default=0)
     # JSON : [{"nom": "install.wim", "taille": 123, "mtime": 1700000000}] — les
