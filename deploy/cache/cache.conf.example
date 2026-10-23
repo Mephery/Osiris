@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
+#
+# Côté cache : à installer en /etc/osiris-cache/cache.conf (root, chmod 600 :
+# il porte le jeton du site).
+
+# Adresse ou nom d'OSIRIS (le manager) joignable depuis le cache, pour la copie.
+MANAGER=<adresse du manager>
+
+# L'adresse d'OSIRIS telle que les PC la connaissent (OSIRIS_IP du manager). Le
+# cache la porte sur la prise d'installation : c'est par elle qu'il rend compte.
+OSIRIS_IP=<OSIRIS_IP du manager>
+
+# Jeton du site, affiché UNE fois à sa création dans OSIRIS (onglet Sites).
+SITE_JETON=<jeton>
+
+# Où le cache range ce qu'il sert.
+RACINE=/srv/osiris-cache
+
+# Fenêtre de la copie de nuit. Elle s'arrête à la fin même inachevée et reprend
+# la nuit suivante. Le DÉBUT réel est celui de la minuterie : en changer
+# avec `systemctl edit osiris-cache-sync.timer`, et garder les deux d'accord.
+DEBUT_FENETRE=01:00
+FIN_FENETRE=05:00
+
+# Débit maximal sur le lien inter-sites, en Ko/s (0 = sans limite).
+# 2500 Ko/s ≈ 20 Mbit/s.
+DEBIT_MAX_KO=0

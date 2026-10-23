@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
+# Copyright (c) 2026 Coline Derycke. See LICENSE.
+#
+# Côté OSIRIS (manager) : ce que les caches de site ont le droit de recopier.
+# À installer en /etc/osiris/rsyncd-cache.conf.
+#
+# Pas de démon rsync qui écoute : chaque cache se connecte en SSH au compte
+# `osiris-cache`, dont la clé est bridée par une commande forcée qui lance rsync
+# en mode serveur avec CE fichier (voir README.md). Un cache ne peut donc que
+# LIRE ces trois dossiers — ni écrire, ni ouvrir un shell, ni lire ailleurs.
+
+use chroot = no
+read only = yes
+list = no
+numeric ids = yes
+
+# Doit rester identique à sites.EXCLUSIONS (backend/sites.py) : OSIRIS compare
+# les images du cache aux siennes en ignorant ces mêmes fichiers. Un test y veille.
+exclude = *.bak* *.ko-* *.iso
+
+# Images et paquets sont déjà compressés : les recompresser coûte du CPU pour rien.
+dont compress = *.wim *.esd *.cab *.zip *.exe *.msi *.gz *.efi
+
+[static]
+    path = /opt/osiris/backend/static
+
+[windows]
+    path = /srv/data/windows
+
+[tftp]
+    path = /srv/tftp

@@ -553,3 +553,29 @@ class GabaritOsiris(SQLModel, table=True):
     # découpé au premier démarrage. Déclaré à la main (Infrastructure › Gabarits).
     lvm: bool = Field(default=False)
     scelle_le: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class Site(SQLModel, table=True):
+    """Un site distant et son cache.
+
+    Le cache porte l'adresse d'OSIRIS sur la prise d'installation du site : il sert
+    sur place l'image, WinPE et les pilotes, et relaie le reste. Il les recopie
+    chaque nuit depuis OSIRIS, puis rend compte ici. Sans ce compte rendu, un cache
+    en retard d'une image installerait l'ancienne sans que personne ne le sache.
+    """
+    __tablename__ = "site"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    nom: str = Field(unique=True)                  # « Paris », tel qu'affiché
+    # Empreinte du jeton du cache (cf. jetons.py) : c'est lui qui identifie le site
+    # quand le cache rend compte, jamais un nom qu'on pourrait deviner.
+    jeton_empreinte: str = Field(default="")
+    cree_le: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Dernier compte rendu, réussi ou non, et dernière copie réussie.
+    rapport_le: Optional[datetime] = Field(default=None)
+    copie_reussie_le: Optional[datetime] = Field(default=None)
+    erreur: str = Field(default="")                # vide si la dernière copie a réussi
+    duree_s: int = Field(default=0)
+    octets_recus: int = Field(default=0)
+    # JSON : [{"nom": "install.wim", "taille": 123, "mtime": 1700000000}] — les
+    # images Windows présentes sur le cache, comparées à celles d'OSIRIS.
+    images: str = Field(default="[]")

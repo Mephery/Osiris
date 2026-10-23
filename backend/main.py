@@ -45,7 +45,8 @@ from comptes import COMPTE_GABARIT, CompteVm, valider_cles_ssh, valider_compte
 from disques import (DisqueVm, config_proxmox, disques_de, valider_disques,
                      schema_partition, valider_systeme, ROOT_GB_DEFAUT, SWAP_GB_DEFAUT,
                      VG_NOM)
-from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, User, VpnTunnel, engine, init_db, normalize_model
+from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, Site, User, VpnTunnel, engine, init_db, normalize_model
+import sites
 import vpn
 import vsphere
 import zabbix
@@ -1291,6 +1292,122 @@ def get_vpn_tunnel_status(tunnel_id: int, current_user: User = Depends(require_a
         session.add(tunnel)
         session.commit()
         return {"status": tunnel.status}
+
+
+# ── Sites distants (cache de site) ────────────────────────────────────────────
+# Le cache d'un site recopie chaque nuit images, WinPE et pilotes, puis rend compte
+# ici. Le jeton, propre au site, est montré UNE fois à la création : OSIRIS n'en
+# garde que l'empreinte, comme pour les machines (cf. jetons.py).
+
+ENTETE_JETON_SITE = "X-Osiris-Site-Jeton"
+
+
+class SiteCreate(SQLModel):
+    nom: str
+
+
+class RapportImage(SQLModel):
+    nom: str
+    taille: int
+    mtime: int
+
+
+class RapportCopie(SQLModel):
+    ok: bool
+    erreur: str = ""
+    duree_s: int = 0
+    octets_recus: int = 0
+    images: list[RapportImage] = []
+
+
+def _serialize_site(s: Site) -> dict:
+    return {
+        "id": s.id, "nom": s.nom, "cree_le": s.cree_le, "rapport_le": s.rapport_le,
+        "copie_reussie_le": s.copie_reussie_le, "erreur": s.erreur, "duree_s": s.duree_s,
+        "octets_recus": s.octets_recus,
+        "etat": sites.etat(s, sites.images_presentes(WIN_SHARE_PATH)),
+    }
+
+
+@app.get("/sites", dependencies=[Depends(get_current_user)])
+def list_sites():
+    with Session(engine) as session:
+        return [_serialize_site(s) for s in session.exec(select(Site).order_by(Site.nom)).all()]
+
+
+@app.post("/sites", status_code=201)
+def create_site(data: SiteCreate, current_user: User = Depends(require_admin)):
+    nom = data.nom.strip()
+    if not nom:
+        raise HTTPException(status_code=400, detail="Le nom du site est obligatoire")
+    with Session(engine) as session:
+        if session.exec(select(Site).where(Site.nom == nom)).first():
+            raise HTTPException(status_code=400, detail=f"Le site « {nom} » existe déjà")
+        jeton, empreinte = jetons.nouveau()
+        site = Site(nom=nom, jeton_empreinte=empreinte)
+        session.add(site)
+        _log(session, current_user, "create_site", details={"nom": nom})
+        session.commit()
+        session.refresh(site)
+        # Seule occasion de voir le jeton : il part dans la conf du cache.
+        return {**_serialize_site(site), "jeton": jeton}
+
+
+@app.post("/sites/{site_id}/jeton")
+def renew_site_token(site_id: int, current_user: User = Depends(require_admin)):
+    """Nouveau jeton : l'ancien cesse aussitôt de valoir (cache perdu, conf divulguée)."""
+    with Session(engine) as session:
+        site = session.get(Site, site_id)
+        if not site:
+            raise HTTPException(status_code=404, detail="Site introuvable")
+        jeton, site.jeton_empreinte = jetons.nouveau()
+        session.add(site)
+        _log(session, current_user, "renew_site_token", details={"nom": site.nom})
+        session.commit()
+        return {"jeton": jeton}
+
+
+@app.delete("/sites/{site_id}", status_code=204)
+def delete_site(site_id: int, current_user: User = Depends(require_admin)):
+    with Session(engine) as session:
+        site = session.get(Site, site_id)
+        if not site:
+            raise HTTPException(status_code=404, detail="Site introuvable")
+        _log(session, current_user, "delete_site", details={"nom": site.nom})
+        session.delete(site)
+        session.commit()
+
+
+@app.post("/sites/rapport")
+@limiter.limit("30/minute")
+def report_site_copy(request: Request, data: RapportCopie,
+                     jeton: Optional[str] = Header(None, alias=ENTETE_JETON_SITE)):
+    """Compte rendu d'une copie de nuit, envoyé par le cache lui-même.
+
+    Le jeton seul identifie le site : un nom dans l'URL se devinerait, et un
+    faux compte rendu « tout va bien » masquerait un cache en retard.
+    """
+    if not jeton:
+        raise HTTPException(status_code=401, detail="Jeton de site manquant")
+    with Session(engine) as session:
+        site = session.exec(select(Site).where(Site.jeton_empreinte == jetons.empreinte(jeton))).first()
+        if not site or not site.jeton_empreinte:
+            raise HTTPException(status_code=403, detail="Jeton de site inconnu")
+        maintenant = datetime.now(timezone.utc)
+        site.rapport_le = maintenant
+        site.duree_s = max(0, data.duree_s)
+        site.octets_recus = max(0, data.octets_recus)
+        if data.ok:
+            site.erreur = ""
+            site.copie_reussie_le = maintenant
+            site.images = json.dumps([i.model_dump() for i in data.images[:200]])
+        else:
+            # Une copie ratée ne dit rien de fiable sur ce que le cache possède :
+            # on garde la liste de la dernière réussite.
+            site.erreur = (data.erreur.strip() or "erreur non précisée")[:500]
+        session.add(site)
+        session.commit()
+        return {"etat": sites.etat(site, sites.images_presentes(WIN_SHARE_PATH))["code"]}
 
 
 # ── Utilisateurs ───────────────────────────────────────────────────────────────

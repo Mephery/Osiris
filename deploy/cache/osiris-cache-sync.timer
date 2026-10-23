@@ -1,0 +1,14 @@
+[Unit]
+Description=Copie de nuit du cache de site OSIRIS
+
+[Timer]
+# Début de la fenêtre de nuit (DEBUT_FENETRE dans cache.conf : garder les deux d'accord).
+OnCalendar=*-*-* 01:00:00
+RandomizedDelaySec=600
+# PAS de rattrapage, à l'inverse de la sauvegarde : un cache rallumé à 10 h
+# lancerait sa copie en pleine journée, sur le lien qu'utilisent les gens du
+# site. Une nuit manquée se voit dans l'onglet Sites, la suivante rattrape.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

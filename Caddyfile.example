@@ -17,7 +17,7 @@ https://osiris.example.local {
     # renverrait sinon un 403 ; l'interface et l'API d'administration restent
     # reservees au reseau interne. Sans ce bloc, une machine passee en HTTPS
     # recevait la page de l'interface (200 + HTML) a la place de son script.
-    @machines path /boot* /cloud-init/* /static/* /machines/* /winpe-script/* /winpe-auto /unattend.xml* /firstboot-ubuntu/* /firstboot-debian/* /firstboot-linux/* /firstboot-windows/* /bootstrap/* /preseed/* /capture/*
+    @machines path /boot* /cloud-init/* /static/* /machines/* /winpe-script/* /winpe-auto /unattend.xml* /firstboot-ubuntu/* /firstboot-debian/* /firstboot-linux/* /firstboot-windows/* /bootstrap/* /preseed/* /capture/* /sites/rapport
     handle @machines {
         reverse_proxy localhost:8000
     }
@@ -45,7 +45,7 @@ Si cet acces doit etre autorise, ajouter cette plage au Caddyfile." 403
 
 
     # Définition du matcher nommé (Ici, Caddy adore les listes d'espaces !)
-    @backend path /auth/* /machines* /hypervisors* /dashboard* /organizations* /users* /profiles* /images* /audit-logs* /domain-configs* /vpn-tunnels* /apps* /capture* /drivers* /wims* /webhooks* /health* /docs* /openapi.json /ws/*
+    @backend path /auth/* /machines* /hypervisors* /dashboard* /organizations* /users* /profiles* /images* /audit-logs* /domain-configs* /vpn-tunnels* /sites* /apps* /capture* /drivers* /wims* /webhooks* /health* /docs* /openapi.json /ws/*
     
     handle @backend {
         reverse_proxy localhost:8000
@@ -85,7 +85,7 @@ Si cet acces doit etre autorise, ajouter cette plage au Caddyfile." 403
 
 
     # Définition du matcher nommé (Ici, Caddy adore les listes d'espaces !)
-    @backend path /auth/* /machines* /hypervisors* /dashboard* /organizations* /users* /profiles* /images* /audit-logs* /domain-configs* /vpn-tunnels* /apps* /capture* /drivers* /wims* /webhooks* /health* /docs* /openapi.json /ws/*
+    @backend path /auth/* /machines* /hypervisors* /dashboard* /organizations* /users* /profiles* /images* /audit-logs* /domain-configs* /vpn-tunnels* /sites* /apps* /capture* /drivers* /wims* /webhooks* /health* /docs* /openapi.json /ws/*
     
     handle @backend {
         reverse_proxy localhost:8000
@@ -102,7 +102,7 @@ Si cet acces doit etre autorise, ajouter cette plage au Caddyfile." 403
 # ── HTTP — Routes iPXE & Redirection automatique ────────────────────────────
 http://10.0.0.1 {
     # Définition du matcher nommé pour le déploiement réseau
-    @pxe path /boot* /cloud-init/* /static/* /machines/* /winpe-script/* /winpe-auto /unattend.xml* /firstboot-ubuntu/* /firstboot-debian/* /firstboot-linux/* /firstboot-windows/* /bootstrap/* /preseed/* /capture/*
+    @pxe path /boot* /cloud-init/* /static/* /machines/* /winpe-script/* /winpe-auto /unattend.xml* /firstboot-ubuntu/* /firstboot-debian/* /firstboot-linux/* /firstboot-windows/* /bootstrap/* /preseed/* /capture/* /sites/rapport
     
     handle @pxe {
         reverse_proxy localhost:8000

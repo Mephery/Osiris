@@ -1,0 +1,13 @@
+[Unit]
+Description=Copie de nuit du cache de site OSIRIS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/osiris-cache/osiris-cache-sync.sh
+# La copie peut durer toute la nuit : pas de délai systemd, le script s'arrête
+# seul à la fin de la fenêtre.
+TimeoutStartSec=infinity
+Nice=10
+IOSchedulingClass=idle
