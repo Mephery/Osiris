@@ -23,6 +23,9 @@ TAILLE_DISQUE=${TAILLE_DISQUE:-60G}
 # 1 = QEMU ecrit dans un fichier temporaire detruit a l'arret. Le disque ne
 # grossit jamais : c'est le bon mode pour un simple test d'amorcage.
 DISQUE_JETABLE=${DISQUE_JETABLE:-0}
+# 1 = demarrage reseau (PXE) au lieu de l'ISO WinPE : WinPE arrive alors par
+# HTTP comme sur un vrai PC. Indispensable derriere le cache de site.
+PXE=${PXE:-0}
 
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRAVAIL=${TRAVAIL:-$ICI/vm}
@@ -55,10 +58,13 @@ demarrer() {
     [ -f "$DISQUE" ] || qemu-img create -f qcow2 "$DISQUE" "$TAILLE_DISQUE"
     # Les variables UEFI sont propres a la VM : partir de la copie du systeme.
     [ -f "$NVRAM" ] || cp "$OVMF_VARS" "$NVRAM"
-    [ -f "$ISO" ] || { echo "ISO introuvable : $ISO" >&2; exit 1; }
-
-    local jetable=()
+    local jetable=() amorce="-cdrom $ISO -boot order=d"
     [ "$DISQUE_JETABLE" = "1" ] && jetable=(-snapshot)
+    if [ "$PXE" = "1" ]; then
+        amorce=""
+    else
+        [ -f "$ISO" ] || { echo "ISO introuvable : $ISO" >&2; exit 1; }
+    fi
 
     # SATA (ahci/ide-hd) et e1000 sont imposes par WinPE, qui n'a pas virtio.
     sg kvm -c "qemu-system-x86_64 -machine q35,accel=kvm -cpu host \
@@ -67,7 +73,7 @@ demarrer() {
         -drive if=pflash,format=raw,unit=1,file=$NVRAM \
         -drive file=$DISQUE,format=qcow2,if=none,id=hd0 \
         -device ahci,id=ahci -device ide-hd,drive=hd0,bus=ahci.0,bootindex=2 \
-        -cdrom $ISO -boot order=d \
+        $amorce \
         -netdev tap,id=n0,ifname=$TAP,script=no,downscript=no \
         -device e1000,netdev=n0,mac=$MAC,bootindex=1 \
         -monitor unix:$MONITEUR,server,nowait -display none -vga std &"

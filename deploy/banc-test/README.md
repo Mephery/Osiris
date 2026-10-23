@@ -71,6 +71,38 @@ La carte réseau d'une VM est *inbox* dans WinPE. Le banc démontre donc que les
 pilotes sont bien livrés, injectés et balayés par `drvload` — **mais pas qu'un pilote
 non-inbox se lie effectivement** au matériel. Seule une vraie machine le dira.
 
+## Cache de site
+
+`cache-banc.sh` simule le cache qu'on pose dans un site distant pour que l'image
+Windows ne traverse pas le lien inter-sites. Le principe : sur la prise dédiée, le
+cache porte **la même adresse qu'OSIRIS**. Le PC croit parler à OSIRIS ; le cache
+sert lui-même ce qui pèse (`/static`, partage `windows` en lecture seule) et relaie
+le reste (scripts, journaux, statut) au vrai OSIRIS. Ni `boot.wim` ni les scripts
+n'ont à connaître le cache.
+
+```bash
+deploy/banc-test/cache-banc.sh monter      # espace réseau isolé + dnsmasq, Caddy, Samba
+PONT=br-site TAP=tap-site PXE=1 DISQUE_JETABLE=1 deploy/banc-test/banc-test.sh demarrer
+deploy/banc-test/cache-banc.sh etat        # services, baux, requêtes servies / relayées
+PONT=br-site TAP=tap-site deploy/banc-test/banc-test.sh arreter
+deploy/banc-test/cache-banc.sh demonter
+```
+
+Le cache tourne dans un *network namespace* : sa propre pile réseau, sans VM. Il
+n'a besoin d'aucun fichier dans `/etc/dnsmasq.d/`. Le pont du site n'a **aucune
+adresse côté hôte**, et la liaison montante est en lien-local (`169.254.0.0/16`).
+L'hôte n'apprend donc aucune route nouvelle, alors qu'un réseau de banc en /24
+peut masquer un vrai réseau du même nom.
+
+`PXE=1` est indispensable : avec l'ISO, WinPE serait lu sur le CD et ne passerait
+jamais par le cache.
+
+Ce que le banc a montré : DHCP, TFTP, WinPE, pilotes WinPE et image servis par le
+cache ; reconnaissance par numéro de série, journaux et statut final relayés. Le
+lien montant n'a porté que quelques dizaines de kilo-octets pour tout un
+déploiement. Il ne dit rien de la jonction au domaine à travers le cache, ni du
+firstboot.
+
 ## Fiche machine associée
 
 Le banc suppose une machine enregistrée dans OSIRIS avec la MAC et le numéro de
