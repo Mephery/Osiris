@@ -113,6 +113,17 @@ export function OrganisationsSection({ token, orgs, onChange }: {
                   <input type="password" autoComplete="new-password" value={brouillon.bios_password} onChange={e => setBrouillon({ ...brouillon, bios_password: e.target.value })} className="osiris-input text-xs font-mono w-full" />
                 </label>
               </div>
+              {/* La licence du CLIENT : l'appli WithSecure du catalogue la reçoit au
+                  déploiement. Sans elle, ses machines sont refusées plutôt que
+                  rattachées à la licence d'un autre. */}
+              <div className="grid grid-cols-[2fr_1fr] gap-2">
+                <label className={etiquette}>Clé WithSecure — {o.has_withsecure_voucher ? <>définie (…{o.withsecure_voucher_fin}), saisir pour remplacer</> : 'non définie'}
+                  <input value={brouillon.withsecure_voucher} placeholder="ABCD-EFGH-1234-5678-WXYZ" autoComplete="off" spellCheck={false} onChange={e => setBrouillon({ ...brouillon, withsecure_voucher: e.target.value })} className="osiris-input text-xs font-mono w-full" />
+                </label>
+                <label className={etiquette}>ID de profil WithSecure
+                  <input value={brouillon.withsecure_profile_id} placeholder="ex : 12345678" inputMode="numeric" onChange={e => setBrouillon({ ...brouillon, withsecure_profile_id: e.target.value })} className="osiris-input text-xs font-mono w-full" />
+                </label>
+              </div>
               <div className="flex items-center gap-2 pt-1">
                 <button type="button" onClick={() => supprimer(o)} className="text-[10px] text-red-400 hover:text-red-300 mr-auto">Supprimer l'organisation…</button>
                 <button type="button" onClick={fermer} className="osiris-btn-ghost text-xs px-3 border border-slate-700 rounded">Annuler</button>
@@ -133,6 +144,10 @@ export function OrganisationsSection({ token, orgs, onChange }: {
                   {o.mac_prefix && <><span className="text-slate-700"> · </span><span className="text-slate-400">MAC imposée <span className="font-mono">{o.mac_prefix}</span></span></>}
                   <span className="text-slate-700"> · </span>
                   <span className="text-slate-400">BIOS {o.has_bios_password ? 'protégé' : 'sans mot de passe'}</span>
+                  <span className="text-slate-700"> · </span>
+                  {o.has_withsecure_voucher && o.withsecure_profile_id
+                    ? <span className="text-slate-400">WithSecure <span className="font-mono">…{o.withsecure_voucher_fin}</span></span>
+                    : <span className="text-amber-400" title="Ses machines Windows ne peuvent pas recevoir WithSecure">Pas de licence WithSecure</span>}
                 </p>
               </div>
               <button type="button" onClick={() => ouvrir(o)} disabled={enEdition !== null}
@@ -158,7 +173,7 @@ export function OrganisationsSection({ token, orgs, onChange }: {
             onChange={e => { setNouveauSlug(e.target.value); setSlugTouche(true) }}
             className="osiris-input text-xs font-mono w-full" />
         </label>
-        <p className="text-[10px] text-slate-600">Supervision, notifications et BIOS se règlent ensuite, sur sa fiche.</p>
+        <p className="text-[10px] text-slate-600">Supervision, notifications, BIOS et licence WithSecure se règlent ensuite, sur sa fiche.</p>
         <button type="submit" disabled={envoi || !nouveauNom.trim() || !nouveauSlug} className="osiris-btn text-xs w-full disabled:opacity-50">Créer l'organisation</button>
       </form>
     </div>

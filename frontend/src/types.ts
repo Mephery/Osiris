@@ -19,13 +19,20 @@ export interface Organization {
   mac_prefix: string;
   /** Le mot de passe BIOS n'est jamais renvoyé en clair : on sait seulement s'il existe. */
   has_bios_password: boolean;
+  /** Licence WithSecure du client. La clé n'est jamais renvoyée en clair : on sait
+   *  si elle existe et on voit ses 4 derniers caractères, pour la reconnaître. */
+  has_withsecure_voucher: boolean;
+  withsecure_voucher_fin: string;
+  withsecure_profile_id: string;
 }
 
 /** Corps d'un PATCH d'organisation. `bios_password` est en ÉCRITURE SEULE : il
  *  s'envoie mais ne fait pas partie d'`Organization`, que l'API ne renvoie jamais
  *  avec le secret en clair. Champ absent = valeur en base conservée. */
-export type OrganizationPatch = Partial<Omit<Organization, 'has_bios_password'>> & {
+export type OrganizationPatch = Partial<Omit<Organization,
+  'has_bios_password' | 'has_withsecure_voucher' | 'withsecure_voucher_fin'>> & {
   bios_password?: string;
+  withsecure_voucher?: string;
 };
 
 export interface DomainConfig {

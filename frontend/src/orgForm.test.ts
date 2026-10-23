@@ -7,6 +7,7 @@ import type { Organization } from './types'
 const acme: Organization = {
   id: 1, name: 'Acme', slug: 'acme', webhook_url: '', zabbix_server: '192.0.2.130',
   mac_prefix: '', has_bios_password: true,
+  has_withsecure_voucher: true, withsecure_voucher_fin: '0001', withsecure_profile_id: '111',
 }
 
 describe('slugDepuisNom', () => {

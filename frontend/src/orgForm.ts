@@ -14,14 +14,17 @@ export const slugDepuisNom = (nom: string): string =>
 
 /** Ce qui se modifie depuis la fiche. Le slug n'y est pas : l'API ne le
  *  modifie pas, et un champ proposé sans effet est pire qu'un champ absent. */
-export type BrouillonOrg = Pick<Organization, 'name' | 'webhook_url' | 'zabbix_server' | 'mac_prefix'> & {
+export type BrouillonOrg = Pick<Organization, 'name' | 'webhook_url' | 'zabbix_server' | 'mac_prefix' | 'withsecure_profile_id'> & {
   /** Écriture seule : vide = inchangé. */
   bios_password: string
+  /** Écriture seule : vide = inchangé. */
+  withsecure_voucher: string
 }
 
 export const brouillonDe = (o: Organization): BrouillonOrg => ({
   name: o.name, webhook_url: o.webhook_url, zabbix_server: o.zabbix_server,
-  mac_prefix: o.mac_prefix, bios_password: '',
+  mac_prefix: o.mac_prefix, withsecure_profile_id: o.withsecure_profile_id,
+  bios_password: '', withsecure_voucher: '',
 })
 
 /** Le PATCH à envoyer : seulement ce qui a changé. Un champ inchangé n'est pas
@@ -29,9 +32,10 @@ export const brouillonDe = (o: Organization): BrouillonOrg => ({
  *  ailleurs entre-temps. Le mot de passe BIOS ne part que s'il a été saisi. */
 export const changementsOrg = (o: Organization, b: BrouillonOrg): OrganizationPatch => {
   const patch: OrganizationPatch = {}
-  for (const k of ['name', 'webhook_url', 'zabbix_server', 'mac_prefix'] as const) {
+  for (const k of ['name', 'webhook_url', 'zabbix_server', 'mac_prefix', 'withsecure_profile_id'] as const) {
     if (b[k].trim() !== o[k]) patch[k] = b[k].trim()
   }
   if (b.bios_password) patch.bios_password = b.bios_password
+  if (b.withsecure_voucher.trim()) patch.withsecure_voucher = b.withsecure_voucher.trim()
   return patch
 }

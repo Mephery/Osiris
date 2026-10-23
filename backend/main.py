@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+from types import SimpleNamespace
 from typing import Optional
 from urllib.parse import quote
 from xml.sax.saxutils import escape
@@ -26,6 +27,7 @@ from passlib.hash import sha512_crypt
 from fastapi import HTTPException, FastAPI, Request, Response, Depends, Header, WebSocket, WebSocketDisconnect, BackgroundTasks, Query
 from fastapi.concurrency import run_in_threadpool
 import jetons
+import licences
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -634,7 +636,7 @@ _SEED_APPS = [
     {"name": "NetExplorer",          "winget_id": "NetExplorer.NetExplorer",              "apt_package": "",                     "category": "office",   "icon": "📁"},
     {"name": "Citrix Workspace",     "winget_id": "Citrix.Workspace",                     "apt_package": "",                     "category": "remote",   "icon": "🖥️"},
     {"name": "OpenVPN",              "winget_id": "OpenVPNTechnologies.OpenVPN",          "apt_package": "openvpn",              "category": "security", "icon": "🔑"},
-    {"name": "WithSecure",           "winget_id": "",                                     "apt_package": "",                     "category": "security", "icon": "🛡️", "install_type": "msi", "installer_file": "ElementsAgentOfflineInstaller.msi", "install_args": "/qn VOUCHER=REMPLACER_PAR_VOTRE_CLE LANGUAGE=fr UNIQUE_SIGNUP_ID=smbios"},
+    {"name": "WithSecure",           "winget_id": "",                                     "apt_package": "",                     "category": "security", "icon": "🛡️", "install_type": "msi", "installer_file": "ElementsAgentOfflineInstaller.msi", "install_args": f"/qn VOUCHER={licences.MARQUEUR_CLE} LANGUAGE=fr PROFILE_ID={licences.MARQUEUR_PROFIL} UNIQUE_SIGNUP_ID=smbios"},
     # Services serveur (apt uniquement)
     {"name": "Docker",               "winget_id": "",    "apt_package": "docker.io",                    "category": "server",   "icon": "🐳"},
     {"name": "Nginx",                "winget_id": "",    "apt_package": "nginx",                        "category": "server",   "icon": "🌐"},
@@ -814,7 +816,12 @@ def _org_dict(o: Organization) -> dict:
     # bios_password jamais renvoye en clair : seul un booleen dit s'il est defini.
     return {"id": o.id, "name": o.name, "slug": o.slug,
             "webhook_url": o.webhook_url, "zabbix_server": o.zabbix_server,
-            "mac_prefix": o.mac_prefix, "has_bios_password": bool(o.bios_password)}
+            "mac_prefix": o.mac_prefix, "has_bios_password": bool(o.bios_password),
+            # Cle WithSecure : jamais en clair, mais ses 4 derniers caracteres
+            # permettent de verifier d'un coup d'oeil que c'est celle du client.
+            "has_withsecure_voucher": bool(o.withsecure_voucher),
+            "withsecure_voucher_fin": decrypt(o.withsecure_voucher)[-4:] if o.withsecure_voucher else "",
+            "withsecure_profile_id": o.withsecure_profile_id}
 
 
 @app.get("/organizations", dependencies=[Depends(get_current_user)])
@@ -855,6 +862,15 @@ async def patch_organization(org_id: int, request: Request, current_user: User =
         # envoye par l'UI que s'il a ete modifie, cf. patch partiel des fiches).
         if "bios_password" in data:
             org.bios_password = encrypt(data["bios_password"]) if data["bios_password"] else ""
+        # Licence WithSecure : chaine vide = effacement explicite, comme le BIOS.
+        try:
+            if "withsecure_voucher" in data:
+                cle = licences.normaliser_cle(data["withsecure_voucher"])
+                org.withsecure_voucher = encrypt(cle) if cle else ""
+            if "withsecure_profile_id" in data:
+                org.withsecure_profile_id = licences.normaliser_profil(data["withsecure_profile_id"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         if "name" in data:
             org.name = data["name"]
         session.add(org)
@@ -1794,6 +1810,33 @@ def _resolve_profile(session: Session, machine: Machine) -> Profile:
     if profile:
         return profile
     return Profile(name="_fallback", os=machine.os)
+
+
+def _refus_licences(session: Session, os_machine: str, profile: Profile,
+                    org_id: Optional[int]) -> list[str]:
+    """Applications à licence du profil qui ne peuvent pas s'installer pour cette
+    organisation (pas de clé, ou clé écrite dans l'application). Voir licences.py."""
+    if not (os_machine or "").startswith("windows"):
+        return []   # WithSecure ne s'installe que par le premier démarrage Windows
+    ids = [int(i) for i in (profile.app_ids or "").split(",") if i.strip().isdigit()]
+    if not ids:
+        return []
+    org = session.get(Organization, org_id) if org_id else None
+    cle = decrypt(org.withsecure_voucher) if org and org.withsecure_voucher else ""
+    profil = org.withsecure_profile_id if org else ""
+    apps = session.exec(select(Application).where(Application.id.in_(ids))).all()
+    return [r for a in apps if (r := licences.refus(a, cle, profil, org.name if org else ""))]
+
+
+def _exiger_licences(session: Session, os_machine: str, profile: Profile,
+                     org_id: Optional[int]) -> None:
+    """Refuse AVANT le déploiement plutôt que d'enregistrer un poste sur la licence
+    d'un autre client — ou de le livrer sans antivirus en s'en apercevant après."""
+    raisons = _refus_licences(session, os_machine, profile, org_id)
+    if raisons:
+        raise HTTPException(status_code=409, detail=(
+            " ; ".join(raisons) + ". Renseigner la licence sur la fiche de l'organisation "
+            "(Administration → Organisations), ou choisir un profil sans WithSecure."))
 
 
 @app.get("/profiles", dependencies=[Depends(get_current_user)])
@@ -2800,6 +2843,20 @@ def get_windows_firstboot(mac: str):
         org = session.get(Organization, machine.organization_id) if machine.organization_id else None
         bios_password = decrypt(org.bios_password or "") if org else ""
         forced_mac = mac_from_hostname(machine.hostname, org.mac_prefix) if org else ""
+        # Licences : la clé de l'organisation remplace les marqueurs. Une application
+        # refusée n'est PAS installée (jamais sous la licence d'un autre client) ; le
+        # script le dit dans le journal et le contrôle de présence échoue.
+        cle_ws = decrypt(org.withsecure_voucher) if org and org.withsecure_voucher else ""
+        profil_ws = org.withsecure_profile_id if org else ""
+        apps_refusees, apps_retenues = [], []
+        for a in win_apps:
+            raison = licences.refus(a, cle_ws, profil_ws, org.name if org else "")
+            if raison:
+                apps_refusees.append({"name": a.name, "raison": raison})
+            else:
+                apps_retenues.append(SimpleNamespace(**{
+                    **a.model_dump(), "install_args": licences.args_installation(a, cle_ws, profil_ws)}))
+        win_apps = apps_retenues
     profile_ctx = _profile_for_template(profile, session)
     tv_suffix = profile_ctx.get("tv_suffix", "")
     valider_hostname(machine.hostname)
@@ -2809,6 +2866,7 @@ def get_windows_firstboot(mac: str):
         profile=profile_ctx,
         tv_password=tv_password,
         win_apps=list(win_apps),
+        apps_refusees=apps_refusees,
         osiris_url=OSIRIS_BASE_URL,
         osiris_ip=OSIRIS_IP,
         bios_password=bios_password,
@@ -2851,6 +2909,8 @@ def create_machine(machine: Machine, current_user: User = Depends(get_current_us
                     detail=f"Adaptateur déjà affecté à {holder.hostname} ({holder.mac}) "
                            f"— le libérer d'abord",
                 )
+        _exiger_licences(session, machine.os, _resolve_profile(session, machine),
+                         machine.organization_id)
         session.add(machine)
         _log(session, current_user, "create_machine", target_mac=clean_mac,
              details={"hostname": machine.hostname, "client": machine.client, "os": machine.os})
@@ -3033,6 +3093,11 @@ def update_machine(mac: str, patch: MachinePatch, current_user: User = Depends(g
             audit_extra["deploy_mac"] = new_deploy_mac
         for field, value in changes.items():
             setattr(machine, field, value)
+        # Seuls ces champs changent la licence à poser : modifier le nom ou l'OU
+        # d'une machine déjà en place ne doit pas être bloqué.
+        if {"organization_id", "profile_id", "os"} & changes.keys():
+            _exiger_licences(session, machine.os, _resolve_profile(session, machine),
+                             machine.organization_id)
         session.add(machine)
         _log(session, current_user, "update_machine", target_mac=clean_mac,
              details={**changes, **audit_extra})
@@ -3489,6 +3554,8 @@ def redeploy_now(mac: str, background_tasks: BackgroundTasks):
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
         if not machine:
             raise HTTPException(status_code=404, detail="Machine introuvable")
+        _exiger_licences(session, machine.os, _resolve_profile(session, machine),
+                         machine.organization_id)
         _open_new_deploy_run(machine)
         _record_deploy_event(session, machine, "pending")
         session.add(machine)
@@ -4590,6 +4657,9 @@ async def import_machines(request: Request, current_user: User = Depends(require
                     mac=clean_mac, hostname=hostname, client=client, os=os_name,
                     profile_id=profile.id if profile else None,
                 )
+                # Une machine importée n'a pas d'organisation : un profil avec
+                # WithSecure n'a aucune licence légitime à lui donner.
+                _exiger_licences(session, os_name, _resolve_profile(session, machine), None)
                 session.add(machine)
                 created += 1
             except HTTPException as e:
@@ -6685,6 +6755,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
     _valider_adressage(body)
     with Session(engine) as session:
         _hv_acces = session.get(Hypervisor, hv_id)
+        _exiger_licences(session, body.os, _resolve_profile_for_vm(body), body.organization_id)
     _refuser_vm_sans_acces(body, _hv_acces)
     # Disques : Linux seulement pour l'instant. Validés ICI, avant tout appel à
     # l'hyperviseur, et normalisés une fois : l'hyperviseur, la fiche et le

@@ -34,6 +34,13 @@ class Organization(SQLModel, table=True):
     # separateur (ex. "02aabbcc"). Les 2 derniers octets sont derives des 3 derniers
     # chiffres du hostname. Vide = on ne reecrit pas la MAC. Voir _mac_from_hostname().
     mac_prefix: str = Field(default="")
+    # Licence WithSecure du client : cle d'abonnement (chiffree Fernet) et identifiant
+    # de profil WithSecure. L'application WithSecure ne porte que des marqueurs,
+    # remplaces au deploiement par ces valeurs. Vide = WithSecure refuse pour les
+    # machines de cette organisation, jamais de repli sur une autre licence.
+    # Voir licences.py.
+    withsecure_voucher: str = Field(default="")
+    withsecure_profile_id: str = Field(default="")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

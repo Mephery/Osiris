@@ -479,6 +479,12 @@ if (-not $wingetExe) {
 Write-Log "Applications installees."
 {% endif %}
 
+{% for app in apps_refusees | default([]) %}
+# Licence absente pour l'organisation de la machine : l'application n'est PAS
+# installee plutot que posee sous la licence d'un autre client.
+Write-Log 'ERREUR : {{ (app.name ~ " non installe - " ~ app.raison) | replace("'", "''") }}'
+{% endfor %}
+
 {% set custom_apps = win_apps | rejectattr('install_type', 'equalto', 'winget') | selectattr('installer_file') | list %}
 {% if custom_apps %}
 # ── Applications a installeur dedie (MSI/EXE heberge par OSIRIS) ───────────────
@@ -757,6 +763,10 @@ try {
 }
 {% endfor %}
 {% endif %}
+
+{% for app in apps_refusees | default([]) %}
+Add-SmokeTest "App : {{ app.name }}" $false "Licence absente pour l'organisation : non installe"
+{% endfor %}
 
 # Envoi du rapport a OSIRIS
 try {
