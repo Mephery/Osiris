@@ -161,6 +161,10 @@ class Profile(SQLModel, table=True):
     # Acces de SECOURS par la console quand le reseau ou SSH est tombe. Root
     # reste interdit en SSH : ce mot de passe ne sert qu'en local.
     set_root_password: bool = Field(default=False)
+    # Profil WithSecure (politique : Bureau, Direction...) a poser a la place de
+    # celui de l'organisation. Vide = celui de l'organisation. La CLE, elle, vient
+    # toujours de l'organisation : c'est elle qui designe le client. Voir licences.py.
+    withsecure_profile_id: str = Field(default="")
 
 
 class Hypervisor(SQLModel, table=True):

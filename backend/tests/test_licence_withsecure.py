@@ -199,3 +199,47 @@ def test_chaine_vide_efface_la_cle(client, admin_token, clean_db):
     org, _, _ = _monde()
     r = client.patch(f"/organizations/{org}", json={"withsecure_voucher": ""}, headers=_h(admin_token))
     assert r.json()["has_withsecure_voucher"] is False
+
+
+# ── Politique WithSecure choisie par le profil ─────────────────────────────────
+# Un client peut avoir plusieurs politiques (Bureau, Direction) sous la même clé.
+
+def _profil_ws(prof_id, valeur):
+    with Session(engine) as s:
+        p = s.get(Profile, prof_id)
+        p.withsecure_profile_id = valeur
+        s.add(p)
+        s.commit()
+
+
+def test_le_profil_choisit_sa_politique_et_garde_la_cle_de_l_organisation(client, clean_db):
+    org, _, prof = _monde()
+    _profil_ws(prof, "999")
+    _machine(org, prof)
+    script = client.get(f"/firstboot-windows/{MAC}").text
+    assert "PROFILE_ID=999" in script
+    assert f"VOUCHER={CLE_A}" in script
+
+
+def test_une_politique_sur_le_profil_ne_remplace_pas_une_cle_absente(client, admin_token, clean_db):
+    """La politique ne dit pas QUI paie : sans clé d'organisation, toujours refusé."""
+    _, sans, prof = _monde()
+    _profil_ws(prof, "999")
+    r = client.post("/machines", json=_corps_machine(sans, prof), headers=_h(admin_token))
+    assert r.status_code == 409
+
+
+def test_politique_du_profil_enregistree_et_validee(client, admin_token, clean_db):
+    _, _, prof = _monde()
+    r = client.patch(f"/profiles/{prof}", json={"withsecure_profile_id": " 999 "}, headers=_h(admin_token))
+    assert r.status_code == 200 and r.json()["withsecure_profile_id"] == "999"
+    r = client.patch(f"/profiles/{prof}", json={"withsecure_profile_id": "abc"}, headers=_h(admin_token))
+    assert r.status_code == 400
+    r = client.patch(f"/profiles/{prof}", json={"withsecure_profile_id": ""}, headers=_h(admin_token))
+    assert r.json()["withsecure_profile_id"] == ""
+
+
+def test_le_catalogue_signale_l_appli_a_licence_d_organisation(client, admin_token, clean_db):
+    _monde()
+    apps = client.get("/apps", headers=_h(admin_token)).json()
+    assert [a["licence_org"] for a in apps if a["name"] == "WithSecure"] == [True]

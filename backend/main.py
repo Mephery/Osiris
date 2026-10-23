@@ -494,6 +494,7 @@ class ProfileCreate(SQLModel):
     vm_disk_gb: int = 20
     vm_data_disk_gb: int = 0
     set_root_password: bool = False
+    withsecure_profile_id: str = ""
 
 class ProfilePatch(SQLModel):
     # Tout champ du modele doit figurer ici. Pydantic IGNORE en silence ce qu'il
@@ -534,6 +535,7 @@ class ProfilePatch(SQLModel):
     vm_disk_gb: Optional[int] = None
     vm_data_disk_gb: Optional[int] = None
     set_root_password: Optional[bool] = None
+    withsecure_profile_id: Optional[str] = None
 
 class LoginRequest(SQLModel):
     email: str
@@ -1716,6 +1718,7 @@ def _profile_dict(p: Profile, session: Session | None = None) -> dict:
         "set_root_password": p.set_root_password,
         "laps_rotation_days": p.laps_rotation_days,
         "domain_config_id": p.domain_config_id,
+        "withsecure_profile_id": p.withsecure_profile_id or "",
     }
 
 
@@ -1823,7 +1826,7 @@ def _refus_licences(session: Session, os_machine: str, profile: Profile,
         return []
     org = session.get(Organization, org_id) if org_id else None
     cle = decrypt(org.withsecure_voucher) if org and org.withsecure_voucher else ""
-    profil = org.withsecure_profile_id if org else ""
+    profil = profile.withsecure_profile_id or (org.withsecure_profile_id if org else "")
     apps = session.exec(select(Application).where(Application.id.in_(ids))).all()
     return [r for a in apps if (r := licences.refus(a, cle, profil, org.name if org else ""))]
 
@@ -1869,12 +1872,20 @@ def _appliquer_config_ad(session: Session, profile: Profile) -> None:
         profile.domain_join_password = ""
 
 
+def _valider_profil_ws(brut: str) -> str:
+    try:
+        return licences.normaliser_profil(brut)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/profiles", status_code=201)
 def create_profile(body: ProfileCreate, current_user: User = Depends(require_admin)):
     if body.os not in ("ubuntu", "windows", "debian"):
         raise HTTPException(status_code=400, detail="OS invalide : ubuntu, debian ou windows")
     with Session(engine) as session:
         data = body.model_dump()
+        data["withsecure_profile_id"] = _valider_profil_ws(data["withsecure_profile_id"])
         data["tv_suffix"] = encrypt(data.get("tv_suffix", ""))
         data["domain_join_password"] = encrypt(data.get("domain_join_password", ""))
         profile = Profile(**data)
@@ -1899,6 +1910,8 @@ def update_profile(profile_id: int, patch: ProfilePatch, current_user: User = De
         if "os" in changes and changes["os"] not in ("ubuntu", "windows", "debian"):
             raise HTTPException(status_code=400, detail=(
                 f"OS « {changes['os']} » inconnu — attendu : ubuntu, debian ou windows."))
+        if "withsecure_profile_id" in changes:
+            changes["withsecure_profile_id"] = _valider_profil_ws(changes["withsecure_profile_id"])
         # `_profile_dict` masque ces deux secrets en « *** », et l'écran d'édition
         # renvoie le profil tel qu'il l'a lu : sans ce filtre, enregistrer un profil
         # sans toucher au mot de passe remplaçait le mot de passe de jonction par
@@ -1999,7 +2012,9 @@ def _app_dict(a: Application) -> dict:
     return {"id": a.id, "name": a.name, "winget_id": a.winget_id,
             "apt_package": a.apt_package, "category": a.category, "icon": a.icon,
             "install_type": a.install_type, "installer_file": a.installer_file,
-            "linux_post_install": a.linux_post_install}
+            "linux_post_install": a.linux_post_install,
+            # L'interface propose alors de choisir le profil WithSecure dans le profil.
+            "licence_org": licences.MARQUEUR_CLE in (a.install_args or "")}
 
 
 @app.get("/apps", dependencies=[Depends(get_current_user)])
@@ -2847,7 +2862,9 @@ def get_windows_firstboot(mac: str):
         # refusée n'est PAS installée (jamais sous la licence d'un autre client) ; le
         # script le dit dans le journal et le contrôle de présence échoue.
         cle_ws = decrypt(org.withsecure_voucher) if org and org.withsecure_voucher else ""
-        profil_ws = org.withsecure_profile_id if org else ""
+        # Le profil de déploiement peut choisir une autre politique WithSecure
+        # (ex. Direction) ; la clé reste celle de l'organisation.
+        profil_ws = profile.withsecure_profile_id or (org.withsecure_profile_id if org else "")
         apps_refusees, apps_retenues = [], []
         for a in win_apps:
             raison = licences.refus(a, cle_ws, profil_ws, org.name if org else "")

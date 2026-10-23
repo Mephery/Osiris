@@ -209,6 +209,9 @@ export interface Profile {
   ntp_servers: string;
   apt_mirror: string;
   apt_proxy: string;
+  /** Politique WithSecure (ex. Direction) à la place de celle de l'organisation.
+   *  Vide = celle de l'organisation. La clé vient toujours de l'organisation. */
+  withsecure_profile_id?: string;
   /** Gabarit matériel des VM créées avec ce profil (valeurs par défaut du formulaire). */
   vm_vcpus: number;
   vm_ram_mb: number;
@@ -246,6 +249,8 @@ export interface Application {
   installer_file?: string;
   /** Script bash exécuté après l'apt-get install de ce paquet, au premier démarrage. */
   linux_post_install?: string;
+  /** Licence fournie par l'organisation de la machine (WithSecure). */
+  licence_org?: boolean;
 }
 
 export interface DeploymentEvent {

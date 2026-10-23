@@ -12,7 +12,7 @@ import { compteSaisiDansLeProfil, ficheDuProfil, libelleFiche } from './profilAd
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
-const EMPTY_PROFILE: Partial<Profile> = { os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '', ntp_servers: '', apt_mirror: '', apt_proxy: '' }
+const EMPTY_PROFILE: Partial<Profile> = { os: 'ubuntu', name: '', locale: 'fr_FR.UTF-8', keyboard: 'fr', timezone: 'Europe/Paris', default_user: 'osiris', extra_packages: '', join_domain: true, domain: 'entreprise.local', domain_join_user: '', domain_join_password: '', win_image: '', win_index: 6, enable_bitlocker: true, bitlocker_pin: false, network_drives: '[]', printers: '[]', post_script: '', tv_suffix: '', app_ids: '', laps_rotation_days: 0, machine_type: 'workstation', ssh_authorized_keys: '', ntp_servers: '', apt_mirror: '', apt_proxy: '', withsecure_profile_id: '' }
 
 interface ProfilesSectionProps {
   token: string
@@ -56,6 +56,22 @@ function FicheAdLiee({ fiche, className }: { fiche: DomainConfig; className: str
 }
 
 // Grille de cartes pour le sélecteur d'applications, réutilisée pour la création et l'édition de profil.
+/** Politique WithSecure du profil. Proposée seulement quand une appli à licence
+ *  d'organisation est cochée : la clé désigne le client et vient de sa fiche,
+ *  le profil ne choisit que la politique (Bureau, Direction…). */
+function PolitiqueWithSecure({ apps, selected, value, onChange }: {
+  apps: Application[]; selected: Set<string>; value: string; onChange: (v: string) => void
+}) {
+  if (!apps.some(a => a.licence_org && selected.has(String(a.id)))) return null
+  return (
+    <label className="block text-[10px] text-slate-500 space-y-0.5">
+      ID de profil WithSecure — vide = celui de l'organisation ; la clé reste celle de l'organisation
+      <input value={value} inputMode="numeric" placeholder="ex : 12345678" onChange={e => onChange(e.target.value)}
+        className="osiris-input text-xs font-mono w-full sm:w-64" />
+    </label>
+  )
+}
+
 function AppGrid({ apps, selected, onToggle }: { apps: Application[]; selected: Set<string>; onToggle: (id: number) => void }) {
   return (
     <div className="grid grid-cols-4 sm:grid-cols-5 gap-2">
@@ -328,6 +344,8 @@ export function ProfilesSection({ token, profiles, apps, domainConfigs, organiza
                   />
                 )}
                 <AppGrid apps={eligible} selected={selected} onToggle={toggle} />
+                <PolitiqueWithSecure apps={eligible} selected={selected} value={newProfile.withsecure_profile_id ?? ''}
+                  onChange={v => setNewProfile({ ...newProfile, withsecure_profile_id: v })} />
               </div>
             )
           })()}
@@ -568,6 +586,8 @@ export function ProfilesSection({ token, profiles, apps, domainConfigs, organiza
                       />
                     )}
                     <AppGrid apps={eligible} selected={selected} onToggle={toggle} />
+                    <PolitiqueWithSecure apps={eligible} selected={selected} value={editingProfile.withsecure_profile_id ?? ''}
+                      onChange={v => setEditingProfile({ ...editingProfile, withsecure_profile_id: v })} />
                   </div>
                 )
               })()}
