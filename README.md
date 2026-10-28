@@ -132,7 +132,14 @@ Au premier démarrage, le backend applique automatiquement les migrations Alembi
 
 ### Option B - Installation directe (développement)
 
-Prérequis : Python 3.11+, Node.js 22+, PostgreSQL 14+, Redis.
+Prérequis : Python 3.11+, Node.js 22+, PostgreSQL 14+, Redis. Sur Debian 12 :
+
+```bash
+sudo apt install git python3-venv postgresql redis-server
+# Node 22 : Debian 12 ne fournit que Node 18, trop ancien pour le build (Vite)
+curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource.sh && sudo bash /tmp/nodesource.sh
+sudo apt install nodejs
+```
 
 Outils système utilisés par le worker :
 
@@ -151,11 +158,18 @@ cd osiris/backend
 
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+# Le .lock, pas le .txt : il fige les versions avec lesquelles OSIRIS passe ses
+# tests. Sans lui, pip prend les dernières du jour, et une installation neuve
+# échouait dès les migrations (SQLAlchemy 2.1, constaté le 28/10/2026).
+pip install -r requirements.lock
 
 cp ../.env.example .env
 chmod 640 .env   # sinon 644 : la clé Fernet et les mots de passe sont lisibles par tous
-# Éditer .env avec vos valeurs
+# Éditer .env avec vos valeurs (chaque variable y est expliquée)
+
+# Base de données : un compte et une base, avec le mot de passe mis dans .env
+sudo -u postgres psql -c "CREATE USER osiris PASSWORD '<DB_PASSWORD du .env>'"
+sudo -u postgres createdb -O osiris osiris
 
 # Appliquer les migrations de schéma
 alembic upgrade head
@@ -252,6 +266,26 @@ VITE_API_URL=
 > requêtes vers l'IP, dont le certificat n'est pas reconnu — « Failed to fetch » partout.
 
 > **Note réseau :** `OSIRIS_BASE_URL` doit être l'IP du réseau PXE (celle que voient les machines qui bootent). Ne pas confondre avec l'URL d'accès à l'UI.
+
+---
+
+## Dépendances
+
+`backend/requirements.txt` dit **de quoi** OSIRIS a besoin ; `backend/requirements.lock`
+dit **dans quelle version**. On installe toujours depuis le `.lock`, pour que deux
+installations faites à des mois d'écart soient identiques.
+
+Mettre à jour une dépendance :
+
+```bash
+cd backend
+python3 -m venv /tmp/venv-maj && /tmp/venv-maj/bin/pip install -r requirements.txt
+/tmp/venv-maj/bin/pip install -r requirements-dev.txt
+# faire passer TOUTE la suite de tests avec ces versions, puis :
+/tmp/venv-maj/bin/pip freeze | grep -viE '^(pytest|pytest-cov|coverage|iniconfig|pluggy|pygments|httpx|httpcore|certifi)=' \
+    | sort -f > /tmp/lock && { sed -n '/^#/p' requirements.lock; cat /tmp/lock; } > requirements.lock.new \
+    && mv requirements.lock.new requirements.lock
+```
 
 ---
 

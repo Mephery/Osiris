@@ -4,7 +4,10 @@ After=network.target redis.service
 Wants=redis.service
 
 [Service]
-User=humans
+# Compte de service sans shell ni sudo : voir README, « En production : un compte
+# de service dédié ». Jamais le compte d'un administrateur.
+User=osiris
+Group=osiris
 WorkingDirectory=/opt/osiris/backend
 Environment=PATH=/opt/osiris/backend/venv/bin
 ExecStart=/opt/osiris/backend/venv/bin/arq worker.WorkerSettings
