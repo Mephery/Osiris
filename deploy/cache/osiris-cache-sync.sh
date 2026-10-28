@@ -101,7 +101,9 @@ for module in "${MODULES[@]}"; do
     # module, ensemble. Un PC qui demarre pendant la copie voit l'ancien WinPE OU
     # le nouveau, jamais un melange des deux. Un PC deja en train de lire une image
     # garde l'ancienne jusqu'au bout : rsync remplace par renommage.
-    sortie=$(timeout "$restant" rsync -a --delete-delay --delay-updates \
+    # --no-owner --no-group : les fichiers appartiennent a root sur le cache, pas a
+    # des numeros de comptes du manager qui ne designent personne ici.
+    sortie=$(timeout "$restant" rsync -a --no-owner --no-group --delete-delay --delay-updates \
         --partial-dir=.osiris-partiel --timeout=600 --stats \
         --bwlimit="$DEBIT_MAX_KO" \
         -e "ssh -i $CLE -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOTES_CONNUS" \

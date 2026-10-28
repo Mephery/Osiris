@@ -48,33 +48,49 @@ voir `Caddyfile.example`.
 
 ## Pour chaque site
 
-1. **Dans OSIRIS** : créer le site. Le jeton n'est affiché qu'une fois. En cas de
-   perte ou de fuite, en générer un nouveau : l'ancien cesse aussitôt de valoir.
-2. **Sur le cache** : générer sa clé.
+**Matériel** : une machine Debian 12 ou Ubuntu (serveur) avec **deux cartes réseau**
+(un adaptateur USB-Ethernet convient pour la seconde) et un disque assez grand pour
+toutes les images et tous les pilotes (compter 250 Go et plus).
+
+- la **carte lien** va vers le réseau du site, d'où l'on joint OSIRIS ;
+- la **carte site** va vers la **prise d'installation**, et **seulement** elle (ou
+  en direct sur le PC à installer). Sur cette carte, le cache prend l'adresse
+  d'OSIRIS et distribue des adresses.
+
+1. **Dans OSIRIS** (Infrastructure › Sites distants) : créer le site et recopier son
+   jeton, affiché une seule fois.
+2. **Sur OSIRIS** : relever son empreinte SSH, que le cache vérifiera.
    ```bash
-   sudo install -d -m 700 /etc/osiris-cache
-   sudo ssh-keygen -t ed25519 -N "" -C "cache-<site>" -f /etc/osiris-cache/id_ed25519
+   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
    ```
-3. **Sur OSIRIS** : ajouter la clé publique, bridée, à
-   `/var/lib/osiris-cache/.ssh/authorized_keys` (une ligne par cache) :
-   ```
-   command="rsync --server --daemon --config=/etc/osiris/rsyncd-cache.conf .",restrict ssh-ed25519 AAAA… cache-<site>
-   ```
-4. **Sur le cache** : relever l'empreinte d'OSIRIS et la **comparer** à celle
-   qu'affiche `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` sur OSIRIS. Si elles
-   diffèrent, ne pas continuer.
+3. **Sur le cache** (root), avec le dossier `deploy/cache` copié dessus :
    ```bash
-   ssh-keyscan -t ed25519 <manager> | sudo tee /etc/osiris-cache/known_hosts
-   ssh-keygen -lf /etc/osiris-cache/known_hosts
+   ./installer-cache.sh installer --manager <adresse d'OSIRIS> --osiris-ip <OSIRIS_IP> \
+       --carte-site <interface> --dns <DNS du domaine> --empreinte <SHA256:…>
    ```
-5. **Sur le cache** : installer le script et sa configuration.
+   Le jeton est demandé sans être affiché. Options : `--carte-lien`, `--fenetre
+   01:00-05:00`, `--debit-max <Ko/s>`. Le script peut être relancé.
+4. **Sur OSIRIS** : coller la ligne `autoriser-cache.sh '…'` que le script affiche
+   à la fin. Elle ajoute la clé du cache avec sa bride, et refuse toute autre forme.
+5. **Sur le cache** : première copie, puis contrôle complet.
    ```bash
-   sudo install -D -m 755 osiris-cache-sync.sh /opt/osiris-cache/osiris-cache-sync.sh
-   sudo install -m 600 cache.conf.example /etc/osiris-cache/cache.conf   # puis la remplir
-   sudo install -m 644 osiris-cache-sync.service osiris-cache-sync.timer /etc/systemd/system/
-   sudo systemctl daemon-reload && sudo systemctl enable --now osiris-cache-sync.timer
+   /opt/osiris-cache/osiris-cache-sync.sh --maintenant
+   /opt/osiris-cache/installer-cache.sh verifier
    ```
-6. **Première copie** : `sudo /opt/osiris-cache/osiris-cache-sync.sh --maintenant`.
+
+**Le garde-fou de l'installation.** Avant de toucher à la carte site, le script
+regarde si un serveur DHCP y répond, ou si une machine y porte déjà l'adresse
+d'OSIRIS. Dans les deux cas, la carte est branchée sur un réseau en service : le
+cache y créerait un doublon de l'adresse d'OSIRIS et un second DHCP, et les postes
+de ce réseau perdraient leurs adresses. Le script refuse et dit pourquoi. La
+solution n'est jamais de forcer : il faut rebrancher la carte sur la prise dédiée.
+
+**`verifier`** contrôle, dans cet ordre : les services, la prise, la liaison avec
+OSIRIS, puis les fichiers. L'ordre compte : sans liaison, les fichiers ne peuvent
+pas arriver, et c'est la cause qu'il faut corriger d'abord.
+
+Pour retirer un cache : `autoriser-cache.sh --retirer osiris-cache-<nom>` sur OSIRIS,
+puis « Retirer le site » dans l'interface.
 
 ## La première copie
 
@@ -88,7 +104,8 @@ alors que les différences.
 | Constat | Où regarder |
 |---|---|
 | L'onglet Sites dit `jamais` | Le cache n'a jamais joint OSIRIS : `systemctl status osiris-cache-sync`, puis `journalctl -u osiris-cache-sync` |
-| `echec`, « fenêtre de nuit terminée » | Normal pour une première copie ou une grosse image ; la nuit suivante reprend |
-| `echec`, « rsync … code 255 » | SSH refusé : clé absente d'`authorized_keys`, ou empreinte d'OSIRIS changée |
+| `inachevee` (Copie inachevée) | Normal pour une première copie ou une grosse image ; la nuit suivante reprend. Au-delà de 3 jours, élargir la fenêtre ou le débit |
+| `echec`, « rsync … code 255 » | SSH refusé : clé non autorisée sur OSIRIS, ou empreinte d'OSIRIS changée. Sur le cache : `installer-cache.sh verifier` |
+| Un PC du site ne démarre pas en réseau | Sur le cache : `installer-cache.sh verifier`, puis `journalctl -u dnsmasq` (le PC a-t-il demandé une adresse ?) |
 | `en_retard` | Le cache est éteint, ou sa minuterie n'est pas active : `systemctl list-timers osiris-cache-sync.timer` |
 | `images_differentes` | La copie a réussi mais une image manque : vérifier qu'elle n'est pas exclue (`*.bak*`, `*.ko-*`) |

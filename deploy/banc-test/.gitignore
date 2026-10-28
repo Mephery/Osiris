@@ -1,3 +1,4 @@
 # Fichiers de travail du banc : disque de la VM, etat et journaux du cache
 vm/
 cache/
+vm-cache/
