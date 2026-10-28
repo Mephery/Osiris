@@ -106,7 +106,18 @@ GET  /boot?mac=aa:bb:cc:...
 
 ## Installation
 
-### Option A - Docker Compose (recommandé)
+### Recommandé : le script d'installation
+
+Sur un Debian 12 neuf, une commande installe et configure tout (base, API,
+worker, interface, Caddy, iPXE et wimboot vérifiés), puis `verifier` contrôle
+l'ensemble. Voir **`deploy/manager/README.md`**. C'est la seule voie éprouvée de
+bout en bout sur une machine vierge. Les deux options ci-dessous restent comme
+référence de ce que fait le script.
+
+### Option A - Docker Compose (non éprouvé)
+
+> Cette voie n'a pas été rejouée sur une machine neuve depuis longtemps : la
+> production n'utilise plus Docker. Préférer le script ci-dessus.
 
 Nécessite Docker Engine et Docker Compose v2. Les services dnsmasq et Samba restent sur l'hôte car ils requièrent un accès réseau de bas niveau (broadcasts DHCP, TFTP).
 
