@@ -103,6 +103,27 @@ lien montant n'a porté que quelques dizaines de kilo-octets pour tout un
 déploiement. Il ne dit rien de la jonction au domaine à travers le cache, ni du
 firstboot.
 
+## Secure Boot
+
+`SECURE_BOOT=1` démarre la VM avec Secure Boot actif et les clés de Microsoft,
+comme un PC du commerce. Avec le cache de banc, `TFTP_RACINE=<dossier>` et
+`FICHIER_AMORCE=ipxe-shim.efi` servent la chaîne signée d'iPXE (shim signé par
+Microsoft, puis iPXE signé) au lieu du `ipxe.efi` ordinaire.
+
+**Toujours commencer par un test à blanc** : servir un `ipxe.efi` NON signé et
+vérifier qu'il est refusé (« Access Denied »). Sans ce contrôle, le banc peut
+mentir : QEMU colle d'office à chaque carte réseau une ROM contenant iPXE, que le
+firmware de VM laisse passer, et le démarrage réseau contournait alors Secure
+Boot. Le mode `SECURE_BOOT=1` retire cette ROM (`romfile=`) : c'est la pile réseau
+du firmware qui démarre, comme sur un vrai PC.
+
+Ce qu'il a montré (28/10/2026) : sous Secure Boot appliqué, le `ipxe.efi`
+ordinaire est refusé ; la chaîne signée passe (shim, iPXE, script OSIRIS,
+wimboot, chargeur Windows, noyau de WinPE). La fin du démarrage de WinPE n'est pas
+observable dans ce mode (carte virtio, pile réseau du firmware très lente) : une
+VM témoin SANS Secure Boot, montée pareil, n'y arrive pas non plus. La preuve
+complète reste à faire sur un vrai PC.
+
 ## Fiche machine associée
 
 Le banc suppose une machine enregistrée dans OSIRIS avec la MAC et le numéro de

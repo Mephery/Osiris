@@ -34,8 +34,19 @@ MONITEUR="$TRAVAIL/monitor.sock"
 NVRAM="$TRAVAIL/OVMF_VARS.fd"
 ISO=${ISO:-$TRAVAIL/osiris-winpe.iso}
 
-OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
-OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
+# 1 = Secure Boot actif avec les cles de Microsoft, comme un PC du commerce. La
+# carte passe alors en virtio : son pilote est dans le firmware (donc signe),
+# alors que celui de l'e1000 vient d'une ROM que Secure Boot refuserait. WinPE
+# n'a pas de pilote virtio : ce mode prouve la chaine de demarrage, pas un
+# deploiement complet.
+SECURE_BOOT=${SECURE_BOOT:-0}
+if [ "$SECURE_BOOT" = "1" ]; then
+    OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.ms.fd
+    OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.ms.fd
+else
+    OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+    OVMF_VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
+fi
 
 pid_vm() { pgrep -f "serial=$SERIE" || true; }
 
@@ -58,7 +69,16 @@ demarrer() {
     [ -f "$DISQUE" ] || qemu-img create -f qcow2 "$DISQUE" "$TAILLE_DISQUE"
     # Les variables UEFI sont propres a la VM : partir de la copie du systeme.
     [ -f "$NVRAM" ] || cp "$OVMF_VARS" "$NVRAM"
-    local jetable=() amorce="-cdrom $ISO -boot order=d"
+    local jetable=() amorce="-cdrom $ISO -boot order=d" machine="q35,accel=kvm" carte=e1000 secure=""
+    if [ "$SECURE_BOOT" = "1" ]; then
+        # SMM et pflash protegee : sans eux, OVMF n'applique pas Secure Boot.
+        # romfile= : QEMU colle d'office a la carte une ROM contenant iPXE (non
+        # signe), que le firmware laisse passer pour les VM. Le demarrage reseau
+        # contournait alors Secure Boot. Sans ROM, c'est la pile reseau du
+        # firmware qui demarre, comme sur un vrai PC.
+        machine="q35,accel=kvm,smm=on"; carte=virtio-net-pci,romfile=
+        secure="-global driver=cfi.pflash01,property=secure,value=on"
+    fi
     [ "$DISQUE_JETABLE" = "1" ] && jetable=(-snapshot)
     if [ "$PXE" = "1" ]; then
         amorce=""
@@ -67,7 +87,7 @@ demarrer() {
     fi
 
     # SATA (ahci/ide-hd) et e1000 sont imposes par WinPE, qui n'a pas virtio.
-    sg kvm -c "qemu-system-x86_64 -machine q35,accel=kvm -cpu host \
+    sg kvm -c "qemu-system-x86_64 -machine $machine -cpu host $secure \
         -smp $COEURS -m $MEMOIRE -smbios type=1,serial=$SERIE ${jetable[*]} \
         -drive if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE \
         -drive if=pflash,format=raw,unit=1,file=$NVRAM \
@@ -75,7 +95,7 @@ demarrer() {
         -device ahci,id=ahci -device ide-hd,drive=hd0,bus=ahci.0,bootindex=2 \
         $amorce \
         -netdev tap,id=n0,ifname=$TAP,script=no,downscript=no \
-        -device e1000,netdev=n0,mac=$MAC,bootindex=1 \
+        -device $carte,netdev=n0,mac=$MAC,bootindex=1 \
         -monitor unix:$MONITEUR,server,nowait -display none -vga std &"
     sleep 1
     echo "VM lancee (PID $(pid_vm)) — penser a '$0 arreter' en fin de session"

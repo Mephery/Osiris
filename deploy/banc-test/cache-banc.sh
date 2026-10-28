@@ -57,10 +57,10 @@ dhcp-authoritative
 dhcp-range=$prefixe.150,$prefixe.199,255.255.255.0,1h
 dhcp-option=3,$ip
 dhcp-match=set:is_ipxe,175
-dhcp-boot=tag:!is_ipxe,ipxe.efi,$ip
+dhcp-boot=tag:!is_ipxe,${FICHIER_AMORCE:-ipxe.efi},$ip
 dhcp-boot=tag:is_ipxe,http://$ip/boot
 enable-tftp
-tftp-root=/srv/tftp
+tftp-root=${TFTP_RACINE:-/srv/tftp}
 dhcp-leasefile=$TRAVAIL/dnsmasq.leases
 pid-file=$TRAVAIL/dnsmasq.pid
 log-facility=$TRAVAIL/dnsmasq.log
