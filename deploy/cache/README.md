@@ -92,6 +92,13 @@ pas arriver, et c'est la cause qu'il faut corriger d'abord.
 Pour retirer un cache : `autoriser-cache.sh --retirer osiris-cache-<nom>` sur OSIRIS,
 puis « Retirer le site » dans l'interface.
 
+## Avant un vrai site : la répétition
+
+`repetition-bureau.md` déroule, sur du vrai matériel au bureau, tout ce que le
+banc ne peut pas prouver (vrai PC, firstboot, jonction au domaine, Secure Boot,
+lien coupé en pleine installation), avec pour chaque essai ce que l'opérateur
+doit voir.
+
 ## La première copie
 
 Elle transfère tout : plusieurs dizaines de gigaoctets. À 20 Mbit/s, cela prend
