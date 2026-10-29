@@ -16,6 +16,8 @@
 #                            des images sur --carte-installation, qui porte deja
 #                            --adresse-pc
 #   --carte-installation <if>   (tout-en-un) carte du reseau d'installation
+#   --passerelle <ip>        (tout-en-un) routeur du reseau d'installation, donne aux
+#                            PC : sans lui, Windows installe ne sort pas de ce reseau
 #   --dns <ip,ip>            (tout-en-un) DNS donnes aux PC (ceux du domaine)
 #   --reseaux-admin <cidr,...>  reseaux autorises sur l'interface (defaut : prives)
 #   --email-admin <adresse>  compte administrateur initial (defaut admin@osiris.local)
@@ -41,7 +43,7 @@ vert()  { printf '\033[32m%s\033[0m\n' "$*"; }
 etape() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 refus() { rouge "REFUS : $*" >&2; exit 1; }
 
-ADRESSE_PC="" ADRESSE_ADMIN="" MODE=manager-seul CARTE="" DNS=""
+ADRESSE_PC="" ADRESSE_ADMIN="" MODE=manager-seul CARTE="" DNS="" PASSERELLE=""
 RESEAUX_ADMIN="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16" EMAIL_ADMIN=admin@osiris.local
 
 lire_options() {
@@ -51,6 +53,7 @@ lire_options() {
             --adresse-admin)      ADRESSE_ADMIN=$2; shift 2 ;;
             --mode)               MODE=$2; shift 2 ;;
             --carte-installation) CARTE=$2; shift 2 ;;
+            --passerelle)         PASSERELLE=$2; shift 2 ;;
             --dns)                DNS=$2; shift 2 ;;
             --reseaux-admin)      RESEAUX_ADMIN=${2//,/ }; shift 2 ;;
             --email-admin)        EMAIL_ADMIN=$2; shift 2 ;;
@@ -61,7 +64,13 @@ lire_options() {
     [ -n "$ADRESSE_ADMIN" ] || refus "--adresse-admin manquant (adresse ou nom de ce serveur pour les administrateurs)"
     case "$MODE" in
         manager-seul) ;;
-        tout-en-un) [ -n "$CARTE" ] || refus "--mode tout-en-un demande --carte-installation" ;;
+        tout-en-un)
+            [ -n "$CARTE" ] || refus "--mode tout-en-un demande --carte-installation"
+            # WinPE se contente du reseau d'OSIRIS ; c'est Windows installe qui a
+            # besoin de sortir (domaine, mises a jour) et de resoudre le domaine.
+            [[ "$PASSERELLE" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+                || refus "--mode tout-en-un demande --passerelle <ip> : le routeur du reseau d'installation"
+            [ -n "$DNS" ] || refus "--mode tout-en-un demande --dns <ip,ip> : les DNS du domaine, que les PC utiliseront" ;;
         *) refus "--mode attend manager-seul ou tout-en-un" ;;
     esac
 }
@@ -111,7 +120,7 @@ compte_de_service() {
 fichier_env() {
     local env="$DEPOT/backend/.env"
     if [ -f "$env" ]; then
-        echo "$env existe deja : conserve tel quel (il porte la cle de chiffrement)"
+        echo "$env existe deja : conserve, secrets compris (il porte la cle de chiffrement)"
         return
     fi
     local pw_base pw_admin fernet jwt
@@ -274,13 +283,22 @@ bind-interfaces
 log-dhcp
 dhcp-authoritative
 dhcp-range=$plage,255.255.255.0,2h
-${DNS:+dhcp-option=6,$DNS}
+dhcp-option=3,$PASSERELLE
+dhcp-option=6,$DNS
 dhcp-match=set:is_ipxe,175
 dhcp-boot=tag:!is_ipxe,ipxe.efi,$ADRESSE_PC
 dhcp-boot=tag:is_ipxe,http://$ADRESSE_PC/boot
 enable-tftp
 tftp-root=/srv/tftp
 EOF
+    # Les routes des tunnels VPN (option 121) repetent la route par defaut :
+    # l'API doit connaitre la meme passerelle. Seule cette ligne du .env change.
+    local env="$DEPOT/backend/.env"
+    if grep -q '^OSIRIS_LAN_GATEWAY=' "$env"; then
+        sed -i "s|^OSIRIS_LAN_GATEWAY=.*|OSIRIS_LAN_GATEWAY=$PASSERELLE|" "$env"
+    else
+        echo "OSIRIS_LAN_GATEWAY=$PASSERELLE" >> "$env"
+    fi
     systemctl enable dnsmasq >/dev/null 2>&1
     systemctl restart dnsmasq
     [ -f /etc/samba/smb.conf ] && [ ! -f /etc/samba/smb.conf.avant-osiris ] \

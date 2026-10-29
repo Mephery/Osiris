@@ -13,10 +13,12 @@ binaires de démarrage réseau introuvables). Le script fige ce qui marche.
 | `manager-seul` (défaut) | plusieurs sites, chacun avec un **cache** (`deploy/cache`) | interface, API, base, et les fichiers que les caches recopient la nuit. Pas de DHCP : ce sont les caches qui accueillent les PC. |
 | `tout-en-un` | un seul site, PC sur le même réseau qu'OSIRIS | tout ce qui précède, plus le DHCP, le TFTP et le partage des images sur la carte d'installation |
 
-État des essais (28/10/2026) : `manager-seul` installé sur une VM Debian 12
-vierge, relancé, contrôlé, interface et connexion vérifiées. `tout-en-un` est
-écrit sur le modèle du cache de site (même garde-fou DHCP) mais **n'a pas encore
-été rejoué** sur une machine neuve.
+État des essais : `manager-seul` installé sur une VM Debian 12 vierge (28/10/2026),
+relancé, contrôlé, interface et connexion vérifiées. `tout-en-un` installé sur une
+VM Debian 12 vierge à deux cartes (29/10/2026) : un PC de test y a reçu son
+adresse, sa passerelle et ses DNS, iPXE en TFTP et le script de démarrage ; le
+partage `windows` refuse l'écriture, `captures` l'accepte. Un déploiement complet
+dans ce mode reste à faire (il faut une ISO Windows sur le serveur).
 
 ## Installation
 
@@ -36,9 +38,12 @@ sudo /opt/osiris/deploy/manager/installer-manager.sh installer \
 - `--reseaux-admin 10.0.0.0/8,…` : réseaux autorisés sur l'interface. Par défaut,
   les plages privées. Ailleurs, l'interface répond 403 **en affichant l'adresse
   vue**, pour savoir quoi ajouter.
-- `tout-en-un` : `--mode tout-en-un --carte-installation <if> --dns <DNS du domaine>`.
-  La carte doit déjà porter l'adresse des PC. Le script refuse s'il trouve un
-  autre serveur DHCP sur cette carte.
+- `tout-en-un` : `--mode tout-en-un --carte-installation <if> --passerelle <routeur>
+  --dns <DNS du domaine>`. La carte doit déjà porter l'adresse des PC. Le script
+  refuse s'il trouve un autre serveur DHCP sur cette carte. La passerelle et les
+  DNS sont obligatoires : WinPE s'en passe, mais sans eux, Windows installé ne
+  joint ni le domaine ni Windows Update, et l'échec n'apparaît qu'au premier
+  démarrage.
 
 Le mot de passe du compte administrateur initial est dans
 `/root/osiris-mot-de-passe-initial` : le changer à la première connexion, puis
