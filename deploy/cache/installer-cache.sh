@@ -418,6 +418,16 @@ verifier() {
     if timeout 20 rsync -e "ssh -i $CLE -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOTES_CONNUS" \
             "osiris-cache@$MANAGER::tftp/" >/dev/null 2>&1; then ok "la copie de nuit est autorisee par OSIRIS"
     else pb "OSIRIS refuse la copie (SSH)" "la cle de ce cache est-elle autorisee ? sur OSIRIS : deploy/cache/autoriser-cache.sh '$(cat "$CLE.pub" 2>/dev/null)'"; fi
+    # Le compte rendu de la copie de nuit : un jeton renouvele dans OSIRIS et pas
+    # ici, et l'onglet Sites reste fige sans que rien ne le dise sur le cache.
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        -H "X-Osiris-Site-Jeton: $SITE_JETON" "http://$OSIRIS_IP/sites/rapport" || true)
+    case "$code" in
+        200) ok "OSIRIS reconnait le jeton du site" ;;
+        401|403) pb "OSIRIS refuse le jeton du site" "jeton renouvele dans OSIRIS ? mettre le nouveau dans la ligne SITE_JETON= de $ETC/cache.conf" ;;
+        *) pb "jeton du site non verifiable (reponse $code)" "OSIRIS trop ancien, ou relais en panne (voir la ligne du relais ci-dessus)" ;;
+    esac
 
     etape "Fichiers servis aux PC"
     for f in tftp/ipxe.efi static/wimboot static/winpe/sources/boot.wim windows/curl.exe; do

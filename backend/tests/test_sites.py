@@ -105,6 +105,15 @@ def test_un_ancien_jeton_ne_vaut_plus_apres_renouvellement(client, admin_headers
     assert _rapport(client, nouveau).status_code == 200
 
 
+def test_le_cache_peut_verifier_son_jeton_sans_rien_enregistrer(client, admin_headers, partage):
+    cree = _creer(client, admin_headers)
+    r = client.get("/sites/rapport", headers={main.ENTETE_JETON_SITE: cree["jeton"]})
+    assert r.status_code == 200 and r.json() == {"site": "Paris"}
+    assert client.get("/sites/rapport").status_code == 401
+    assert client.get("/sites/rapport", headers={main.ENTETE_JETON_SITE: "pas-le-bon"}).status_code == 403
+    assert _etat(client, admin_headers)["code"] == "jamais"
+
+
 def test_cache_avec_les_memes_images_est_a_jour(client, admin_headers, partage):
     image = _image(partage, "install.wim")
     jeton = _creer(client, admin_headers)["jeton"]

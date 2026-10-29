@@ -25,6 +25,19 @@ Durée : une journée.
   cartes réseau (un adaptateur USB-Ethernet suffit pour la seconde), 250 Go de
   disque ou plus.
 - **PC à installer** : idéalement un Dell récent, avec Secure Boot réglable.
+
+Un **portable** fait un bon cache de répétition (sa batterie sert d'onduleur), à
+deux conditions : brancher le lien en filaire (pas de Wi-Fi, on mesurerait le
+Wi-Fi) et l'empêcher de se mettre en veille capot fermé, sinon le cache
+disparaît en pleine installation :
+
+```bash
+echo 'HandleLidSwitch=ignore' | sudo tee -a /etc/systemd/logind.conf
+sudo systemctl restart systemd-logind
+```
+
+Le disque doit tenir tout ce que copie le cache : quelques dizaines de Go
+aujourd'hui, et une image qui change occupe un temps deux fois sa place.
 - Un **câble** entre la carte site du cache et le PC (ou un petit switch relié à
   rien d'autre).
 
@@ -138,7 +151,7 @@ Constaté :
 |---|---|---|
 | Modifier une image sur OSIRIS en journée | onglet Sites : « arrivera avec la copie de cette nuit » (pas une alerte) | pas d'alerte rouge |
 | Fenêtre très courte (`--fenetre` sur 5 minutes) avec un gros fichier à copier | arrêt à l'heure, état « Copie inachevée » (orange), reprise au passage suivant | message clair dans l'onglet Sites |
-| Renouveler le jeton du site dans OSIRIS sans mettre à jour le cache | compte rendu refusé | onglet Sites figé sur la dernière copie, puis « en retard » ; `verifier` sur le cache le dit-il ? (à noter) |
+| Renouveler le jeton du site dans OSIRIS sans mettre à jour le cache | compte rendu refusé | onglet Sites figé sur la dernière copie, puis « en retard » ; `verifier` sur le cache : « OSIRIS refuse le jeton du site » |
 
 Constaté :
 
@@ -148,6 +161,8 @@ Constaté :
 2. Sur OSIRIS : `autoriser-cache.sh --retirer osiris-cache-<nom>`.
 3. Dans OSIRIS : retirer le site « Répétition », retirer le PC de test de l'OU de
    test (et de l'AD).
+4. Si le cache est une machine prêtée ou personnelle : la réinstaller. Elle
+   contient les images Windows du parc.
 
 ## Après la journée
 

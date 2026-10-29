@@ -1397,6 +1397,27 @@ def delete_site(site_id: int, current_user: User = Depends(require_admin)):
         session.commit()
 
 
+def _site_du_jeton(session: Session, jeton: Optional[str]) -> Site:
+    if not jeton:
+        raise HTTPException(status_code=401, detail="Jeton de site manquant")
+    site = session.exec(select(Site).where(Site.jeton_empreinte == jetons.empreinte(jeton))).first()
+    if not site or not site.jeton_empreinte:
+        raise HTTPException(status_code=403, detail="Jeton de site inconnu")
+    return site
+
+
+@app.get("/sites/rapport")
+@limiter.limit("30/minute")
+def check_site_token(request: Request, jeton: Optional[str] = Header(None, alias=ENTETE_JETON_SITE)):
+    """Le cache vérifie son jeton sans rien enregistrer (installer-cache.sh verifier).
+
+    Sans ce contrôle, un jeton renouvelé dans OSIRIS mais pas sur le cache ne se
+    voyait qu'à la copie suivante, par un onglet Sites figé.
+    """
+    with Session(engine) as session:
+        return {"site": _site_du_jeton(session, jeton).nom}
+
+
 @app.post("/sites/rapport")
 @limiter.limit("30/minute")
 def report_site_copy(request: Request, data: RapportCopie,
@@ -1406,12 +1427,8 @@ def report_site_copy(request: Request, data: RapportCopie,
     Le jeton seul identifie le site : un nom dans l'URL se devinerait, et un
     faux compte rendu « tout va bien » masquerait un cache en retard.
     """
-    if not jeton:
-        raise HTTPException(status_code=401, detail="Jeton de site manquant")
     with Session(engine) as session:
-        site = session.exec(select(Site).where(Site.jeton_empreinte == jetons.empreinte(jeton))).first()
-        if not site or not site.jeton_empreinte:
-            raise HTTPException(status_code=403, detail="Jeton de site inconnu")
+        site = _site_du_jeton(session, jeton)
         maintenant = datetime.now(timezone.utc)
         site.rapport_le = maintenant
         site.duree_s = max(0, data.duree_s)
