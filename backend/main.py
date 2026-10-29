@@ -4279,6 +4279,13 @@ def get_winpe_script_auto(request: Request, serial: str = "", sysid: str = ""):
                 session.commit()
 
     if mac in _capture_jobs:
+        # Capture déjà faite : la refaire écraserait l'image rangée par une copie
+        # du même disque, en boucle à chaque redémarrage sur WinPE.
+        if _capture_jobs[mac].get("status") == "done":
+            return Response(content=(
+                f"echo [OSIRIS] Capture deja terminee pour {mac} ({_capture_jobs[mac]['wim_name']}).\r\n"
+                "echo [OSIRIS] Pour en refaire une : supprimer la capture dans OSIRIS, puis la reenregistrer.\r\n"
+                "pause\r\nexit /b 0"), media_type="text/plain")
         return _build_capture_script(mac)
     return _build_winpe_script(mac)
 
@@ -4705,16 +4712,28 @@ async def import_machines(request: Request, current_user: User = Depends(require
 # ── Capture d'image golden ─────────────────────────────────────────────────────
 
 @app.post("/capture/register", dependencies=[Depends(require_admin)])
-def register_capture(mac: str, wim_name: str):
-    """Enregistre une MAC en mode capture. Au prochain boot WinPE elle recevra le script de capture."""
+async def register_capture(mac: str, wim_name: str):
+    """Enregistre une MAC en mode capture. Au prochain boot WinPE elle recevra le script de capture.
+
+    Une VM Windows d'OSIRIS ne démarre pas en PXE : c'est OSIRIS qui la renvoie
+    sur son CD WinPE (cf. `_vm_vers_capture`). La réponse porte alors une
+    consigne pour l'opérateur, qui dépend de l'état de la VM.
+    """
     clean_mac = validate_mac(mac)
     wim_name = _nom_de_capture(wim_name)
+    # Le job AVANT de toucher à la VM : une VM qui démarrerait sur WinPE sans
+    # job recevrait le script de DÉPLOIEMENT, et effacerait la machine de référence.
     _capture_jobs[clean_mac] = {
         "mac": clean_mac,
         "wim_name": wim_name,
         "status": "waiting",
         "registered_at": datetime.now(timezone.utc).isoformat(),
     }
+    try:
+        consigne = await _vm_vers_capture(clean_mac)
+    except HTTPException:
+        _capture_jobs.pop(clean_mac, None)
+        raise
     # Passe la machine en pending pour que le boot route la laisse accéder à WinPE
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
@@ -4722,7 +4741,82 @@ def register_capture(mac: str, wim_name: str):
             _open_new_deploy_run(machine)
             session.add(machine)
             session.commit()
-    return {"mac": clean_mac, "wim_name": wim_name, "status": "waiting"}
+    return {"mac": clean_mac, "wim_name": wim_name, "status": "waiting", "consigne": consigne}
+
+
+def _vm_windows_proxmox(mac: str) -> Optional[str]:
+    """Type d'hyperviseur si la machine est une VM Windows connue d'OSIRIS, sinon None."""
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+        if not machine or not machine.proxmox_vm_id or not machine.hypervisor_id:
+            return None
+        if (machine.os or "").lower() != "windows":
+            return None
+        h = session.get(Hypervisor, machine.hypervisor_id)
+        return h.type if h else None
+
+
+async def _vm_vers_capture(mac: str) -> Optional[str]:
+    """Met une VM Windows en position de capture : CD WinPE d'abord.
+
+    Sans cela, la VM redémarrait sur son disque, la machine de référence
+    sysprepée faisait son OOBE, et la capture n'avait jamais lieu.
+
+    - VM éteinte (cas normal : `sysprep /shutdown`) → OSIRIS la démarre sur WinPE.
+    - VM allumée → l'ordre est seulement ÉCRIT. Pas de cycle d'alimentation comme
+      au redéploiement : la VM tourne Windows, peut-être pas encore sysprepé, et
+      la couper capturerait une image inutilisable. Proxmox appliquera l'ordre au
+      prochain démarrage à froid, celui qui suit `sysprep /shutdown`.
+
+    Contrairement à `_orienter_boot_vm_windows`, ce n'est pas du best-effort :
+    l'administrateur est là, et un refus doit lui être montré.
+    """
+    type_hv = _vm_windows_proxmox(mac)
+    if type_hv is None:
+        return None
+    if type_hv != "proxmox":
+        return ("VM vSphere : OSIRIS ne sait pas encore la démarrer sur WinPE. Monter "
+                "l'ISO WinPE d'OSIRIS sur son lecteur CD et démarrer dessus.")
+    h, vm_id, node = await _vm_verifiee(mac, "démarrage sur WinPE pour capture")
+    base = f"/api2/json/nodes/{node}/qemu/{vm_id}"
+    config = await _proxmox_get(h, f"{base}/config")
+    if "cdrom" not in str(config.get("ide2", "")):
+        raise HTTPException(status_code=409, detail=(
+            f"La VM {vm_id} n'a plus de lecteur CD (ide2) : elle ne peut pas démarrer "
+            f"sur WinPE. Lui remettre l'ISO WinPE d'OSIRIS sur ide2 dans Proxmox, "
+            f"puis réenregistrer la capture."))
+    await _proxmox_put(h, f"{base}/config", {"boot": "order=ide2;sata0"})
+    statut = (await _proxmox_get(h, f"{base}/status/current")).get("status")
+    _hv_log.info("VM %s (%s) : ordre de démarrage → CD WinPE pour capture (%s)", vm_id, mac, statut)
+    if statut == "stopped":
+        await _proxmox_post(h, f"{base}/status/start")
+        return "VM démarrée sur WinPE : la capture commence (suivre son journal)."
+    return ("La VM est allumée : OSIRIS ne la coupe pas. Lancer sysprep (étape 2) : "
+            "elle s'éteindra, puis la démarrer depuis OSIRIS ou Proxmox. Elle "
+            "démarrera sur WinPE et la capture commencera.")
+
+
+async def _vm_apres_capture(mac: str) -> None:
+    """Capture réussie : disque d'abord, et VM ÉTEINTE.
+
+    Sans cela, le `wpeutil reboot` final ramenait la VM sur le CD, et WinPE
+    recapturait le même disque en boucle. Éteinte plutôt que redémarrée : sur
+    son disque, la machine de référence sysprepée ferait son OOBE et ne serait
+    plus capturable telle quelle ; la rallumer est un choix de l'administrateur.
+
+    Best-effort, comme `_orienter_boot_vm_windows` : le compte rendu de capture
+    ne doit jamais échouer à cause de l'hyperviseur.
+    """
+    try:
+        if _vm_windows_proxmox(mac) != "proxmox":
+            return
+        h, vm_id, node = await _vm_verifiee(mac, "démarrage sur le disque après capture")
+        base = f"/api2/json/nodes/{node}/qemu/{vm_id}"
+        await _proxmox_put(h, f"{base}/config", {"boot": "order=sata0"})
+        await _proxmox_post(h, f"{base}/status/stop")
+        _hv_log.info("VM %s (%s) : capture finie, VM éteinte, démarrage sur le disque", vm_id, mac)
+    except Exception as e:
+        _hv_log.warning("VM de %s non remise sur son disque après capture : %s", mac, e)
 
 
 # Images que DISM et WinPE lisent sous ce nom exact : une capture qui les écrase
@@ -4765,7 +4859,8 @@ def list_captures():
 
 
 @app.post("/capture/{mac}/done")
-async def capture_done(mac: str, success: bool = True, jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
+async def capture_done(mac: str, background_tasks: BackgroundTasks, success: bool = True,
+                       jeton: Optional[str] = Header(None, alias=jetons.ENTETE)):
     """Appelé par le script WinPE à la fin de la capture."""
     clean_mac = validate_mac(mac)
     _controler_jeton_mac(clean_mac, jeton, "capture-done")
@@ -4784,6 +4879,10 @@ async def capture_done(mac: str, success: bool = True, jeton: Optional[str] = He
         job["finished_at"] = datetime.now(timezone.utc).isoformat()
         if erreur:
             job["error"] = erreur
+        # Échec : la VM reste sur WinPE, dont l'écran dit quoi faire (capture
+        # manuelle possible, cf. /capture/{mac}/ranger).
+        if success:
+            background_tasks.add_task(_vm_apres_capture, clean_mac)
     await manager.broadcast({"type": "capture_done", "mac": clean_mac, "success": success})
     return {"ok": True}
 

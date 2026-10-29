@@ -59,11 +59,13 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
     if (!captureMac || !captureWim) return
     fetch(`${API_URL}/capture/register?mac=${encodeURIComponent(captureMac)}&wim_name=${encodeURIComponent(captureWim)}`,
       { method: 'POST', headers: authHeader(token) })
-      .then(r => lireReponse(r, "Enregistrement en mode capture refusé"))
-      .then(() => {
+      .then(r => lireReponse<{ consigne?: string | null }>(r, "Enregistrement en mode capture refusé"))
+      .then(r => {
         fetchCaptures()
         setCaptureStep(4)
-        toast.success('Machine enregistrée en mode capture — démarrez-la en PXE !')
+        // Une VM n'a pas de PXE : OSIRIS l'oriente lui-même et dit quoi faire.
+        toast.success(r?.consigne ?? 'Machine enregistrée en mode capture — démarrez-la en PXE !',
+          r?.consigne ? { duration: 15000 } : undefined)
       })
       .catch((e: Error) => toast.error(e.message))
   }
@@ -117,7 +119,7 @@ export function CaptureTab({ token, machines, refreshSignal }: { token: string; 
           { n: 1, titre: 'Préparer la machine de référence', desc: 'Déployez un Windows via OSIRIS (ou installez-le manuellement), installez toutes vos applications (TeamViewer Host, antivirus, Office…). Ne joignez pas de domaine.' },
           { n: 2, titre: 'Lancer Sysprep', desc: 'Si des applications ont été installées via winget (déploiement OSIRIS ou manuel), supprimez d\'abord le paquet source winget - sinon Sysprep échoue avec "installed for a user, but not provisioned for all users". Puis, dans une invite de commandes en administrateur, lancez :', cmd: 'Get-AppxPackage -Name "Microsoft.Winget.Source*" -AllUsers | Remove-AppxPackage -AllUsers\nC:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown', note: 'La machine s\'éteint toute seule. Ne la redémarrez pas avant la capture !' },
           { n: 3, titre: 'Enregistrer la machine dans OSIRIS', desc: 'Renseignez l\'adresse MAC de la machine de référence et le nom du fichier WIM à créer, puis cliquez sur Enregistrer.' },
-          { n: 4, titre: 'Démarrer la machine en PXE', desc: 'Démarrez la machine de référence sur le réseau (PXE). OSIRIS détecte automatiquement qu\'elle est en mode capture et lance le script. Attendez la fin (15–40 min).' },
+          { n: 4, titre: 'Démarrer la machine en PXE', desc: 'PC : démarrez la machine de référence sur le réseau (PXE). VM créée par OSIRIS : éteinte par Sysprep, OSIRIS la démarre lui-même sur WinPE, puis l\'éteint sur son disque une fois la capture finie. OSIRIS détecte le mode capture et lance le script. Attendez la fin (15–40 min).' },
         ].map(step => (
           <div key={step.n} className={`flex gap-4 transition-opacity ${captureStep >= step.n ? '' : 'opacity-40'}`}>
             <button
