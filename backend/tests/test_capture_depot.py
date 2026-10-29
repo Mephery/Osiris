@@ -90,3 +90,39 @@ def test_ranger_a_la_main_apres_une_capture_manuelle(client, admin_headers, part
 
 def test_ranger_est_reserve_aux_admins(client, partages):
     assert client.post(f"/capture/{MAC}/ranger").status_code in (401, 403)
+
+
+# ── Une capture n'écrase jamais une image existante ───────────────────────────
+
+def test_un_nom_deja_pris_est_refuse_avec_un_nom_libre_propose(client, admin_headers, partages):
+    _, partage = partages
+    (partage / "Golden_Image.wim").write_bytes(b"ancienne")
+    (partage / "golden_image_v2.wim").write_bytes(b"autre")
+    r = _enregistrer(client, admin_headers, "GOLDEN_IMAGE")
+    assert r.status_code == 409
+    assert "golden_image_v3.wim" in r.json()["detail"].lower()
+    assert MAC not in main._capture_jobs
+
+
+def test_un_nom_promis_a_une_autre_capture_est_refuse(client, admin_headers, partages):
+    assert _enregistrer(client, admin_headers, "Neuve").status_code == 200
+    r = client.post("/capture/register", params={"mac": "aabbccddee11", "wim_name": "neuve"},
+                    headers=admin_headers)
+    assert r.status_code == 409
+
+
+def test_reenregistrer_la_meme_machine_garde_son_nom(client, admin_headers, partages):
+    assert _enregistrer(client, admin_headers, "Neuve").status_code == 200
+    assert _enregistrer(client, admin_headers, "Neuve").status_code == 200
+
+
+def test_une_image_apparue_pendant_la_capture_n_est_pas_remplacee(client, admin_headers, partages):
+    depot, partage = partages
+    _enregistrer(client, admin_headers, "Neuve")
+    main._build_capture_script(MAC)
+    (depot / "Neuve.wim").write_bytes(b"capturee")
+    (partage / "Neuve.wim").write_bytes(b"arrivee entre-temps")
+    client.post(f"/capture/{MAC}/done", params={"success": "true"})
+    assert (partage / "Neuve.wim").read_bytes() == b"arrivee entre-temps"
+    assert (depot / "Neuve.wim").exists()
+    assert main._capture_jobs[MAC]["status"] == "failed"

@@ -4721,6 +4721,11 @@ async def register_capture(mac: str, wim_name: str):
     """
     clean_mac = validate_mac(mac)
     wim_name = _nom_de_capture(wim_name)
+    if _nom_de_capture_pris(wim_name, clean_mac):
+        raise HTTPException(status_code=409, detail=(
+            f"« {wim_name} » existe déjà : la capture l'écraserait, et les profils qui "
+            f"l'utilisent déploieraient la nouvelle image sans que personne l'ait "
+            f"validée. Choisir un autre nom, par exemple « {_nom_de_capture_libre(wim_name, clean_mac)} »."))
     # Le job AVANT de toucher à la VM : une VM qui démarrerait sur WinPE sans
     # job recevrait le script de DÉPLOIEMENT, et effacerait la machine de référence.
     _capture_jobs[clean_mac] = {
@@ -4841,6 +4846,29 @@ def _nom_de_capture(wim_name: str) -> str:
     return wim_name
 
 
+def _nom_de_capture_pris(wim_name: str, mac: str) -> bool:
+    """Déjà une image de ce nom dans le partage, ou promise à une autre capture.
+
+    Sans casse : Windows lit le partage sans distinguer majuscules et minuscules,
+    `golden.wim` et `Golden.wim` y désigneraient le même fichier."""
+    nom = wim_name.lower()
+    try:
+        if any(f.lower() == nom for f in os.listdir(WIN_SHARE_PATH)):
+            return True
+    except OSError:
+        pass
+    return any(j["wim_name"].lower() == nom for m, j in _capture_jobs.items() if m != mac)
+
+
+def _nom_de_capture_libre(wim_name: str, mac: str) -> str:
+    base = re.sub(r"_v\d+$", "", wim_name[:-4], flags=re.IGNORECASE)
+    for n in range(2, 100):
+        candidat = f"{base}_v{n}.wim"
+        if not _nom_de_capture_pris(candidat, mac):
+            return candidat
+    return f"{base}_{datetime.now():%Y%m%d}.wim"
+
+
 def _ranger_capture(wim_name: str) -> None:
     """Déplace l'image capturée du dépôt vers le partage des déploiements.
 
@@ -4849,6 +4877,11 @@ def _ranger_capture(wim_name: str) -> None:
     source = os.path.join(CAPTURE_SHARE_PATH, wim_name)
     if not os.path.isfile(source):
         raise RuntimeError(f"{wim_name} introuvable dans le dépôt des captures")
+    # Le nom était libre à l'enregistrement ; on ne remplace pas pour autant une
+    # image arrivée entre-temps. L'image capturée reste dans le dépôt.
+    if any(f.lower() == wim_name.lower() for f in os.listdir(WIN_SHARE_PATH)):
+        raise RuntimeError(f"une image {wim_name} est apparue dans le partage pendant la "
+                           f"capture : rien n'a été remplacé, la capture reste dans le dépôt")
     os.replace(source, os.path.join(WIN_SHARE_PATH, wim_name))
 
 
