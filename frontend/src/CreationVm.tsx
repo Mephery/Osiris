@@ -68,7 +68,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
   const [reseauxEnCours, setReseauxEnCours]     = useState(false)
   // Présélection : quelqu'un qui découvre l'outil doit trouver un bon choix déjà fait
   const [vmForm, setVmForm]             = useState(() => avecProfil(
-    { ...FORMULAIRE_VIDE, organization_id: selectedOrg ?? '' as number | '' },
+    { ...FORMULAIRE_VIDE, organization_id: selectedOrg ?? '' as number | '', supervised: selectedOrg != null },
     profilsPourVm(profiles, FORMULAIRE_VIDE.os).utilisables[0]))
   const [vmCreating, setVmCreating]     = useState(false)
   // Le formulaire rempli passe d'abord par un récapitulatif : créer une VM
@@ -357,10 +357,17 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
               en silence le filtre « Client » du haut de page. Une VM creee filtre sur
               « Tous les clients » naissait sans organisation, donc sans agent Zabbix,
               sans que rien ne le signale. Vecu le 2026-08-05. */}
-          <select value={vmForm.organization_id} onChange={e => setVmForm(f => ({...f, organization_id: e.target.value === '' ? '' : Number(e.target.value)}))} className="osiris-input text-xs col-span-2">
-            <option value="">Aucune organisation — la VM ne sera pas supervisée</option>
+          <select value={vmForm.organization_id} onChange={e => setVmForm(f => ({...f, organization_id: e.target.value === '' ? '' : Number(e.target.value), supervised: e.target.value !== ''}))} className="osiris-input text-xs col-span-2">
+            <option value="">Aucune organisation</option>
             {organizations.map(o => <option key={o.id} value={o.id}>Organisation : {o.name}</option>)}
           </select>
+          {/* Le collecteur vient de l'hyperviseur : sans cette case, une VM de test
+              sans organisation naissait supervisée, et Zabbix alertait sur une
+              machine que personne ne suit. Vécu le 2026-10-29. */}
+          <label className="col-span-2 flex items-center gap-2 text-xs text-slate-400">
+            <input type="checkbox" checked={vmForm.supervised} onChange={e => setVmForm(f => ({...f, supervised: e.target.checked}))} />
+            Superviser cette VM dans Zabbix (alertes si elle ne répond plus)
+          </label>
           <select value={vmForm.os} onChange={e => setVmForm(f => avecProfil({
               ...f, os: e.target.value, boot_mode: modeParDefaut(typeHv, e.target.value), iso: '',
               template_id: gabaritParDefaut(vmTemplates, modeParDefaut(typeHv, e.target.value), e.target.value),

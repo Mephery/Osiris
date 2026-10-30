@@ -6503,6 +6503,16 @@ async def get_node_templates(hv_id: int, node: str, _: User = Depends(require_ad
     return await _provider(h).list_templates(h, node)
 
 
+def _vm_supervisee(body: "VmCreateBody") -> bool:
+    """Supervisée si on le demande ; sinon, seulement si elle a une organisation.
+
+    Une VM de test, sans organisation, ne doit pas naître supervisée : le collecteur
+    vient de l'hyperviseur, donc il existe toujours, et l'hôte créé dans Zabbix
+    sonnait l'alerte sur une machine que personne ne suit.
+    """
+    return body.supervised if body.supervised is not None else bool(body.organization_id)
+
+
 class VmCreateBody(SQLModel):
     # Identité OSIRIS
     hostname: str
@@ -6513,6 +6523,8 @@ class VmCreateBody(SQLModel):
     win_ostype: str = "win11"
     profile_id: Optional[int] = None
     organization_id: Optional[int] = None
+    # None = décidé par l'organisation (cf. `_vm_supervisee`).
+    supervised: Optional[bool] = None
     ou: str = ""
     # Ressources VM
     node: str                        # noeud Proxmox cible
@@ -6756,7 +6768,8 @@ def _render_cloud_init_user_data(h: Hypervisor, body, mac_plain: str, jeton: str
         org = (session.get(Organization, body.organization_id)
                if body.organization_id else None)
         zabbix = _zabbix_context(
-            Machine(mac=mac_plain, hostname=body.hostname, os=body.os),
+            Machine(mac=mac_plain, hostname=body.hostname, os=body.os,
+                    supervised=_vm_supervisee(body)),
             org, h,
         )
     firstboot = _firstboot_linux_content(
@@ -7035,6 +7048,7 @@ async def create_vm(hv_id: int, body: VmCreateBody, current_user: User = Depends
                 status="pending",
                 profile_id=body.profile_id,
                 organization_id=body.organization_id,
+                supervised=_vm_supervisee(body),
                 hypervisor_id=hv_id,
                 proxmox_vm_id=vm_id,
                 proxmox_node=body.node,

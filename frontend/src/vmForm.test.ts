@@ -375,10 +375,13 @@ describe('recapVm', () => {
     expect(texte(buildCreateVmPayload(FORMULAIRE_VIDE, 'n1'))).toMatch(/DHCP/)
   })
 
-  it('signale une VM sans organisation, donc sans supervision', () => {
-    const l = recapVm(buildCreateVmPayload(FORMULAIRE_VIDE, 'n1'), ctx)[0].lignes
-      .find(l => l.champs.includes('organization_id'))
-    expect(l?.attention).toBe(true)
+  it('signale une VM non supervisée, et ne le déduit pas de son organisation', () => {
+    const ligne = (f: typeof FORMULAIRE_VIDE) => recapVm(buildCreateVmPayload(f, 'n1'), ctx)[0].lignes
+      .find(l => l.champs.includes('supervised'))
+    expect(ligne(FORMULAIRE_VIDE)?.attention).toBe(true)
+    const cochee = ligne({ ...FORMULAIRE_VIDE, supervised: true })
+    expect(cochee?.attention).toBe(false)
+    expect(cochee?.texte).toMatch(/Aucune organisation.*supervisée dans Zabbix/)
   })
 
   it('nomme le gabarit et le réseau plutôt que leurs identifiants', () => {

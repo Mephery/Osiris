@@ -29,6 +29,7 @@ class _Body:
     ou = ""
     profile_id = None
     organization_id = None
+    supervised = True
     node = "node1"
     storage = "ds"
     bridge = "vmbr0"

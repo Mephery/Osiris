@@ -6,10 +6,11 @@ On mocke les appels Proxmox pour capturer le payload `qemu` envoyé et vérifier
 que les VM Windows sortent en OVMF/SATA/e1000 (pilotes inbox, aucun virtio) et
 que les VM Linux gardent le matériel virtio historique.
 """
-from sqlmodel import Session
+import pytest
+from sqlmodel import Session, select
 
 import main
-from models import engine, Hypervisor
+from models import engine, Hypervisor, Machine, Organization
 
 
 def _make_hypervisor() -> int:
@@ -544,3 +545,29 @@ def test_windows_attend_la_creation_avant_de_demarrer(client, admin_headers,
     assert resp.status_code == 201, resp.text
     i = ordre.index("creation")
     assert ordre[i + 1] == "attente" and "demarrage" in ordre[i + 2:], ordre
+
+
+@pytest.mark.parametrize("corps, attendu", [
+    ({}, False),                                     # test sans organisation : pas d'alerte
+    ({"organization_id": "org"}, True),              # le cas normal
+    ({"supervised": True}, True),                    # demandé explicitement
+    ({"organization_id": "org", "supervised": False}, False),
+])
+def test_supervision_d_une_vm_a_la_creation(client, admin_headers, monkeypatch, tmp_path, corps, attendu):
+    hv_id = _make_hypervisor()
+    _iso_bidon(tmp_path, monkeypatch)
+    _patch_proxmox(monkeypatch, {})
+    if "organization_id" in corps:
+        with Session(engine) as s:
+            org = Organization(name="Acme", slug="acme")
+            s.add(org)
+            s.commit()
+            corps = {**corps, "organization_id": org.id}
+    resp = client.post(f"/hypervisors/{hv_id}/create-vm", headers=admin_headers, json={
+        "hostname": "VM-SUP", "client": "Acme", "os": "windows", "node": "pve",
+        "storage": "local-lvm", "bridge": "vmbr0", "vcpus": 2, "ram_mb": 2048,
+        "disk_gb": 40, "boot_mode": "pxe", **corps,
+    })
+    assert resp.status_code == 201, resp.text
+    with Session(engine) as s:
+        assert s.exec(select(Machine).where(Machine.hostname == "VM-SUP")).one().supervised is attendu
