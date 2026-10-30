@@ -198,3 +198,27 @@ def test_reenregistrer_apres_un_echec_garde_le_statut_d_origine(client, admin_he
     _enregistrer(client, admin_headers)
     _enregistrer(client, admin_headers)
     assert main._capture_jobs[MAC]["statut_avant"] == "deployed"
+
+
+# ── Fin de déploiement : ne pas couper WinPE avant qu'il ait écrit ───────────
+
+@pytest.mark.parametrize("vers_winpe, attente", [(False, True), (True, False)])
+def test_la_vm_n_est_coupee_qu_apres_le_redemarrage_de_winpe(hv, monkeypatch, vers_winpe, attente):
+    """Coupée à l'annonce de « deployed », elle perdait unattend.xml et le firstboot,
+    encore en cache d'écriture : OOBE manuel, et aucune configuration appliquée."""
+    etat, _ = hv
+    pauses = []
+
+    async def pause(s):
+        pauses.append(s)
+
+    async def get(h, chemin):
+        return [{"key": "boot", "pending": "order=sata0"}] if chemin.endswith("/pending") else {}
+
+    monkeypatch.setattr(main.asyncio, "sleep", pause)
+    monkeypatch.setattr(main, "_proxmox_get", get)
+    main.asyncio.run(main._orienter_boot_vm_windows(MAC, vers_winpe))
+    assert [e[1] for e in etat["ecrit"]] == ["config", "stop", "start"]
+    assert (main.DELAI_FIN_WINPE_S in pauses) is attente
+    if attente:
+        assert main.DELAI_FIN_WINPE_S > 11, "doit dépasser l'attente de winpe-deploy.cmd"

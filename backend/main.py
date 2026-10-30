@@ -3756,6 +3756,11 @@ def get_audit_logs(
         ]
 
 
+# WinPE attend 11 s après son statut final puis redémarre ; large marge pour ce
+# redémarrage, qui est ce qui écrit réellement ses fichiers sur le disque.
+DELAI_FIN_WINPE_S = 30
+
+
 async def _orienter_boot_vm_windows(mac: str, vers_winpe: bool) -> None:
     """
     Fait pointer le démarrage d'une VM Windows vers le CD WinPE ou vers son disque.
@@ -3821,9 +3826,15 @@ async def _orienter_boot_vm_windows(mac: str, vers_winpe: bool) -> None:
             return
 
         # Arrêt franc et non `reboot` : seul un nouveau processus QEMU relit la
-        # configuration. La VM tourne WinPE, qui a déjà tout écrit (WIM appliqué,
-        # bcdboot fait, fiche à jour) et ne fait plus qu'attendre — il n'y a rien
-        # à perdre à la couper.
+        # configuration. Mais pas tout de suite : à l'annonce de « deployed », les
+        # derniers fichiers de WinPE (unattend.xml, firstboot, osiris.cfg) sont encore
+        # dans le cache d'écriture, et couper là les fait disparaître du disque. La
+        # VM finissait alors en OOBE manuel, sans firstboot : ni jonction, ni IPv6
+        # coupé, ni jeton. Constaté le 2026-10-30 sur le disque d'une VM capturée.
+        # On laisse passer le `wpeutil reboot` de WinPE, qui vide ce cache. La VM
+        # repart sur le CD, sans risque : la fiche est `deployed`, déploiement refusé.
+        if not vers_winpe:
+            await asyncio.sleep(DELAI_FIN_WINPE_S)
         _hv_log.info("VM %s : ordre en attente, cycle d'alimentation pour l'appliquer", vm_id)
         try:
             await _proxmox_post(h, f"{base}/status/stop")
