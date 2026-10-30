@@ -3836,15 +3836,30 @@ async def _orienter_boot_vm_windows(mac: str, vers_winpe: bool) -> None:
         if not vers_winpe:
             await asyncio.sleep(DELAI_FIN_WINPE_S)
         _hv_log.info("VM %s : ordre en attente, cycle d'alimentation pour l'appliquer", vm_id)
+        # L'arrêt et le démarrage sont des tâches : le POST rend la main tout de suite,
+        # et un démarrage lancé pendant l'arrêt est refusé (« can't lock file »), VM
+        # laissée éteinte. Un arrêt a pris 71 s le 2026-10-30 : aucun délai fixe ne va.
         try:
-            await _proxmox_post(h, f"{base}/status/stop")
+            tache = await _proxmox_post(h, f"{base}/status/stop")
+            if isinstance(tache, str) and tache.startswith("UPID:"):
+                await _proxmox_wait_task(h, node, tache, max_wait=180)
         except HTTPException:
             pass          # déjà éteinte : il reste à l'allumer
-        await asyncio.sleep(8)
-        await _proxmox_post(h, f"{base}/status/start")
+        tache = await _proxmox_post(h, f"{base}/status/start")
+        if isinstance(tache, str) and tache.startswith("UPID:"):
+            await _proxmox_wait_task(h, node, tache)
         _hv_log.info("VM %s : redémarrée à froid, ordre de démarrage appliqué", vm_id)
     except Exception as e:
         _hv_log.warning("Ordre de démarrage non appliqué sur la VM de %s : %s", mac, e)
+        # Une VM restée éteinte ne se plaindra jamais : c'est à OSIRIS de le dire.
+        try:
+            with Session(engine) as session:
+                _append_log_line(session, mac, _current_run(session, mac), _stamp(
+                    "VM non redemarree par OSIRIS : verifier son etat et son ordre de "
+                    f"demarrage dans l'hyperviseur ({str(getattr(e, 'detail', e))[:150]})"))
+                session.commit()
+        except Exception:
+            _hv_log.exception("Panne de redémarrage non journalisée (%s)", mac)
 
 
 @app.post("/machines/{mac}/status")

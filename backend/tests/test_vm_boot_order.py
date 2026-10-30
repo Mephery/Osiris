@@ -16,7 +16,7 @@ le disque installé gardant la main.
 import asyncio
 
 import main
-from models import Hypervisor, Machine, engine
+from models import DeployLogLine, Hypervisor, Machine, engine
 from sqlmodel import Session, select
 
 from .conftest import UUID_VM_TEST, config_vm_conforme, config_vm_etrangere
@@ -193,3 +193,46 @@ def test_un_hyperviseur_injoignable_ne_fait_pas_echouer_le_rapport(client, test_
     with Session(engine) as session:
         m = session.exec(select(Machine).where(Machine.mac == MAC)).first()
     assert m.status == "deployed"
+
+
+def test_le_demarrage_attend_la_fin_de_l_arret(test_machine, monkeypatch):
+    """Lancé pendant l'arrêt, le démarrage est refusé et la VM reste éteinte."""
+    _fait_de_la_machine_une_vm()
+    vu = _capture_put(monkeypatch, boot_en_attente=True)
+    ordre = []
+
+    async def fake_post(h, path, data=None):
+        ordre.append(path.rsplit("/", 1)[-1])
+        return f"UPID:{ordre[-1]}"
+
+    async def fake_wait(h, node, upid, max_wait=120):
+        ordre.append(f"fin {upid.split(':')[1]}")
+
+    monkeypatch.setattr(main, "_proxmox_post", fake_post)
+    monkeypatch.setattr(main, "_proxmox_wait_task", fake_wait)
+
+    asyncio.run(main._orienter_boot_vm_windows(MAC, False))
+
+    assert ordre == ["stop", "fin stop", "start", "fin start"]
+
+
+def test_un_redemarrage_refuse_se_lit_dans_le_journal(test_machine, monkeypatch):
+    """Démarrage refusé : la VM éteinte ne peut rien dire, OSIRIS doit le signaler."""
+    _fait_de_la_machine_une_vm()
+    _capture_put(monkeypatch, boot_en_attente=True)
+
+    async def fake_post(h, path, data=None):
+        return f"UPID:{path.rsplit('/', 1)[-1]}"
+
+    async def fake_wait(h, node, upid, max_wait=120):
+        if upid.endswith("start"):
+            raise main.HTTPException(status_code=502, detail="Tâche Proxmox échouée : can't lock file")
+
+    monkeypatch.setattr(main, "_proxmox_post", fake_post)
+    monkeypatch.setattr(main, "_proxmox_wait_task", fake_wait)
+
+    asyncio.run(main._orienter_boot_vm_windows(MAC, False))
+
+    with Session(engine) as session:
+        lignes = session.exec(select(DeployLogLine).where(DeployLogLine.mac == MAC)).all()
+    assert any("non redemarree" in l.line and "can't lock" in l.line for l in lignes)
