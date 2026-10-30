@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
 import { disqueData } from './disquesForm'
-import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, gabaritParDefaut, FORMULAIRE_VIDE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut, adressesPrises, occupantDe, plagesAdresses, type ChargeVm, type ContexteRecap } from './vmForm'
+import { buildCreateVmPayload, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree, adressageFixeImpossible, profilParDefaut, profilsPourVm, avecProfil, modeParDefaut, champsManquants, gabaritsPourMode, gabaritParDefaut, FORMULAIRE_VIDE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut, adressesPrises, occupantDe, plagesAdresses, trierNoeuds, type ChargeVm, type ContexteRecap } from './vmForm'
 
 describe('dansLeReseau', () => {
   it('accepte une adresse dans le même /24', () => {
@@ -513,5 +513,12 @@ describe('plagesAdresses', () => {
   it("ne confond pas l'ordre des chaînes et celui des nombres", () => {
     const desordre = ['192.0.2.100', '192.0.2.9', '192.0.2.10'].map(ip => ({ ip, vm: '' }))
     expect(plagesAdresses(desordre)[0].plages.map(p => p.texte)).toEqual(['9–10', '100'])
+  })
+})
+
+describe('trierNoeuds', () => {
+  it('range les nœuds par nom, fitpmx10 après fitpmx2', () => {
+    const noeuds = ['fitpmx3', 'fitpmx10', 'fitpmx1', 'fitpmx2'].map(node => ({ node }))
+    expect(trierNoeuds(noeuds).map(n => n.node)).toEqual(['fitpmx1', 'fitpmx2', 'fitpmx3', 'fitpmx10'])
   })
 })

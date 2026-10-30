@@ -7,7 +7,7 @@ import { authHeader } from './types'
 import { buildCreateVmPayload, champsManquants, completerPrefixeCidr, dansLeReseau, imageDuProfilIgnoree,
          adressageFixeImpossible, avecProfil, gabaritsPourMode, gabaritParDefaut, modeParDefaut, profilsPourVm,
          FORMULAIRE_VIDE, LIBELLE_MODE, recapVm, etapesVm, reseauxPourVm, stockageParDefaut,
-         adressesPrises, occupantDe, plagesAdresses, type UsageReseau } from './vmForm'
+         adressesPrises, occupantDe, plagesAdresses, trierNoeuds, type UsageReseau } from './vmForm'
 import { ResumeProfil } from './ResumeProfil'
 import { ChampEnCours, Spinner } from './Skeleton'
 import { IcoX } from './icons'
@@ -135,7 +135,7 @@ export function CreationVm({ token, hypervisors, profiles, organizations, select
     fetch(`${API_URL}/hypervisors/${hvId}/nodes`, { headers: authHeader(token) })
       .then(r => r.json()).then((nodes: ProxmoxNode[]) => {
         if (!toujours(hvId)) return
-        setVmNodes(nodes)
+        setVmNodes(trierNoeuds(nodes))
         if (nodes.length === 1) {
           setVmNode(nodes[0].node)
           chargerRessources(hvId, nodes[0].node)

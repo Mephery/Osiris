@@ -437,3 +437,9 @@ export const plagesAdresses = (prises: { ip: string; vm: string }[]):
     return { prefixe, plages }
   })
 }
+
+// Proxmox rend ses nœuds dans un ordre qui change d'un appel à l'autre : sans tri, le
+// premier de la liste n'est jamais le même. `numeric` place fitpmx10 après fitpmx2.
+export function trierNoeuds<T extends { node: string }>(noeuds: T[]): T[] {
+  return [...noeuds].sort((a, b) => a.node.localeCompare(b.node, 'fr', { numeric: true }))
+}
