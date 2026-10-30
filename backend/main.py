@@ -47,7 +47,7 @@ from comptes import COMPTE_GABARIT, CompteVm, valider_cles_ssh, valider_compte
 from disques import (DisqueVm, config_proxmox, disques_de, valider_disques,
                      schema_partition, valider_systeme, ROOT_GB_DEFAUT, SWAP_GB_DEFAUT,
                      VG_NOM)
-from models import ApiKey, Application, AuditLog, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, Site, User, VpnTunnel, engine, init_db, normalize_model
+from models import ApiKey, Application, AuditLog, CaptureJob, DeployLogLine, DeploymentEvent, DriverPack, DomainConfig, GabaritOsiris, Hypervisor, Machine, Organization, OsImage, Profile, Site, User, VpnTunnel, engine, init_db, normalize_model
 import sites
 import vpn
 import vsphere
@@ -122,6 +122,7 @@ async def _verifier_routes_machines() -> None:
 async def lifespan(app: FastAPI):
     global arq_pool
     init_db()
+    _capture_recharger()
     _seed_admin()
     _seed_default_profiles()
     _seed_apps()
@@ -301,7 +302,54 @@ _deploy_progress: dict[str, int] = {}
 DEPLOY_LOG_MAX_LINES = 5000
 
 # ── Mode capture : mac → {wim_name, registered_at, status} ───────────────────
+# Copie de travail de la table capture_job : toute écriture passe par _capture_sauver.
 _capture_jobs: dict[str, dict] = {}
+
+
+def _capture_sauver(mac: str) -> None:
+    """Reporte en base l'état de la capture de cette MAC (absente = supprimée)."""
+    job = _capture_jobs.get(mac)
+    with Session(engine) as session:
+        ligne = session.get(CaptureJob, mac)
+        if job is None:
+            if ligne:
+                session.delete(ligne)
+        else:
+            ligne = ligne or CaptureJob(mac=mac, wim_name="", status="", registered_at="")
+            for champ in ("wim_name", "status", "registered_at"):
+                setattr(ligne, champ, job[champ])
+            for champ in ("finished_at", "error", "statut_avant"):
+                setattr(ligne, champ, job.get(champ, ""))
+            session.add(ligne)
+        session.commit()
+
+
+def _capture_recharger() -> None:
+    """Au démarrage : sans cela, une VM encore sur WinPE serait déployée, donc effacée."""
+    with Session(engine) as session:
+        for ligne in session.exec(select(CaptureJob)).all():
+            job = {"mac": ligne.mac, "wim_name": ligne.wim_name, "status": ligne.status,
+                   "registered_at": ligne.registered_at, "statut_avant": ligne.statut_avant}
+            if ligne.finished_at:
+                job["finished_at"] = ligne.finished_at
+            if ligne.error:
+                job["error"] = ligne.error
+            _capture_jobs[ligne.mac] = job
+
+
+def _capture_rendre_statut(mac: str) -> None:
+    """Fin de capture : la machine retrouve son statut d'avant. Restée « en attente »,
+    elle serait déployée, donc effacée, au prochain démarrage sur WinPE ou en PXE."""
+    job = _capture_jobs.get(mac) or {}
+    avant = job.get("statut_avant")
+    if not avant:
+        return
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+        if machine and machine.status in ("pending", "deploying"):
+            machine.status = avant
+            session.add(machine)
+            session.commit()
 
 
 jinja_env = Environment(
@@ -4602,6 +4650,7 @@ def _build_capture_script(mac: str) -> Response:
     job = _capture_jobs.get(mac, {})
     wim_name = job.get("wim_name", "golden.wim")
     _capture_jobs[mac]["status"] = "capturing"
+    _capture_sauver(mac)
     content = jinja_env.get_template("winpe-capture.cmd.j2").render(
         mac=mac,
         wim_name=wim_name,
@@ -4728,16 +4777,25 @@ async def register_capture(mac: str, wim_name: str):
             f"validée. Choisir un autre nom, par exemple « {_nom_de_capture_libre(wim_name, clean_mac)} »."))
     # Le job AVANT de toucher à la VM : une VM qui démarrerait sur WinPE sans
     # job recevrait le script de DÉPLOIEMENT, et effacerait la machine de référence.
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        # Réenregistrer après un échec : la machine est déjà « en attente », c'est
+        # le statut d'avant la PREMIÈRE tentative qu'il faudra rendre.
+        statut_avant = (_capture_jobs.get(clean_mac, {}).get("statut_avant")
+                        or (machine.status if machine else ""))
     _capture_jobs[clean_mac] = {
         "mac": clean_mac,
         "wim_name": wim_name,
         "status": "waiting",
         "registered_at": datetime.now(timezone.utc).isoformat(),
+        "statut_avant": statut_avant,
     }
+    _capture_sauver(clean_mac)
     try:
         consigne = await _vm_vers_capture(clean_mac)
     except HTTPException:
         _capture_jobs.pop(clean_mac, None)
+        _capture_sauver(clean_mac)
         raise
     # Passe la machine en pending pour que le boot route la laisse accéder à WinPE
     with Session(engine) as session:
@@ -4912,9 +4970,11 @@ async def capture_done(mac: str, background_tasks: BackgroundTasks, success: boo
         job["finished_at"] = datetime.now(timezone.utc).isoformat()
         if erreur:
             job["error"] = erreur
+        _capture_sauver(clean_mac)
         # Échec : la VM reste sur WinPE, dont l'écran dit quoi faire (capture
         # manuelle possible, cf. /capture/{mac}/ranger).
         if success:
+            _capture_rendre_statut(clean_mac)
             background_tasks.add_task(_vm_apres_capture, clean_mac)
     await manager.broadcast({"type": "capture_done", "mac": clean_mac, "success": success})
     return {"ok": True}
@@ -4937,14 +4997,27 @@ def ranger_capture(mac: str):
     job["status"] = "done"
     job.pop("error", None)
     job["finished_at"] = datetime.now(timezone.utc).isoformat()
+    _capture_sauver(clean_mac)
+    _capture_rendre_statut(clean_mac)
     return job
 
 
 @app.delete("/capture/{mac}", dependencies=[Depends(require_admin)])
-def delete_capture(mac: str):
-    """Supprime un job de capture (terminé ou annulé)."""
+async def delete_capture(mac: str):
+    """Supprime un job de capture (terminé ou annulé).
+
+    Sans job, WinPE sert le script de déploiement : la machine doit d'abord avoir
+    retrouvé son statut, le garde-fou anti-réinstallation la protège alors."""
     clean_mac = validate_mac(mac)
+    _capture_rendre_statut(clean_mac)
+    if _vm_windows_proxmox(clean_mac) == "proxmox":
+        try:
+            h, vm_id, node = await _vm_verifiee(clean_mac, "démarrage sur le disque")
+            await _proxmox_put(h, f"/api2/json/nodes/{node}/qemu/{vm_id}/config", {"boot": "order=sata0"})
+        except Exception as e:
+            _hv_log.warning("VM de %s non remise sur son disque : %s", clean_mac, e)
     _capture_jobs.pop(clean_mac, None)
+    _capture_sauver(clean_mac)
     return {"ok": True}
 
 

@@ -138,3 +138,63 @@ def test_une_capture_terminee_n_est_pas_refaite(client, admin_headers, hv):
     script = client.get("/winpe-auto", params={"serial": "SERIE-REF"}).text
     assert "deja terminee" in script
     assert "dism" not in script.lower()
+
+
+# ── Une capture ouverte ne doit jamais tourner au déploiement ─────────────────
+
+def _serie():
+    with Session(engine) as s:
+        m = s.exec(main.select(Machine).where(Machine.mac == MAC)).first()
+        m.hw_serial = "SERIE-REF"
+        s.add(m)
+        s.commit()
+
+
+def _statut():
+    with Session(engine) as s:
+        return s.exec(main.select(Machine).where(Machine.mac == MAC)).first().status
+
+
+def test_apres_un_redemarrage_de_l_api_winpe_recoit_toujours_la_capture(client, admin_headers, hv):
+    """En mémoire seule, le job disparaissait : la VM encore sur son CD recevait le
+    script de déploiement, qui efface la machine de référence."""
+    _serie()
+    _enregistrer(client, admin_headers)
+    main._capture_jobs.clear()          # ce que fait un redémarrage
+    main._capture_recharger()
+    script = client.get("/winpe-auto", params={"serial": "SERIE-REF"}).text
+    assert "dism /Capture-Image" in script
+    assert "clean" not in script.lower()
+
+
+def test_une_capture_reussie_rend_son_statut_a_la_machine(client, admin_headers, hv):
+    _, depot = hv
+    _enregistrer(client, admin_headers)
+    assert _statut() == "pending"
+    main._build_capture_script(MAC)
+    (depot / "Golden_W11.wim").write_bytes(b"wim")
+    client.post(f"/capture/{MAC}/done", params={"success": "true"})
+    assert _statut() == "deployed"
+
+
+def test_retirer_une_capture_ratee_ne_livre_pas_la_machine_au_deploiement(client, admin_headers, hv):
+    """Sans job, WinPE sert le déploiement : seul le statut rendu arme le garde-fou."""
+    _serie()
+    etat, _ = hv
+    _enregistrer(client, admin_headers)
+    main._build_capture_script(MAC)
+    client.post(f"/capture/{MAC}/done", params={"success": "false"})
+    etat["ecrit"].clear()
+    assert client.delete(f"/capture/{MAC}", headers=admin_headers).status_code == 200
+    assert _statut() == "deployed"
+    assert etat["ecrit"] == [("PUT", "config", {"boot": "order=sata0"})]
+    assert "DEPLOIEMENT REFUSE" in client.get("/winpe-auto", params={"serial": "SERIE-REF"}).text
+    main._capture_jobs.clear()
+    main._capture_recharger()
+    assert MAC not in main._capture_jobs
+
+
+def test_reenregistrer_apres_un_echec_garde_le_statut_d_origine(client, admin_headers, hv):
+    _enregistrer(client, admin_headers)
+    _enregistrer(client, admin_headers)
+    assert main._capture_jobs[MAC]["statut_avant"] == "deployed"

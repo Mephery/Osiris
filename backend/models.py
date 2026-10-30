@@ -566,6 +566,25 @@ class GabaritOsiris(SQLModel, table=True):
     scelle_le: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class CaptureJob(SQLModel, table=True):
+    """Une capture en cours ou terminée, tant qu'un administrateur ne l'a pas retirée.
+
+    En base et pas seulement en mémoire : c'est elle qui fait servir à WinPE le
+    script de capture plutôt que celui de déploiement, qui effacerait le disque
+    de la machine de référence. Elle doit donc survivre à un redémarrage de l'API.
+    """
+    __tablename__ = "capture_job"
+
+    mac: str = Field(primary_key=True)
+    wim_name: str
+    status: str                        # waiting | capturing | done | failed
+    registered_at: str
+    finished_at: str = Field(default="")
+    error: str = Field(default="")
+    # Statut de la machine avant la capture, rendu à la fin. Vide = rien à rendre.
+    statut_avant: str = Field(default="")
+
+
 class Site(SQLModel, table=True):
     """Un site distant et son cache.
 
