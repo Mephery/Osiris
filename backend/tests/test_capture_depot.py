@@ -7,6 +7,9 @@ le réseau pouvait remplacer `curl.exe` ou `osiris-deploy.cmd`, que chaque PC
 exécute en WinPE. Il passe en lecture seule ; seule la capture a besoin d'écrire,
 elle le fait dans `captures`, et c'est OSIRIS qui déplace l'image à la fin.
 """
+import re
+from pathlib import Path
+
 import pytest
 
 import main
@@ -126,3 +129,32 @@ def test_une_image_apparue_pendant_la_capture_n_est_pas_remplacee(client, admin_
     assert (partage / "Neuve.wim").read_bytes() == b"arrivee entre-temps"
     assert (depot / "Neuve.wim").exists()
     assert main._capture_jobs[MAC]["status"] == "failed"
+
+
+# ── Script de capture ─────────────────────────────────────────────────────────
+
+GABARIT_CAPTURE = Path(__file__).parent.parent / "templates" / "winpe-capture.cmd.j2"
+
+
+def test_aucune_parenthese_nue_dans_un_echo_de_bloc():
+    """Dans un bloc batch, un `)` ferme le bloc, même au milieu d'un `echo`. Celui du
+    message d'erreur coupait le bloc en deux : Windows trouvé ou non, la suite
+    déclarait la capture ratée sans jamais lancer DISM. Constaté le 2026-10-30."""
+    profondeur = 0
+    for ligne in GABARIT_CAPTURE.read_text().splitlines():
+        texte = ligne.strip()
+        if texte.upper().startswith("REM"):
+            continue
+        # `echo ...) > fichier` ferme VOLONTAIREMENT le bloc qui écrit ce fichier.
+        if texte.lower().startswith("echo") and ") >" not in texte and profondeur > 0:
+            assert not re.search(r"(?<!\^)[()]", texte), ligne
+            continue
+        sans_echappes = re.sub(r"\^[()]", "", re.sub(r'"[^"]*"', "", texte))
+        profondeur += sans_echappes.count("(") - sans_echappes.count(")")
+
+
+def test_le_journal_de_capture_est_envoye_en_post():
+    """La route n'accepte que POST : en GET, chaque ligne repartait en 405, et une
+    capture ratée ne laissait aucune trace dans OSIRIS."""
+    for appel in re.findall(r"curl\.exe[^\n]*?/log\?", GABARIT_CAPTURE.read_text()):
+        assert "-X POST" in appel
