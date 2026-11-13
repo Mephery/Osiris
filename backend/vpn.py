@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -78,6 +79,13 @@ def render_ovpn_config(raw_config: str, route_cidr: str, slug: str) -> str:
         f"auth-user-pass /etc/openvpn/client/{slug}.auth" if line.strip() == "auth-user-pass" else line
         for line in lines
     ]
+    # `auth-retry interact` (livré par le Stormshield) : après un refus, OpenVPN
+    # redemande les identifiants... et sans personne pour répondre, rejoue les MÊMES
+    # toutes les 2 s. Un code TOTP faux martelait ainsi le pare-feu du client, assez
+    # pour verrouiller le compte, pendant qu'OSIRIS affichait « ouvert » (13/11).
+    # `none` : au premier refus, OpenVPN s'arrête - et OSIRIS le voit.
+    lines = [line for line in lines if not re.match(r"\s*auth-retry\b", line)]
+    lines.append("auth-retry none")
     content = "\n".join(lines)
     # Sans lui, en UDP, la fermeture côté OSIRIS n'est pas annoncée : le pare-feu du
     # client garde une session fantôme jusqu'à son propre délai. OpenVPN 2.6 l'ignore
@@ -267,6 +275,42 @@ def raison_de_fermer(maintenant: datetime, ouvert_le: Optional[datetime],
     if maintenant - max(reperes) >= inactivite:
         return "inactif"
     return None
+
+
+IP_BIN = "/usr/bin/ip"
+ATTENTE_CONNEXION_S = 25
+
+
+def route_par_tunnel(route_cidr: str) -> bool:
+    """La route du client passe-t-elle par une interface tun ? OpenVPN ne la pose
+    qu'une fois l'authentification acceptée et la session montée : c'est le signe
+    lisible sans droits particuliers (le journal d'OpenVPN est réservé à root)."""
+    if not route_cidr:
+        return False
+    reseau = ipaddress.ip_network(route_cidr, strict=False)
+    result = subprocess.run([IP_BIN, "-o", "route", "show", str(reseau)],
+                            capture_output=True, text=True, timeout=5)
+    return " dev tun" in result.stdout
+
+
+def attendre_connexion(slug: str, route_cidr: str, delai_s: int = ATTENTE_CONNEXION_S,
+                       pause=time.sleep) -> str:
+    """Le VRAI résultat d'une ouverture, au lieu de « le service tourne ».
+
+    systemd dit « actif » dès qu'OpenVPN est lancé, même s'il se fait refuser :
+    une ouverture avec un code TOTP faux passait pour réussie. On attend donc :
+    - `connecte` : la route du client est montée sur le tunnel ;
+    - `refuse`   : OpenVPN s'est arrêté (avec `auth-retry none`, c'est ce que fait
+                   un refus d'authentification) ;
+    - `en_cours` : ni l'un ni l'autre dans le délai (pare-feu lent, injoignable).
+    """
+    for _ in range(delai_s):
+        pause(1)
+        if tunnel_status(slug) in ("failed", "inactive"):
+            return "refuse"
+        if route_par_tunnel(route_cidr):
+            return "connecte"
+    return "en_cours"
 
 
 def tunnel_status(slug: str) -> str:

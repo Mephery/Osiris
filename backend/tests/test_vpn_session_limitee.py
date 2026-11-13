@@ -99,6 +99,8 @@ def systeme(monkeypatch):
     monkeypatch.setattr(vpn, "rearm_expiry", lambda slug, duree: etat["rearmes"].append((slug, duree)))
     monkeypatch.setattr(vpn, "apply_tunnel",
                         lambda session, tunnel, totp_code=None, duree=None: etat["appliques"].append(duree))
+    etat["connexion"] = "connecte"
+    monkeypatch.setattr(vpn, "attendre_connexion", lambda slug, route_cidr: etat["connexion"])
     return etat
 
 
@@ -239,3 +241,49 @@ def test_un_deploiement_lance_tunnel_ferme_le_dit_dans_son_journal(tunnel):
         session.commit()
         lignes = session.exec(select(DeployLogLine).where(DeployLogLine.mac == m.mac)).all()
     assert len(lignes) == 1 and "Tunnel Acme" in lignes[0].line
+
+
+# ── Une ouverture refusée par le pare-feu se voit (13/11) ───────────────────────
+# Un code TOTP faux était « accepté » : systemd disait le service actif pendant
+# qu'OpenVPN se faisait refuser toutes les 2 s par le pare-feu du client.
+
+def test_la_conf_s_arrete_au_premier_refus_au_lieu_de_marteler_le_pare_feu():
+    conf = vpn.render_ovpn_config("client\nauth-user-pass\nauth-retry interact\n", "", "acme")
+    assert "auth-retry interact" not in conf
+    assert conf.count("auth-retry none") == 1
+
+
+def test_attendre_connexion_lit_le_vrai_resultat(monkeypatch):
+    etats = iter(["active", "active", "failed"])
+    monkeypatch.setattr(vpn, "tunnel_status", lambda slug: next(etats))
+    monkeypatch.setattr(vpn, "route_par_tunnel", lambda cidr: False)
+    assert vpn.attendre_connexion("acme", "10.8.0.0/16", pause=lambda s: None) == "refuse"
+
+    monkeypatch.setattr(vpn, "tunnel_status", lambda slug: "active")
+    routes = iter([False, True])
+    monkeypatch.setattr(vpn, "route_par_tunnel", lambda cidr: next(routes))
+    assert vpn.attendre_connexion("acme", "10.8.0.0/16", pause=lambda s: None) == "connecte"
+
+    monkeypatch.setattr(vpn, "route_par_tunnel", lambda cidr: False)
+    assert vpn.attendre_connexion("acme", "10.8.0.0/16", delai_s=3, pause=lambda s: None) == "en_cours"
+
+
+def test_un_refus_est_dit_et_le_tunnel_referme(client, admin_headers, tunnel, systeme):
+    _maj(tunnel.id, vpn_username="omatique", requires_totp=True)
+    systeme["connexion"] = "refuse"
+    r = client.post(f"/vpn-tunnels/{tunnel.id}/apply",
+                    json={"duree_heures": 2, "totp_code": "000000"}, headers=admin_headers)
+    assert r.status_code == 502
+    assert "refusé la connexion du compte « omatique »" in r.json()["detail"]
+    assert "TOTP" in r.json()["detail"]
+    assert systeme["fermes"] == ["acme"]
+    t = _relire(tunnel.id)
+    assert t.status == "failed" and t.close_reason == "refuse"
+
+
+def test_une_connexion_lente_est_signalee_sans_etre_refermee(client, admin_headers, tunnel, systeme):
+    systeme["connexion"] = "en_cours"
+    r = client.post(f"/vpn-tunnels/{tunnel.id}/apply", json={"duree_heures": 2}, headers=admin_headers)
+    assert r.status_code == 200
+    assert r.json()["connexion"] == "en_cours"
+    assert systeme["fermes"] == []

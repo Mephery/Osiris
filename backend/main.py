@@ -1207,6 +1207,28 @@ def apply_vpn_tunnel(tunnel_id: int, body: VpnTunnelApply = VpnTunnelApply(), cu
             session.add(tunnel)
             session.commit()
             raise HTTPException(status_code=502, detail=str(e))
+        connexion = vpn.attendre_connexion(tunnel.slug, tunnel.route_cidr)
+        if connexion == "refuse":
+            # Arrêté de lui-même : on désarme aussi la minuterie d'échéance.
+            try:
+                vpn.close_tunnel(tunnel.slug)
+            except (RuntimeError, ValueError):
+                pass
+            tunnel.status = "failed"
+            tunnel.closed_at = datetime.now(timezone.utc)
+            tunnel.close_reason = "refuse"
+            session.add(tunnel)
+            _log(session, current_user, "apply_vpn_tunnel_refuse", details={
+                "organization_id": tunnel.organization_id, "name": tunnel.name})
+            session.commit()
+            indice = ("le code TOTP était faux ou déjà périmé (il change toutes les 30 s), "
+                      "ou le mot de passe du compte n'est plus bon" if tunnel.requires_totp
+                      else "le mot de passe du compte n'est plus bon (expiré ? changé ?)")
+            raise HTTPException(status_code=502, detail=(
+                f"Le pare-feu du client a refusé la connexion du compte « {tunnel.vpn_username} » : "
+                f"{indice}. Tunnel refermé aussitôt, pour ne pas verrouiller le compte à force "
+                f"d'essais. À faire : réessayer avec un code tout frais ; si ça refuse encore, "
+                f"vérifier le mot de passe du compte (fiche du tunnel)."))
         maintenant = datetime.now(timezone.utc)
         tunnel.status = vpn.tunnel_status(tunnel.slug)
         tunnel.last_applied_at = maintenant
@@ -1217,7 +1239,7 @@ def apply_vpn_tunnel(tunnel_id: int, body: VpnTunnelApply = VpnTunnelApply(), cu
         _log(session, current_user, "apply_vpn_tunnel", details={
             "organization_id": tunnel.organization_id, "name": tunnel.name, "duree_heures": body.duree_heures})
         session.commit()
-        return _serialize_vpn_tunnel(tunnel)
+        return {**_serialize_vpn_tunnel(tunnel), "connexion": connexion}
 
 @app.post("/vpn-tunnels/{tunnel_id}/close")
 def close_vpn_tunnel(tunnel_id: int, current_user: User = Depends(require_admin)):

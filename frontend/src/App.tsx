@@ -1256,6 +1256,7 @@ export default function App() {
                   const raisons: Record<string, string> = {
                     expiree: 'durée écoulée', inactif: `aucun déploiement depuis ${t.inactivite_min} min`,
                     manuel: 'fermé à la main', hors_osiris: 'arrêté hors OSIRIS',
+                    refuse: 'connexion refusée par le pare-feu',
                   }
                   const duree = dureeTunnel[t.id] ?? 4
                   const action = (chemin: string, corps: object | null, succes: string) => {
@@ -1265,8 +1266,14 @@ export default function App() {
                       headers: { ...authHeader(auth.token), 'Content-Type': 'application/json' },
                       body: corps ? JSON.stringify(corps) : undefined,
                     })
-                      .then(r => lireReponse(r, 'Action sur le tunnel refusée'))
-                      .then(() => { fetchVpnTunnels(auth.token); toast.success(succes) })
+                      .then(r => lireReponse<{ connexion?: string } | null>(r, 'Action sur le tunnel refusée'))
+                      .then((rep) => {
+                        fetchVpnTunnels(auth.token)
+                        // Lancé mais pas encore connecté au bout de 25 s : ne pas crier victoire.
+                        if (rep?.connexion === 'en_cours') toast.warning(
+                          "Tunnel lancé, mais la connexion n'est pas encore confirmée (pare-feu lent ou injoignable). Rafraîchir dans une minute : s'il repasse en « échec », la connexion a été refusée.")
+                        else toast.success(succes)
+                      })
                       .catch((e) => toast.error(e.message))
                       .finally(() => setApplyingTunnelId(null))
                   }
