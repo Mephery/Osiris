@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-OSIRIS-Fair-Source
 // Copyright (c) 2026 Coline Derycke. See LICENSE.
 import { describe, expect, it } from 'vitest'
-import { correspondDate, correspondProfil, correspondType, raisonATraiter } from './filtresMachines'
+import { correspondDate, correspondProfil, correspondType, raisonATraiter, premierDemarrageInacheve } from './filtresMachines'
 
 const MAINTENANT = new Date('2026-09-18T17:00:00Z').getTime()
 const ilY = (minutes: number) => new Date(MAINTENANT - minutes * 60_000).toISOString()
@@ -38,6 +38,24 @@ describe('correspondDate', () => {
   it('« jamais » = aucune date de déploiement', () => {
     expect(correspondDate({ deployed_at: null }, 'jamais', MAINTENANT)).toBe(true)
     expect(correspondDate({ deployed_at: null }, 'semaine', MAINTENANT)).toBe(false)
+  })
+})
+
+describe('premierDemarrageInacheve', () => {
+  it("une machine déployée sans smoke tests depuis plus de 3 h n'a pas fini (M2KL070)", () => {
+    const m = { status: 'deployed', smoke_status: '', deployed_at: ilY(60 * 24 * 9) }
+    expect(premierDemarrageInacheve(m, MAINTENANT)).toBe(true)
+    expect(raisonATraiter(m, MAINTENANT)).toBe('premier démarrage inachevé')
+  })
+  it('un premier démarrage encore en cours (moins de 3 h) ne l\'est pas encore', () => {
+    expect(premierDemarrageInacheve({ status: 'deployed', smoke_status: '', deployed_at: ilY(40) }, MAINTENANT)).toBe(false)
+  })
+  it('des smoke tests reçus, même en alerte, disent que le premier démarrage est allé au bout', () => {
+    expect(premierDemarrageInacheve({ status: 'deployed', smoke_status: 'warnings', deployed_at: ilY(600) }, MAINTENANT)).toBe(false)
+    expect(premierDemarrageInacheve({ status: 'deployed', smoke_status: 'ok', deployed_at: ilY(600) }, MAINTENANT)).toBe(false)
+  })
+  it("seules les machines déployées sont concernées", () => {
+    expect(premierDemarrageInacheve({ status: 'failed', smoke_status: '', deployed_at: ilY(600) }, MAINTENANT)).toBe(false)
   })
 })
 

@@ -6,6 +6,9 @@
 
 $ErrorActionPreference = "Continue"
 $logFile = "C:\osiris-firstboot.log"
+# Lue AVANT d'ecrire quoi que ce soit : apres un redemarrage imprevu, c'est la
+# derniere etape atteinte par l'execution coupee (cf. « Reprise » plus bas).
+$derniereLigneAvant = Get-Content -LiteralPath $logFile -Tail 1 -EA SilentlyContinue
 $osirisUrl = "{{ osiris_url }}"
 $script:_mac = $null  # sera defini apres detection reseau
 
@@ -98,6 +101,73 @@ if ($adapterLive) {
     }
 } else {
     Write-Log "AVERTISSEMENT : aucun adaptateur reseau actif (MAC machine : $mac)"
+}
+
+# ── Reprise apres un redemarrage imprevu ─────────────────────────────────────
+# Le 04/11 (M2KL070) comme le 13/10 (PLESIPL2601), un installeur a redemarre le
+# PC en plein firstboot. Pose par WinPE, ce script n'est lance qu'UNE fois (session
+# automatique unique) : tout ce qui suivait a ete saute en silence - suppression
+# d'osiris-admin, smoke tests, et effacement de ce fichier, qui porte des secrets.
+# Une tache SYSTEM le relance donc a chaque demarrage jusqu'a ce qu'il aille au
+# bout ; il la retire lui-meme a la fin. Les etapes deja faites sont reperees par
+# un fichier temoin et sautees (rejouer LAPS ou BitLocker changerait un mot de
+# passe ou un PIN deja remis a OSIRIS).
+# Les clones de gabarit ont deja leur propre filet (tache OsirisFirstBoot, qui
+# retelecharge le script) : on n'en pose pas un second par-dessus.
+$dossierOsiris = "C:\ProgramData\OSIRIS"
+$dossierEtapes = Join-Path $dossierOsiris "firstboot-etapes"
+$fichierTentatives = Join-Path $dossierOsiris "firstboot-tentatives.txt"
+$tacheReprise = "OsirisFirstBootReprise"
+$tentativesMax = 3
+$script:redemarrageRequis = $false
+New-Item -ItemType Directory -Path $dossierEtapes -Force -EA SilentlyContinue | Out-Null
+
+function Test-EtapeFaite($nom) { Test-Path -LiteralPath (Join-Path $dossierEtapes $nom) }
+function Set-EtapeFaite($nom) {
+    New-Item -ItemType File -Path (Join-Path $dossierEtapes $nom) -Force -EA SilentlyContinue | Out-Null
+}
+
+$tentative = 1
+if (Test-Path -LiteralPath $fichierTentatives) {
+    $precedente = 0
+    [void][int]::TryParse(((Get-Content -LiteralPath $fichierTentatives -EA SilentlyContinue | Select-Object -First 1) -as [string]), [ref]$precedente)
+    $tentative = $precedente + 1
+}
+Set-Content -LiteralPath $fichierTentatives -Value $tentative -EA SilentlyContinue
+
+if ($tentative -gt 1) {
+    $derniere = $derniereLigneAvant
+    Write-Log "REPRISE : le premier demarrage a ete interrompu par un redemarrage imprevu (tentative $tentative/$tentativesMax)."
+    if ($derniere) { Write-Log "  Derniere etape atteinte avant la coupure : $derniere" }
+    if ($tentative -le $tentativesMax) { Write-Log "  Les etapes deja terminees sont sautees, la suite reprend." }
+}
+
+if ($tentative -gt $tentativesMax) {
+    Write-Log "ERREUR : premier demarrage interrompu $tentativesMax fois de suite - abandon pour ne pas boucler."
+    Write-Log "  A FAIRE : lire C:\osiris-firstboot.log sur le PC, terminer a la main ou redeployer depuis OSIRIS."
+    Write-Log "  A FAIRE aussi : supprimer C:\osiris-firstboot.ps1 (il contient des mots de passe) et le compte osiris-admin."
+    Unregister-ScheduledTask -TaskName $tacheReprise -Confirm:$false -EA SilentlyContinue
+    try {
+        Invoke-WebRequest -Uri "$osirisUrl/machines/$mac/status?status=failed" `
+            -Method POST -UseBasicParsing -TimeoutSec 10 | Out-Null
+    } catch {}
+    exit 1
+}
+
+if (-not (Get-ScheduledTask -TaskName "OsirisFirstBoot" -EA SilentlyContinue) -and $PSCommandPath) {
+    try {
+        $actReprise = New-ScheduledTaskAction -Execute "powershell.exe" `
+            -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+        $trgReprise = New-ScheduledTaskTrigger -AtStartup
+        $trgReprise.Delay = "PT2M"   # laisse le reseau monter
+        $prinReprise = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        $regReprise = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -ExecutionTimeLimit ([TimeSpan]::Zero)
+        Register-ScheduledTask -TaskName $tacheReprise -Action $actReprise -Trigger $trgReprise `
+            -Principal $prinReprise -Settings $regReprise -Force | Out-Null
+    } catch {
+        Write-Log "AVERTISSEMENT : filet de reprise non pose (un redemarrage imprevu ne serait pas rattrape) - $_"
+    }
 }
 
 # ── Inventaire materiel ───────────────────────────────────────────────────────
@@ -301,6 +371,13 @@ if ($renommageAFaire) {
 # active + mot de passe connu d'OSIRIS). Sinon on garderait osiris-admin pour ne
 # pas verrouiller la machine hors de tout admin local.
 $script:localAdminReady = $false
+if (Test-EtapeFaite "laps") {
+    # Deja fait par l'execution coupee : le refaire changerait le mot de passe, et
+    # OSIRIS refuse de remplacer celui qu'il garde une fois le deploiement clos -
+    # le PC n'aurait plus aucun admin local connu.
+    Write-Log "LAPS : deja fait avant le redemarrage, mot de passe conserve."
+    $script:localAdminReady = $true
+} else {
 Write-Log "Generation du mot de passe administrateur local (LAPS)..."
 try {
     $chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789!@#$%'.ToCharArray()
@@ -324,12 +401,19 @@ try {
     # Administrateur integre actif + mot de passe sauvegarde : on a un admin local
     # de secours, la suppression d'osiris-admin est donc sans danger.
     $script:localAdminReady = $true
+    Set-EtapeFaite "laps"
 } catch {
     Write-Log "AVERTISSEMENT : LAPS echoue - $_"
+}
 }
 
 {% if profile.enable_bitlocker %}
 # ── BitLocker ─────────────────────────────────────────────────────────────────
+# Une execution coupee APRES la remise de la cle et du PIN a OSIRIS ne doit pas
+# les regenerer : le PIN remis ne correspondrait plus a celui du disque.
+if (Test-EtapeFaite "bitlocker") {
+    Write-Log "BitLocker : deja active avant le redemarrage (cle et PIN dans OSIRIS)."
+} else {
 {% if profile.bitlocker_pin %}
 Write-Log "Activation de BitLocker (mode TPM + PIN)..."
 {% else %}
@@ -395,6 +479,7 @@ try {
                 -UseBasicParsing -TimeoutSec 10 | Out-Null
             Write-Log "PIN et cle de recuperation sauvegardes dans OSIRIS"
         }
+        Set-EtapeFaite "bitlocker"
         {% else %}
         # Mode TPM seul : demarrage automatique
         if ($blVol.ProtectionStatus -ne "On") {
@@ -410,10 +495,12 @@ try {
                 -UseBasicParsing -TimeoutSec 10 | Out-Null
             Write-Log "Cle de recuperation sauvegardee dans OSIRIS"
         }
+        Set-EtapeFaite "bitlocker"
         {% endif %}
     }
 } catch {
     Write-Log "AVERTISSEMENT : BitLocker echoue - $_"
+}
 }
 {% else %}
 Write-Log "BitLocker desactive sur ce profil."
@@ -496,6 +583,14 @@ $uacPath2 = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
 $uacOrig2 = (Get-ItemProperty -Path $uacPath2 -Name ConsentPromptBehaviorAdmin -EA SilentlyContinue).ConsentPromptBehaviorAdmin
 Set-ItemProperty -Path $uacPath2 -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord -EA SilentlyContinue
 {% for app in custom_apps %}
+# Deja installe (execution coupee par le redemarrage que l'installeur a lui-meme
+# declenche, typiquement) : on ne relance pas l'installeur.
+$dejaLa = $null -ne (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -EA SilentlyContinue | Where-Object { $_.DisplayName -like "*{{ app.detect_name or app.name }}*" })
+if ($dejaLa -and (Test-Path -LiteralPath (Join-Path $dossierEtapes "app-{{ app.id }}-lance"))) {
+    Write-Log "{{ app.name }} : deja installe avant le redemarrage, installeur non relance."
+    Set-EtapeFaite "app-{{ app.id }}"
+}
+if (-not (Test-EtapeFaite "app-{{ app.id }}")) {
 $tmpDir = Join-Path $env:TEMP ("osiris-inst-" + [guid]::NewGuid().ToString('N').Substring(0,8))
 try {
     New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
@@ -507,17 +602,30 @@ try {
     Invoke-WebRequest -Uri "$osirisUrl/static/installers/{{ app.installer_config_file }}" -OutFile (Join-Path $tmpDir "{{ app.installer_config_file }}") -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
     {% endif %}
     Write-Log ">>> Installation de {{ app.name }} en cours - PEUT PRENDRE 15-20 MIN (telechargement + install). NE PAS ETEINDRE LE PC. <<<"
+    Set-EtapeFaite "app-{{ app.id }}-lance"
     {% if app.install_type == 'msi' %}
-    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList ('/i "' + $dst + '" {{ app.install_args }}') -Wait -PassThru -WindowStyle Hidden
+    # /norestart : en /qn, sans lui, msiexec REDEMARRE LE PC tout seul des que le
+    # paquet le reclame - c'est ce qui a coupe le firstboot de M2KL070 au milieu
+    # de WithSecure. Le redemarrage voulu se fait a la fin, une seule fois.
+    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList ('/i "' + $dst + '" {{ app.install_args }}{{ "" if ("norestart" in app.install_args|lower or "reboot=" in app.install_args|lower) else " /norestart" }}') -Wait -PassThru -WindowStyle Hidden
     {% else %}
     # WorkingDirectory = dossier temp : les chemins relatifs des args (ex: /configure conf.xml) s'y resolvent
     $proc = Start-Process -FilePath $dst -ArgumentList '{{ app.install_args }}' -WorkingDirectory $tmpDir -Wait -PassThru -WindowStyle Hidden
     {% endif %}
-    Write-Log "{{ app.name }} : installeur termine (code $($proc.ExitCode))"
+    $codeInst = $proc.ExitCode
+    switch ($codeInst) {
+        0       { Write-Log "{{ app.name }} : installe (code 0)"; Set-EtapeFaite "app-{{ app.id }}" }
+        3010    { Write-Log "{{ app.name }} : installe - redemarrage necessaire, il sera fait a la fin (code 3010)"
+                  $script:redemarrageRequis = $true; Set-EtapeFaite "app-{{ app.id }}" }
+        1641    { Write-Log "{{ app.name }} : installe, mais l'installeur a LANCE un redemarrage (code 1641) - le premier demarrage reprendra apres."
+                  Set-EtapeFaite "app-{{ app.id }}" }
+        default { Write-Log "ERREUR : {{ app.name }} - l'installeur a echoue (code $codeInst). A FAIRE : verifier les arguments de l'application dans OSIRIS (onglet Applications), puis l'installer a la main ou redeployer." }
+    }
 } catch {
-    Write-Log "AVERTISSEMENT : {{ app.name }} - installeur echoue : $_"
+    Write-Log "ERREUR : {{ app.name }} - installation impossible : $_. A FAIRE : verifier que l'installeur est bien depose sur OSIRIS (onglet Applications)."
 } finally {
     Remove-Item -LiteralPath $tmpDir -Recurse -Force -EA SilentlyContinue
+}
 }
 {% endfor %}
 if ($null -ne $uacOrig2) { Set-ItemProperty -Path $uacPath2 -Name ConsentPromptBehaviorAdmin -Value $uacOrig2 -Type DWord -EA SilentlyContinue }
@@ -609,6 +717,12 @@ try {
 
 {% if profile.post_script %}
 # ── Script post-install du profil ────────────────────────────────────────────
+if (Test-EtapeFaite "post-profil") {
+    # Marque AVANT de le lancer : un script ecrit a la main n'est pas forcement
+    # rejouable (et s'il redemarre lui-meme le PC, le rejouer bouclerait).
+    Write-Log "AVERTISSEMENT : le script post-install du profil a ete coupe par un redemarrage - NON rejoue. A FAIRE : verifier sur le PC ce qu'il devait faire."
+} else {
+Set-EtapeFaite "post-profil"
 Write-Log "Execution du script post-install du profil..."
 try {
 {{ profile.post_script }}
@@ -616,12 +730,19 @@ try {
     Write-Log "AVERTISSEMENT : Script post-install du profil - $_"
 }
 Write-Log "Script post-install du profil termine."
+}
 {% endif %}
 
 {% if machine.post_script %}
 # ── Script post-install de la machine ────────────────────────────────────────
 # APRES celui du profil : le profil pose le socle commun a un type de machine,
 # celui-ci ne vaut que pour cette machine. Les deux se cumulent.
+if (Test-EtapeFaite "post-machine") {
+    # Marque AVANT de le lancer : un script ecrit a la main n'est pas forcement
+    # rejouable (et s'il redemarre lui-meme le PC, le rejouer bouclerait).
+    Write-Log "AVERTISSEMENT : le script post-install de la machine a ete coupe par un redemarrage - NON rejoue. A FAIRE : verifier sur le PC ce qu'il devait faire."
+} else {
+Set-EtapeFaite "post-machine"
 Write-Log "Execution du script post-install de la machine..."
 try {
 {{ machine.post_script }}
@@ -629,6 +750,7 @@ try {
     Write-Log "AVERTISSEMENT : Script post-install de la machine - $_"
 }
 Write-Log "Script post-install de la machine termine."
+}
 {% endif %}
 
 {% if profile.laps_rotation_days > 0 %}
@@ -934,6 +1056,11 @@ try {
 }
 Remove-Item "C:\ProgramData\OSIRIS\firstboot-en-cours.marker" -Force -EA SilentlyContinue
 
+# Le premier demarrage est alle au bout : plus rien a reprendre.
+Unregister-ScheduledTask -TaskName $tacheReprise -Confirm:$false -EA SilentlyContinue
+Remove-Item -LiteralPath $dossierEtapes -Recurse -Force -EA SilentlyContinue
+Remove-Item -LiteralPath $fichierTentatives -Force -EA SilentlyContinue
+
 # ── Nettoyage ─────────────────────────────────────────────────────────────────
 Start-Sleep -Seconds 2
 Remove-Item -Path $MyInvocation.MyCommand.Path -Force -EA SilentlyContinue
@@ -946,6 +1073,10 @@ Write-Log "Deploiement termine. Redemarrage manuel requis (BitLocker PIN) - osir
 # Redemarrage final : deconnecte osiris-admin et declenche son nettoyage au boot.
 if ($script:localAdminReady) {
     Write-Log "Deploiement termine - redemarrage final (suppression osiris-admin)..."
+    Start-Sleep -Seconds 3
+    Restart-Computer -Force
+} elseif ($script:redemarrageRequis) {
+    Write-Log "Deploiement termine - redemarrage final (demande par un installeur)..."
     Start-Sleep -Seconds 3
     Restart-Computer -Force
 }

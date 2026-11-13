@@ -9,6 +9,7 @@ type MachineFiltrable = {
   deployed_at?: string | null
   statut_depuis?: string | null
   tests_en_echec?: string[]
+  smoke_status?: string
 }
 
 /** '' = tous · 'physique' · 'vm' · 'hv:<id>' = les VM d'un hyperviseur précis. */
@@ -51,6 +52,18 @@ export const TESTS_ATTENDUS_EN_ECHEC = ['Acces internet (HTTPS)']
 const VM_EN_ATTENTE_MAX = 30 * 60_000
 const EN_COURS_MAX = 2 * 3_600_000
 
+/** Durée au-delà de laquelle un premier démarrage sans compte rendu est tenu pour
+ *  coupé. Le plus long vu (applis + Office + WithSecure) dure moins d'une heure. */
+const PREMIER_DEMARRAGE_MAX = 3 * 3_600_000
+
+/** « Déployée » sans smoke tests depuis trop longtemps : le premier démarrage n'est
+ *  pas allé au bout. WinPE poste « deployed » AVANT lui, et les smoke tests sont la
+ *  dernière chose qu'il envoie — sans eux, la fiche restait verte pour un PC à
+ *  moitié préparé (M2KL070, 04/11). */
+export const premierDemarrageInacheve = (m: MachineFiltrable, maintenant: number): boolean =>
+  m.status === 'deployed' && !m.smoke_status && !!m.deployed_at
+  && maintenant - new Date(m.deployed_at).getTime() > PREMIER_DEMARRAGE_MAX
+
 /** Pourquoi une machine demande qu'on s'en occupe — `null` si elle va bien. */
 export const raisonATraiter = (m: MachineFiltrable, maintenant: number): string | null => {
   if (m.status === 'failed') return 'déploiement en échec'
@@ -58,6 +71,7 @@ export const raisonATraiter = (m: MachineFiltrable, maintenant: number): string 
   if (m.status === 'pending' && m.hypervisor_id != null && depuis > VM_EN_ATTENTE_MAX)
     return 'VM en attente sans nouvelles'
   if (m.status === 'deploying' && depuis > EN_COURS_MAX) return 'déploiement bloqué'
+  if (premierDemarrageInacheve(m, maintenant)) return 'premier démarrage inachevé'
   const echecs = (m.tests_en_echec ?? []).filter(t => !TESTS_ATTENDUS_EN_ECHEC.includes(t))
   if (echecs.length) return `tests en échec : ${echecs.join(', ')}`
   return null

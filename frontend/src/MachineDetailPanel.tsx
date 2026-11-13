@@ -7,6 +7,7 @@ import { authHeader } from './types'
 import { lireReponse } from './api'
 import { commandeSsh, provenanceAdresse, type AdresseMachine } from './adresseMachine'
 import { IcoX, IcoTerminal, IcoCamera, IcoDownload } from './icons'
+import { premierDemarrageInacheve } from './filtresMachines'
 
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
@@ -57,6 +58,8 @@ export function MachineDetailPanel({
   lapsPassword, onFetchLapsPassword, onSaveUserName, onSaveUserEmail, onSaveNotes, onClose, vm,
 }: MachineDetailPanelProps) {
   const logRef = useRef<HTMLPreElement | null>(null)
+  // Heure d'ouverture de la fiche : le rendu doit rester pur (pas de Date.now() dedans).
+  const [ouvertA] = useState(() => Date.now())
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
@@ -136,6 +139,32 @@ export function MachineDetailPanel({
               )
             })()}
           </div>
+
+          {/* ── Premier démarrage inachevé : la fiche « déployée » ne suffit pas ── */}
+          {premierDemarrageInacheve(machine, ouvertA) && (
+            <div className="rounded border border-amber-500/40 bg-amber-500/10 p-3 space-y-1.5">
+              <p className="text-[11px] font-bold text-amber-400">Premier démarrage inachevé</p>
+              <p className="text-[10px] text-slate-300">
+                Windows est installé, mais la préparation qui suit (domaine, applications, BitLocker,
+                nettoyage) ne s'est pas terminée : le PC n'a jamais envoyé ses tests de fin.
+              </p>
+              {machine.derniere_ligne && (
+                <p className="text-[10px] font-mono text-slate-400">Arrêté à : {machine.derniere_ligne}</p>
+              )}
+              <p className="text-[10px] text-slate-300 font-semibold">À faire :</p>
+              <ol className="text-[10px] text-slate-300 list-decimal ml-4 space-y-0.5">
+                {machine.has_bitlocker && (
+                  <li>Regarder l'écran du PC. S'il demande un <b>PIN BitLocker</b>, il est plus bas sur cette
+                    fiche ; une fois saisi, la préparation reprend toute seule (PC déployés depuis le 13/11/2026).</li>
+                )}
+                <li>Si rien ne bouge : allumer le PC sur le réseau et attendre quelques minutes, puis lire le
+                  journal ci-dessous. Sinon, finir à la main d'après le journal, ou redéployer.</li>
+                <li>Sur le PC, vérifier que <span className="font-mono">C:\osiris-firstboot.ps1</span> a disparu
+                  (il contient des mots de passe) ainsi que le compte <span className="font-mono">osiris-admin</span>.
+                  Sinon, les supprimer.</li>
+              </ol>
+            </div>
+          )}
 
           {/* ── Journal de déploiement (style terminal) ── */}
           <div>

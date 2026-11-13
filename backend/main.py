@@ -3076,6 +3076,21 @@ def get_all_machines(org_id: Optional[int] = None):
                 return comptes_profil[m.profile_id]
             return "root"
 
+        # « Déployée » ne veut pas dire « finie » : WinPE poste ce statut AVANT le
+        # premier démarrage, et la vraie fin, ce sont les smoke tests postés en
+        # dernier. Une machine déployée sans eux a vu son premier démarrage coupé
+        # (M2KL070 le 04/11 : PC redémarré par un installeur, fiche restée verte).
+        # Sa dernière ligne de journal dit OÙ ça s'est arrêté ; on ne la cherche
+        # que pour ces machines-là, rares.
+        def derniere_ligne(m: Machine) -> Optional[str]:
+            if m.status != "deployed" or m.smoke_status:
+                return None
+            ligne = session.exec(
+                select(DeployLogLine.line)
+                .where(DeployLogLine.mac == m.mac, DeployLogLine.run == m.deploy_log_run)
+                .order_by(DeployLogLine.id.desc()).limit(1)).first()
+            return ligne
+
         def tests_en_echec(m: Machine) -> list[str]:
             try:
                 return [t.get("name", "") for t in json.loads(m.smoke_results or "[]") if not t.get("ok")]
@@ -3108,6 +3123,7 @@ def get_all_machines(org_id: Optional[int] = None):
                 # de la liste ne trouvaient donc jamais rien.
                 "smoke_status": m.smoke_status,
                 "tests_en_echec": tests_en_echec(m),
+                "derniere_ligne": derniere_ligne(m),
                 "statut_depuis": statut_depuis(m),
             }
             for m in machines

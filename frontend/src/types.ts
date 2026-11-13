@@ -159,6 +159,9 @@ export interface Machine {
   hypervisor_id?: number | null;
   /** Noms des smoke tests en échec au dernier déploiement. */
   tests_en_echec?: string[];
+  /** Dernière ligne du journal, renvoyée seulement pour une machine « déployée »
+   *  sans smoke tests : là où son premier démarrage s'est arrêté. */
+  derniere_ligne?: string | null;
   /** Depuis quand la machine est dans son statut (ISO) : dernier évènement, ou création. */
   statut_depuis?: string | null;
   proxmox_vm_id?: number;
