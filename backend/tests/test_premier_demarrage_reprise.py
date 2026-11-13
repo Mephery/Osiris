@@ -132,3 +132,16 @@ def test_la_liste_dit_ou_s_est_arrete_un_premier_demarrage(client, admin_token, 
     assert par_mac["aabbccddee01"]["derniere_ligne"] == "[15:24] Installation de WithSecure en cours"
     # Allée au bout : rien à signaler, et pas de requête inutile.
     assert par_mac["aabbccddee02"]["derniere_ligne"] is None
+
+
+def test_un_installeur_n_est_plus_attendu_avec_sa_descendance():
+    """`Start-Process -Wait` attend aussi les descendants : WithSecure installé et
+    mis à jour, le firstboot de M2KL070 est pourtant resté figé jusqu'à ce qu'on
+    éteigne le PC le lendemain (diagnostic du 13/11 : aucun redémarrage)."""
+    script = _rendre([WS, _app(id=3, name="Office", install_type="exe",
+                                installer_file="s.exe", install_args="/configure c.xml")])
+    lancements = [l for l in script.splitlines() if "$proc = Start-Process" in l]
+    assert len(lancements) == 2
+    assert not any("-Wait" in l for l in lancements)
+    assert "$proc.WaitForExit(60 * 60 * 1000)" in script
+    assert "$null = $proc.Handle" in script   # sinon ExitCode revient vide

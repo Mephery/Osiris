@@ -607,18 +607,31 @@ try {
     # /norestart : en /qn, sans lui, msiexec REDEMARRE LE PC tout seul des que le
     # paquet le reclame - c'est ce qui a coupe le firstboot de M2KL070 au milieu
     # de WithSecure. Le redemarrage voulu se fait a la fin, une seule fois.
-    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList ('/i "' + $dst + '" {{ app.install_args }}{{ "" if ("norestart" in app.install_args|lower or "reboot=" in app.install_args|lower) else " /norestart" }}') -Wait -PassThru -WindowStyle Hidden
+    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList ('/i "' + $dst + '" {{ app.install_args }}{{ "" if ("norestart" in app.install_args|lower or "reboot=" in app.install_args|lower) else " /norestart" }}') -PassThru -WindowStyle Hidden
     {% else %}
     # WorkingDirectory = dossier temp : les chemins relatifs des args (ex: /configure conf.xml) s'y resolvent
-    $proc = Start-Process -FilePath $dst -ArgumentList '{{ app.install_args }}' -WorkingDirectory $tmpDir -Wait -PassThru -WindowStyle Hidden
+    $proc = Start-Process -FilePath $dst -ArgumentList '{{ app.install_args }}' -WorkingDirectory $tmpDir -PassThru -WindowStyle Hidden
     {% endif %}
-    $codeInst = $proc.ExitCode
+    # PAS `-Wait` : il attend l'installeur ET TOUS SES DESCENDANTS. Le 04/11, sur
+    # M2KL070, WithSecure s'est installe puis mis a jour tout seul, mais le firstboot
+    # est reste fige sur cette ligne jusqu'a ce qu'on eteigne le PC le lendemain -
+    # sans redemarrage ni erreur. WaitForExit n'attend que l'installeur lui-meme ;
+    # la limite garantit qu'un installeur qui ne rend jamais la main ne fige plus tout.
+    # Lire Handle tout de suite : sans lui, ExitCode revient vide (defaut connu).
+    $null = $proc.Handle
+    if ($proc.WaitForExit(60 * 60 * 1000)) {
+        $codeInst = $proc.ExitCode
+    } else {
+        $codeInst = "delai"
+        Write-Log "ERREUR : {{ app.name }} ne rend pas la main apres 60 min - on continue sans l'attendre. A FAIRE : verifier sur le PC si {{ app.name }} est installe (Programmes et fonctionnalites)."
+    }
     switch ($codeInst) {
         0       { Write-Log "{{ app.name }} : installe (code 0)"; Set-EtapeFaite "app-{{ app.id }}" }
         3010    { Write-Log "{{ app.name }} : installe - redemarrage necessaire, il sera fait a la fin (code 3010)"
                   $script:redemarrageRequis = $true; Set-EtapeFaite "app-{{ app.id }}" }
         1641    { Write-Log "{{ app.name }} : installe, mais l'installeur a LANCE un redemarrage (code 1641) - le premier demarrage reprendra apres."
                   Set-EtapeFaite "app-{{ app.id }}" }
+        "delai" { }
         default { Write-Log "ERREUR : {{ app.name }} - l'installeur a echoue (code $codeInst). A FAIRE : verifier les arguments de l'application dans OSIRIS (onglet Applications), puis l'installer a la main ou redeployer." }
     }
 } catch {
