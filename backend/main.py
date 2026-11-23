@@ -2271,7 +2271,8 @@ def _options_diagnostic_winpe(clean_mac: str) -> Optional[set[str]]:
     Relu à chaque /boot : s'active sans redémarrer l'API.
       `classique` : imposer le bootmgfw.efi classique au lieu du bootmgfw_EX.efi
                     que wimboot préfère quand boot.wim contient les deux.
-      `sanboot`   : démarrer l'ISO WinPE par iPXE, sans wimboot du tout."""
+      `sanboot`   : démarrer l'ISO WinPE par iPXE, sans wimboot du tout.
+      `pasapas`   : WinPE s'arrête à chaque étape de startnet (voir _WINPE_PASAPAS)."""
     try:
         with open(WINPE_DIAGNOSTIC) as f:
             for l in f:
@@ -2288,7 +2289,41 @@ def _options_diagnostic_winpe(clean_mac: str) -> Optional[set[str]]:
     return None
 
 
-def _winpe_chain_lines(diagnostic: bool = False, bootmgr_classique: bool = False) -> str:
+# Démarrage pas à pas (option `pasapas`) : wimboot injecte ces deux fichiers dans
+# X:\Windows\System32. winpeshl.ini remplace le lancement automatique de
+# startnet.cmd par un cmd /k (la fenêtre ne se ferme pas : un WinPE dont le cmd se
+# termine redémarre) qui joue osiris-diag.cmd : chaque étape s'affiche et attend
+# une touche, puis le vrai startnet.cmd prend la suite. AutoReboot=0 d'abord, pour
+# qu'un plantage laisse son écran bleu (et son code) au lieu de redémarrer.
+_WINPE_PASAPAS = {
+    "winpeshl.ini": (
+        "[LaunchApps]\n"
+        "%SYSTEMROOT%\\System32\\cmd.exe, /k %SYSTEMROOT%\\System32\\osiris-diag.cmd\n"),
+    "osiris-diag.cmd": (
+        "@echo off\n"
+        "title OSIRIS - diagnostic pas a pas\n"
+        "echo [OSIRIS-DIAG] WinPE a demarre. Photographiez l ecran AVANT chaque touche.\n"
+        "reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\CrashControl /v AutoReboot /t REG_DWORD /d 0 /f >nul 2>&1\n"
+        "echo [OSIRIS-DIAG] Etape 1/3 : pilotes injectes, un par un\n"
+        "for %%i in (X:\\Windows\\System32\\*.inf) do (\n"
+        "  echo    - %%~nxi\n"
+        "  drvload \"%%i\"\n"
+        ")\n"
+        "echo [OSIRIS-DIAG] Etape 1/3 terminee.\n"
+        "pause\n"
+        "echo [OSIRIS-DIAG] Etape 2/3 : wpeinit (detection du materiel et du reseau)\n"
+        "wpeinit\n"
+        "echo [OSIRIS-DIAG] Etape 2/3 terminee.\n"
+        "ipconfig\n"
+        "pause\n"
+        "echo [OSIRIS-DIAG] Etape 3/3 : deploiement normal (startnet.cmd)\n"
+        "call X:\\Windows\\System32\\startnet.cmd\n"
+        "echo [OSIRIS-DIAG] startnet.cmd a rendu la main. Fenetre laissee ouverte.\n"),
+}
+
+
+def _winpe_chain_lines(diagnostic: bool = False, bootmgr_classique: bool = False,
+                       pasapas: bool = False) -> str:
     """Lignes iPXE qui chargent WinPE via wimboot (identiques pour toute machine).
 
     `diagnostic` : wimboot s'arrête (`pause`) avant de passer la main à Windows,
@@ -2299,6 +2334,10 @@ def _winpe_chain_lines(diagnostic: bool = False, bootmgr_classique: bool = False
     `bootmgr_classique` : un fichier nommé bootx64.efi passe avant tout chez wimboot,
     qui n'extrait alors plus rien de boot.wim. Sans lui, il lance bootmgfw_EX.efi
     (dossier Boot/EFI_EX) dès que boot.wim le contient."""
+    if pasapas:
+        return (_winpe_chain_lines(diagnostic, bootmgr_classique)
+                + "".join(f"initrd --name {n} {OSIRIS_BASE_URL}/winpe-diagnostic/{n} {n}\n"
+                          for n in _WINPE_PASAPAS))
     if bootmgr_classique:
         return (_winpe_chain_lines(diagnostic)
                 + f"initrd --name bootx64.efi {OSIRIS_BASE_URL}/static/winpe/bootmgfw.efi bootx64.efi\n")
@@ -2428,7 +2467,8 @@ def _ipxe_boot_winpe(clean_mac: str, commande: str = "boot") -> str:
 
 
 def _noter_envoi_winpe(clean_mac: str, diagnostic: bool = False,
-                       bootmgr_classique: bool = False, sanboot: bool = False) -> None:
+                       bootmgr_classique: bool = False, sanboot: bool = False,
+                       pasapas: bool = False) -> None:
     """Arme la surveillance : WinPE vient d'être envoyé à ce PC."""
     _bail_a_l_envoi[clean_mac] = _lire_bail(clean_mac) or (0, "")
     with Session(engine) as session:
@@ -2442,7 +2482,9 @@ def _noter_envoi_winpe(clean_mac: str, diagnostic: bool = False,
                 "s'arrête à l'écran avant Windows. Le retirer de la liste une fois fini."
                 + (" Gestionnaire de démarrage CLASSIQUE imposé (bootmgfw.efi, pas _EX)."
                    if bootmgr_classique else "")
-                + (" ISO WinPE démarrée SANS wimboot (sanboot iPXE)." if sanboot else "")))
+                + (" ISO WinPE démarrée SANS wimboot (sanboot iPXE)." if sanboot else "")
+                + (" WinPE PAS À PAS (osiris-diag.cmd, écran bleu figé si plantage)."
+                   if pasapas else "")))
         _append_log_line(session, clean_mac, machine.deploy_log_run, _stamp(
             "WinPE envoyé au PC. Il doit rappeler OSIRIS d'ici 2 à 5 min — "
             "sinon OSIRIS le signalera ici."))
@@ -2687,8 +2729,9 @@ def get_boot_script(request: Request, background_tasks: BackgroundTasks,
                     clean_mac, f"sanboot --no-describe {OSIRIS_BASE_URL}/static/{WINPE_ISO_NAME}")
                 return Response(content=script, media_type="text/plain")
             classique = diagnostic and "classique" in options
-            script += _winpe_chain_lines(diagnostic, classique)
-            _noter_envoi_winpe(clean_mac, diagnostic, classique)
+            pasapas = diagnostic and "pasapas" in options
+            script += _winpe_chain_lines(diagnostic, classique, pasapas)
+            _noter_envoi_winpe(clean_mac, diagnostic, classique, pasapas=pasapas)
             # Retour anticipé : le `boot` générique de fin rendait la main au firmware
             # en cas d'échec, et le PC repartait sur son disque sans rien dire.
             script += _ipxe_boot_winpe(clean_mac)
@@ -4725,6 +4768,15 @@ def _winpe_a_rappele(mac: str, background_tasks: BackgroundTasks) -> None:
             background_tasks.add_task(manager.broadcast, {"mac": mac, "log_line": l})
         session.add(machine)
         session.commit()
+
+
+@app.get("/winpe-diagnostic/{nom}")
+def get_winpe_diagnostic(nom: str):
+    """Fichiers du démarrage WinPE pas à pas, en fins de ligne Windows."""
+    if nom not in _WINPE_PASAPAS:
+        raise HTTPException(status_code=404)
+    return Response(content=_WINPE_PASAPAS[nom].replace("\n", "\r\n"),
+                    media_type="text/plain")
 
 
 @app.get("/winpe-auto")

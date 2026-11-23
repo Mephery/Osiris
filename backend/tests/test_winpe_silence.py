@@ -283,3 +283,21 @@ def test_mode_diagnostic_sanboot_sans_wimboot(client, bail, tmp_path, monkeypatc
     assert ":osiris_winpe_echec" in r
     assert "sanboot iPXE" in _journal()
     assert "WinPE envoyé" in _journal()   # surveillance armée
+
+
+def test_mode_diagnostic_pas_a_pas(client, bail, tmp_path, monkeypatch):
+    """`pasapas` : winpeshl.ini + osiris-diag.cmd injectés par wimboot, en CRLF."""
+    liste = tmp_path / "winpe-diagnostic"
+    liste.write_text(f"{MAC_FIL} pasapas\n")
+    monkeypatch.setattr(main, "WINPE_DIAGNOSTIC", str(liste))
+    _pc()
+    lignes = client.get("/boot", params={"mac": MAC_FIL}).text.splitlines()
+    i_boot = lignes.index("boot || goto osiris_winpe_echec")
+    for nom in ("winpeshl.ini", "osiris-diag.cmd"):
+        i = next(i for i, l in enumerate(lignes) if l.endswith(f"/winpe-diagnostic/{nom} {nom}"))
+        assert i < i_boot
+        corps = client.get(f"/winpe-diagnostic/{nom}")
+        assert corps.status_code == 200 and "\r\n" in corps.text
+    assert "AutoReboot /t REG_DWORD /d 0" in client.get("/winpe-diagnostic/osiris-diag.cmd").text
+    assert client.get("/winpe-diagnostic/startnet.cmd").status_code == 404
+    assert "PAS À PAS" in _journal()
