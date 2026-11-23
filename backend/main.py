@@ -2261,8 +2261,36 @@ def _winpe_driver_initrd_lines() -> str:
     return "".join(lines)
 
 
-def _winpe_chain_lines() -> str:
-    """Lignes iPXE qui chargent WinPE via wimboot (identiques pour toute machine)."""
+WINPE_DIAGNOSTIC = os.environ.get("OSIRIS_WINPE_DIAGNOSTIC", "/etc/osiris/winpe-diagnostic")
+
+
+def _en_diagnostic_winpe(clean_mac: str) -> bool:
+    """Ce PC est-il listé (une MAC par ligne, `#` = commentaire) pour un démarrage
+    WinPE commenté ? Relu à chaque /boot : s'active sans redémarrer l'API."""
+    try:
+        with open(WINPE_DIAGNOSTIC) as f:
+            return any(l.split("#")[0].strip() and validate_mac(l.split("#")[0].strip()) == clean_mac
+                       for l in f)
+    except (OSError, HTTPException):
+        return False
+
+
+def _winpe_chain_lines(diagnostic: bool = False) -> str:
+    """Lignes iPXE qui chargent WinPE via wimboot (identiques pour toute machine).
+
+    `diagnostic` : wimboot s'arrête (`pause`) avant de passer la main à Windows,
+    pour qu'on puisse LIRE ses messages — ils défilent sinon en une fraction de
+    seconde, et le PC qui refuse WinPE repart sur son disque sans rien laisser voir
+    (incidents du 04/11 et du 17/11/2026)."""
+    if diagnostic:
+        return (
+            "echo [OSIRIS] MODE DIAGNOSTIC : wimboot va s arreter avant Windows.\n"
+            "echo [OSIRIS] Photographiez chaque ecran, puis appuyez sur une touche.\n"
+            "prompt --timeout 30000 [OSIRIS] Touche pour continuer... || echo [OSIRIS] (suite)\n"
+            + _winpe_chain_lines().replace(
+                f"kernel {OSIRIS_BASE_URL}/static/wimboot\n",
+                f"kernel {OSIRIS_BASE_URL}/static/wimboot pause\n", 1)
+        )
     return (
         f"kernel {OSIRIS_BASE_URL}/static/wimboot\n"
         f"initrd --name bootmgr {OSIRIS_BASE_URL}/static/winpe/bootmgr bootmgr\n"
@@ -2378,7 +2406,7 @@ def _ipxe_boot_winpe(clean_mac: str) -> str:
     )
 
 
-def _noter_envoi_winpe(clean_mac: str) -> None:
+def _noter_envoi_winpe(clean_mac: str, diagnostic: bool = False) -> None:
     """Arme la surveillance : WinPE vient d'être envoyé à ce PC."""
     _bail_a_l_envoi[clean_mac] = _lire_bail(clean_mac) or (0, "")
     with Session(engine) as session:
@@ -2386,6 +2414,10 @@ def _noter_envoi_winpe(clean_mac: str) -> None:
         if not machine:
             return
         machine.winpe_envoye_le = _utc_naif()
+        if diagnostic:
+            _append_log_line(session, clean_mac, machine.deploy_log_run, _stamp(
+                "MODE DIAGNOSTIC (PC listé dans " + WINPE_DIAGNOSTIC + ") : wimboot "
+                "s'arrête à l'écran avant Windows. Le retirer de la liste une fois fini."))
         _append_log_line(session, clean_mac, machine.deploy_log_run, _stamp(
             "WinPE envoyé au PC. Il doit rappeler OSIRIS d'ici 2 à 5 min — "
             "sinon OSIRIS le signalera ici."))
@@ -2440,8 +2472,7 @@ _MOTIF_DELAI = (
 _A_FAIRE_DEMARRAGE = (
     "À faire : inutile de relancer en boucle, le même PC échouera de la même façon. "
     "Noter le modèle exact du PC (étiquette ou BIOS) et prévenir l'équipe OSIRIS. "
-    "Cas connu, non résolu : HP de 2025 (« G1i », ProBook 4 / EliteBook 6) — "
-    "rien n'a été modifié sur le disque.")
+    "Rien n'a été modifié sur le disque.")
 _A_FAIRE_DELAI = (
     "À faire : regarder l'écran du PC. "
     "(a) Il est sur son ancien Windows → WinPE ne démarre pas sur ce modèle : noter "
@@ -2616,8 +2647,9 @@ def get_boot_script(request: Request, background_tasks: BackgroundTasks,
             ).first()
         if win_img:
             script += f"echo [OSIRIS] Chargement WinPE ({win_img.name})...\n"
-            script += _winpe_chain_lines()
-            _noter_envoi_winpe(clean_mac)
+            diagnostic = _en_diagnostic_winpe(clean_mac)
+            script += _winpe_chain_lines(diagnostic)
+            _noter_envoi_winpe(clean_mac, diagnostic)
             # Retour anticipé : le `boot` générique de fin rendait la main au firmware
             # en cas d'échec, et le PC repartait sur son disque sans rien dire.
             script += _ipxe_boot_winpe(clean_mac)

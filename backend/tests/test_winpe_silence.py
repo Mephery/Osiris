@@ -221,3 +221,32 @@ def test_webhook_recoit_une_machine_lisible(client, bail):
     (mac, lignes, webhook, machine), = main._tour_winpe()
     assert webhook == "https://exemple.invalid/hook"
     assert machine.hostname == "FRCLCL04" and machine.status == "failed"
+
+
+# ── Mode diagnostic : lire wimboot au lieu de le voir défiler ─────────────────
+
+def test_mode_diagnostic_seulement_pour_le_pc_liste(client, bail, tmp_path, monkeypatch):
+    liste = tmp_path / "winpe-diagnostic"
+    liste.write_text("# tour Plenitude\nAA:BB:CC:00:11:22\n")
+    monkeypatch.setattr(main, "WINPE_DIAGNOSTIC", str(liste))
+    _pc()
+
+    r = client.get("/boot", params={"mac": MAC_FIL})
+    assert "wimboot pause" not in r.text           # pas listé : démarrage normal
+
+    liste.write_text(f"{MAC_FIL}   # tour Plenitude\n")   # relu sans redémarrage
+    r = client.get("/boot", params={"mac": MAC_FIL})
+    assert "/static/wimboot pause\n" in r.text
+    assert "MODE DIAGNOSTIC" in r.text
+    assert "boot || goto osiris_winpe_echec" in r.text   # le filet reste en place
+    assert "MODE DIAGNOSTIC" in _journal()
+
+
+def test_mode_diagnostic_fichier_absent_ou_illisible(client, bail, tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "WINPE_DIAGNOSTIC", str(tmp_path / "absent"))
+    _pc()
+    assert "wimboot pause" not in client.get("/boot", params={"mac": MAC_FIL}).text
+    f = tmp_path / "casse"
+    f.write_text("pas-une-mac\n")
+    monkeypatch.setattr(main, "WINPE_DIAGNOSTIC", str(f))
+    assert "wimboot pause" not in client.get("/boot", params={"mac": MAC_FIL}).text
