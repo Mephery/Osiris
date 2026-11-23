@@ -19,8 +19,16 @@ autoinstall:
     authorized-keys:
       - {{ ssh_pubkey }}
 {% endif %}
-{% if packages %}
+{#- Poste de travail : on installe depuis l'ISO Server (l'ISO Desktop, chargée
+    en RAM par url=, ferait échouer un PC de 8 Go) et on AJOUTE le bureau.
+    ubuntu-desktop-minimal = la « sélection par défaut » de l'installateur
+    Desktop ; les logiciels Human's viennent ensuite, par le firstboot. #}
+{% set poste = profile.machine_type != "server" %}
+{% if packages or poste %}
   packages:
+{% if poste %}
+    - ubuntu-desktop-minimal
+{% endif %}
 {% for pkg in packages %}
     - {{ pkg }}
 {% endfor %}
@@ -34,4 +42,18 @@ autoinstall:
     # un domaine, il depasse les 90 s du delai par defaut d'une unite oneshot.
     - printf '[Unit]\nDescription=OSIRIS First Boot\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/osiris-firstboot.sh\nRemainAfterExit=yes\nTimeoutStartSec=infinity\n[Install]\nWantedBy=multi-user.target\n' > /target/etc/systemd/system/osiris-firstboot.service
     - curtin in-target --target=/target -- systemctl enable osiris-firstboot.service
+{% if poste %}
+    # Réseau d'un poste = NetworkManager (Wi-Fi, VPN, icône du bureau). L'ISO
+    # Server laisse un netplan systemd-networkd : on le remplace. NetworkManager
+    # crée tout seul une connexion filaire DHCP, le firstboot a donc son réseau.
+    - rm -f /target/etc/netplan/*.yaml
+    # Chaîne YAML entre apostrophes (doublées à l'intérieur) : sans elles, le
+    # « : » suivi d'un espace se lit comme une clé et tout l'autoinstall est rejeté.
+    - 'printf ''network:\n  version: 2\n  renderer: NetworkManager\n'' > /target/etc/netplan/01-network-manager-all.yaml'
+    - chmod 600 /target/etc/netplan/01-network-manager-all.yaml
+    # Sans réseau networkd, son « wait-online » attendrait 2 min à chaque
+    # démarrage avant d'abandonner ; NetworkManager a le sien.
+    - curtin in-target --target=/target -- systemctl disable systemd-networkd.service systemd-networkd-wait-online.service
+    - curtin in-target --target=/target -- systemctl enable NetworkManager.service NetworkManager-wait-online.service
+{% endif %}
     - curl -sf -X POST '{{ status_url }}?status=deployed' || true

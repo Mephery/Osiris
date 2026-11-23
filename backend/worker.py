@@ -209,25 +209,50 @@ async def _run(cmd: list[str], error_prefix: str):
         raise RuntimeError(f"{error_prefix}: {err.decode()[:300]}")
 
 
-async def _process_ubuntu(iso_path: str, nfs_path: str, static_dir: str, _update):
-    """Extrait une ISO Ubuntu vers NFS + vmlinuz/initrd vers static/."""
+UBUNTU_ISO_SERVIE = "ubuntu.iso"
+
+
+async def _process_ubuntu(iso_path: str, static_dir: str, _update, *, deplacer: bool):
+    """Prépare une ISO Ubuntu pour le démarrage réseau par HTTP.
+
+    L'installateur reçoit l'ISO ENTIÈRE par `url=` (casper la charge en RAM) :
+    on la range telle quelle à côté de son noyau, sous static/, là où le cache
+    de site la sert aussi. Plus de NFS : il n'a jamais tourné en production, et
+    il aurait fallu ouvrir le port 2049 à travers chaque pare-feu de site.
+
+    C'est l'ISO **Server** (≈ 3 Go) qu'on sert, même pour un poste : l'ISO
+    Desktop (≈ 6,5 Go) chargée en RAM ferait échouer un PC de 8 Go. Le bureau
+    est ajouté par l'autoinstall (user-data.j2).
+
+    `deplacer` : l'ISO vient d'être téléchargée dans /tmp, on la déplace. Un
+    fichier local (file://) appartient à l'administrateur : on le copie.
+    """
     _update(status="extracting", progress=0)
-    os.makedirs(nfs_path, exist_ok=True)
     os.makedirs(static_dir, exist_ok=True)
 
-    await _run(
-        ["/usr/bin/xorriso", "-osirrox", "on", "-indev", iso_path, "-extract", "/", nfs_path],
-        "xorriso NFS",
-    )
+    # L'extraction était lancée sans contrôle : une ISO sans noyau donnait une
+    # image « prête » qui démarrait sur un 404. Désormais l'échec est l'erreur
+    # de l'image.
     for src, dst in [
         ("/casper/vmlinuz", f"{static_dir}/vmlinuz"),
         ("/casper/initrd",  f"{static_dir}/initrd"),
     ]:
-        proc = await asyncio.create_subprocess_exec(
-            "/usr/bin/xorriso", "-osirrox", "on", "-indev", iso_path, "-extract", src, dst,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        await _run(
+            ["/usr/bin/xorriso", "-osirrox", "on", "-indev", iso_path, "-extract", src, dst],
+            f"xorriso {src}",
         )
-        await proc.communicate()
+        if not os.path.getsize(dst):
+            raise RuntimeError(f"{src} vide dans l'ISO : est-ce bien une ISO live Ubuntu ?")
+
+    cible = f"{static_dir}/{UBUNTU_ISO_SERVIE}"
+    temporaire = f"{cible}.part"
+    if deplacer:
+        shutil.move(iso_path, temporaire)
+    else:
+        await asyncio.to_thread(shutil.copyfile, iso_path, temporaire)
+    # Renommage en dernier : une copie interrompue ne laisse jamais une ISO
+    # tronquée sous le nom que l'iPXE sert.
+    os.replace(temporaire, cible)
 
 
 async def _7z_extract(iso_path: str, iso_src: str, out_dir: str, label: str):
@@ -405,10 +430,8 @@ async def download_iso(ctx, image_id: int):
         os_name  = image.os
         version  = image.version
         wim_name = image.wim_name
-        nfs_path = image.nfs_path or f"/srv/nfs/{os_name}-{version}"
         image.status   = "downloading"
         image.progress = 0
-        image.nfs_path = nfs_path
         session.add(image)
         session.commit()
 
@@ -451,11 +474,12 @@ async def download_iso(ctx, image_id: int):
 
         # ── Traitement selon l'OS ─────────────────────────────────────────────
         if os_name == "ubuntu":
-            await _process_ubuntu(iso_path, nfs_path, static_dir, _update)
+            await _process_ubuntu(iso_path, static_dir, _update, deplacer=not local_file)
         elif os_name == "windows":
             await _process_windows(iso_path, _update, wim_name=wim_name)
 
-        if not local_file:
+        # Ubuntu a déjà déplacé l'ISO téléchargée vers static/ : elle est servie.
+        if not local_file and os.path.exists(iso_path):
             os.unlink(iso_path)
         _update(status="ready", progress=100)
 

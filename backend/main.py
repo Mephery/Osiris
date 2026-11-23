@@ -2170,7 +2170,8 @@ async def create_image(body: ImageCreate, current_user: User = Depends(require_a
             name=body.name, version=body.version,
             os=body.os, iso_url=body.iso_url,
             wim_name=body.wim_name.strip() if body.os == "windows" else "",
-            nfs_path=f"/srv/nfs/{body.os}-{body.version}",
+            # Plus de NFS : Ubuntu démarre en HTTP (url=), voir _process_ubuntu.
+            nfs_path="",
         )
         session.add(image)
         _log(session, current_user, "create_image", details={"name": body.name, "version": body.version})
@@ -2273,6 +2274,35 @@ def _winpe_chain_lines() -> str:
     )
 
 
+def _ubuntu_ipxe_lignes(image: Optional[OsImage], clean_mac: str) -> str:
+    """Lignes iPXE qui lancent l'installateur Ubuntu, ISO servie en HTTP.
+
+    `url=` : casper télécharge l'ISO entière en RAM puis s'en sert de racine.
+    C'est ce qui remplace le NFS (jamais monté en production). Le prix est la
+    RAM : d'où l'ISO Server, ≈ 3 Go, et non la Desktop (voir _process_ubuntu).
+
+    `cloud-config-url=/dev/null` : sans lui, cloud-init de l'installateur prend
+    `url=` pour SA configuration et retélécharge l'ISO entière pour la lire.
+
+    Sans image prête, on le DIT et on s'arrête. L'ancien repli visait
+    /static/vmlinuz, qui n'a jamais existé : le PC affichait un 404 iPXE sans
+    rapport apparent avec l'absence d'image.
+    """
+    if not image:
+        return ("echo [OSIRIS] ERREUR : aucune image Ubuntu prete dans OSIRIS (onglet Images)\n"
+                "echo [OSIRIS] Rien n'a ete touche sur ce PC. Arret dans 60 s.\n"
+                "sleep 60\n"
+                "exit 1\n")
+    base = f"{OSIRIS_BASE_URL}/static/ubuntu-{image.version}"
+    return (
+        f"echo [OSIRIS] Chargement {image.name} (ISO en memoire, quelques minutes)...\n"
+        f"kernel {base}/vmlinuz initrd=initrd ip=dhcp url={base}/ubuntu.iso "
+        f"cloud-config-url=/dev/null autoinstall "
+        f"ds=nocloud-net;s={OSIRIS_BASE_URL}/cloud-init/{clean_mac}/\n"
+        f"initrd {base}/initrd\n"
+    )
+
+
 @app.get("/boot")
 @limiter.limit("30/minute")
 def get_boot_script(request: Request, mac: str | None = None):
@@ -2361,25 +2391,24 @@ def get_boot_script(request: Request, mac: str | None = None):
             script += "echo [OSIRIS] Aucune image Windows disponible - boot local\n"
             script += "exit\n"
     elif os_type == "ubuntu":
-        # Cherche la dernière image Ubuntu prête — fallback sur les fichiers manuels
         with Session(engine) as img_session:
             active_img = img_session.exec(
                 select(OsImage)
                 .where(OsImage.os == "ubuntu", OsImage.status == "ready")
                 .order_by(OsImage.created_at.desc())
             ).first()
-        if active_img:
-            vmlinuz = f"{OSIRIS_BASE_URL}/static/ubuntu-{active_img.version}/vmlinuz"
-            initrd  = f"{OSIRIS_BASE_URL}/static/ubuntu-{active_img.version}/initrd"
-            nfsroot = f"{OSIRIS_IP}:{active_img.nfs_path}"
-            script += f"echo [OSIRIS] Chargement {active_img.name}...\n"
-        else:
-            vmlinuz = f"{OSIRIS_BASE_URL}/static/vmlinuz"
-            initrd  = f"{OSIRIS_BASE_URL}/static/initrd"
-            nfsroot = f"{OSIRIS_IP}:/srv/nfs/ubuntu"
-            script += "echo [OSIRIS] Chargement Ubuntu (image manuelle)...\n"
-        script += f"kernel {vmlinuz} initrd=initrd ip=dhcp autoinstall boot=casper netboot=nfs nfsroot={nfsroot} ds=nocloud-net;s={OSIRIS_BASE_URL}/cloud-init/{clean_mac}/\n"
-        script += f"initrd {initrd}\n"
+        script += _ubuntu_ipxe_lignes(active_img, clean_mac)
+        if not active_img:
+            # La fiche vient de passer « deploying » : rien ne s'installera, elle
+            # resterait bloquée. Elle repart en attente, prête pour un nouvel
+            # essai dès qu'une image sera là.
+            with Session(engine) as s:
+                m = s.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+                if m and m.status == "deploying":
+                    m.status = "pending"
+                    s.add(m)
+                    s.commit()
+            return Response(content=script, media_type="text/plain")
     elif os_type == "debian":
         script += "echo [OSIRIS] Chargement Debian Installer...\n"
         script += f"kernel {OSIRIS_BASE_URL}/static/debian-12/linux auto=true priority=critical "
@@ -2433,6 +2462,15 @@ def get_meta_data(mac: str):
         content=f"instance-id: osiris-{clean_mac}\nlocal-hostname: {machine.hostname}\n",
         media_type="text/plain",
     )
+
+
+@app.get("/cloud-init/{mac}/vendor-data")
+def get_vendor_data(mac: str):
+    """Vide, mais PRÉSENT. Le cloud-init de l'installateur Ubuntu 26.04 réessaie
+    sur 404 : 11 tentatives et plusieurs minutes perdues à chaque déploiement
+    (banc, 23/11) avant d'abandonner. Rien à y mettre : tout est dans user-data."""
+    validate_mac(mac)
+    return Response(content="", media_type="text/plain")
 
 
 @app.get("/cloud-init/{mac}/user-data")

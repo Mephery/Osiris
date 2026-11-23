@@ -404,6 +404,11 @@ if realm list 2>/dev/null | grep -q "{{ profile.domain }}"; then
 else
     _log "ECHEC jonction AD - verifier que le DNS resout {{ profile.domain }} et que les identifiants sont corrects"
 fi
+{% elif profile.join_domain %}
+# Jonction demandee par le profil, mais impossible a tenter : on le DIT. Avant,
+# l'etape etait sautee en silence et seul un smoke test « absent du realm »
+# le revelait, sans dire pourquoi.
+_log "Jonction AD demandee mais NON TENTEE : domaine ou compte de jonction absent du profil"
 {% endif %}
 
 {% if profile.default_user %}
@@ -1111,11 +1116,15 @@ fi
 
 {% if profile.join_domain %}
 # Jonction domaine AD
+{% if profile.domain and profile.domain_join_user and profile.domain_join_password %}
 if realm list 2>/dev/null | grep -q "{{ profile.domain }}"; then
     _add_test "Jonction domaine AD" true "{{ profile.domain }}"
 else
     _add_test "Jonction domaine AD" false "Domaine non trouve dans realm list"
 fi
+{% else %}
+_add_test "Jonction domaine AD" false "Demandee par le profil, mais domaine ou compte de jonction non renseigne"
+{% endif %}
 {% endif %}
 
 {% if profile.machine_type == 'server' %}
@@ -1132,8 +1141,9 @@ if grep -qE '^PasswordAuthentication\s+no' /etc/ssh/sshd_config 2>/dev/null; the
 else
     _add_test "SSH - auth mot de passe" false "Toujours active"
 fi
-{% else %}
-# Service TeamViewer
+{% elif tv_password %}
+# Service TeamViewer : teste seulement s'il a ete installe (meme condition que
+# l'installation plus haut), sinon tout poste sans TeamViewer echouait.
 if systemctl is-active --quiet teamviewerd 2>/dev/null; then
     _add_test "TeamViewer" true "En cours d'execution"
 else
