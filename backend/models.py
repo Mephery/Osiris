@@ -413,6 +413,12 @@ class Machine(SQLModel, table=True):
     # Sert a regrouper les lignes de DeployLogLine : relancer un deploiement ouvre un
     # nouveau journal sans effacer celui de la tentative precedente.
     deploy_log_run: int = Field(default=1)
+    # Instant (UTC naif) ou /boot a envoye WinPE a ce PC, remis a None des que WinPE
+    # rappelle OSIRIS (/winpe-auto). Tant qu'il est renseigne, WinPE n'a pas donne
+    # signe de vie : c'est ce que surveille `_tour_winpe`. Sans lui, un PC dont le
+    # firmware refuse WinPE repartait sur son propre Windows et la fiche restait
+    # « deploying » pour toujours, sans un mot (5 PC Francas le 17/11/2026).
+    winpe_envoye_le: Optional[datetime] = Field(default=None)
     # Date de creation de la FICHE (pas du deploiement : voir `deployed_at`).
     #
     # Sans elle, une fiche restee « pending » etait indetectable : rien ne disait

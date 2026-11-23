@@ -16,6 +16,8 @@ os.environ.setdefault("OSIRIS_IP", "127.0.0.1")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
 # Jamais de surveillance des tunnels en test : elle agit sur les vrais (sudo).
 os.environ["OSIRIS_VPN_SURVEILLANCE"] = "0"
+# Ni de surveillance de WinPE en tache de fond : les tests appellent `_tour_winpe`.
+os.environ["OSIRIS_WINPE_SURVEILLANCE"] = "0"
 
 import pytest
 from fastapi.testclient import TestClient

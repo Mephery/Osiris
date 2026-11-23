@@ -140,6 +140,21 @@ export function MachineDetailPanel({
             })()}
           </div>
 
+          {/* ── Échec : la cause, écrite par OSIRIS, en tête de fiche ── */}
+          {machine.status === 'failed' && (
+            <div className="rounded border border-red-500/40 bg-red-500/10 p-3 space-y-1.5">
+              <p className="text-[11px] font-bold text-red-400">Déploiement en échec</p>
+              {machine.derniere_ligne ? (
+                <p className="text-[10px] text-slate-300 whitespace-pre-wrap">{machine.derniere_ligne}</p>
+              ) : (
+                <p className="text-[10px] text-slate-300">Aucune explication enregistrée : voir le journal ci-dessous.</p>
+              )}
+              <p className="text-[10px] text-slate-400">
+                Le journal complet du déploiement est plus bas sur cette fiche.
+              </p>
+            </div>
+          )}
+
           {/* ── Premier démarrage inachevé : la fiche « déployée » ne suffit pas ── */}
           {premierDemarrageInacheve(machine, ouvertA) && (
             <div className="rounded border border-amber-500/40 bg-amber-500/10 p-3 space-y-1.5">

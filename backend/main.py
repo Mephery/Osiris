@@ -133,9 +133,11 @@ async def lifespan(app: FastAPI):
     arq_pool = await create_pool(RedisSettings.from_dsn(redis_url))
     verif = asyncio.create_task(_verifier_routes_machines())
     tunnels = asyncio.create_task(_surveiller_tunnels_vpn())
+    winpe = asyncio.create_task(_surveiller_winpe())
     yield
     verif.cancel()
     tunnels.cancel()
+    winpe.cancel()
     await arq_pool.aclose()
 
 limiter = Limiter(key_func=get_remote_address)
@@ -2303,15 +2305,243 @@ def _ubuntu_ipxe_lignes(image: Optional[OsImage], clean_mac: str) -> str:
     )
 
 
+# ── Surveillance de WinPE : ne plus jamais laisser un démarrage raté en silence ──
+#
+# Le 17/11/2026, 5 PC Francas (HP ProBook 4 / EliteBook 6 G1i) ont reçu WinPE, puis
+# sont repartis sur le Windows de leur disque : le firmware a refusé WinPE. Aucun
+# appel n'est revenu, les fiches sont restées « deploying » pour toujours, et
+# l'équipe a dû deviner. Trois filets, du plus précis au plus large :
+#   1. iPXE : si `boot` échoue et lui rend la main, il l'affiche à l'écran au lieu
+#      de rendre la main au firmware, et rapporte son code d'erreur à /boot ;
+#   2. DHCP : le PC qui redemande une adresse sous un nom qui n'est pas celui de
+#      WinPE (« DESKTOP-… ») est reparti sur son disque — c'est la preuve lue à la
+#      main dans les journaux dnsmasq le 23/11, désormais lue toutes les 30 s ;
+#   3. délai : sans rappel de WinPE (/winpe-auto) dans les 10 min, échec. Un
+#      démarrage normal rappelle en 2 à 5 min.
+
+WINPE_DELAI_RAPPEL = timedelta(minutes=int(os.environ.get("OSIRIS_WINPE_DELAI_MIN", "10")))
+DNSMASQ_LEASES = os.environ.get("OSIRIS_DNSMASQ_LEASES", "/var/lib/misc/dnsmasq.leases")
+
+# Bail DHCP du PC au moment de l'envoi de WinPE : (expiration, nom). Un bail qui
+# change ENSUITE signe une nouvelle demande DHCP. En mémoire seulement : perdu au
+# redémarrage de l'API, le filet n°3 (le délai, en base) prend alors le relais.
+_bail_a_l_envoi: dict[str, tuple[int, str]] = {}
+
+
+def _utc_naif() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _lire_bail(clean_mac: str) -> Optional[tuple[int, str]]:
+    """(expiration, nom annoncé) du bail dnsmasq de cette MAC, ou None.
+
+    Format d'une ligne : `<expiration> <mac> <ip> <nom|*> <client-id>`."""
+    try:
+        with open(DNSMASQ_LEASES) as f:
+            for ligne in f:
+                parts = ligne.split()
+                if len(parts) >= 4 and parts[1].replace(":", "").lower() == clean_mac:
+                    try:
+                        return int(parts[0]), parts[3]
+                    except ValueError:
+                        return None
+    except OSError:
+        pass
+    return None
+
+
+def _nom_winpe(nom: str) -> bool:
+    """Nom DHCP compatible avec WinPE (ou pas de nom du tout : on ne conclut rien)."""
+    n = (nom or "").strip().lower()
+    return n in ("", "*", "minwinpc") or n.startswith("minint")
+
+
+def _ipxe_boot_winpe(clean_mac: str) -> str:
+    """Fin du script iPXE de WinPE : démarrer, et en cas d'échec le DIRE.
+
+    Pas d'accents ni d'apostrophes : la console iPXE ne les affiche pas."""
+    return (
+        "boot || goto osiris_winpe_echec\n"
+        ":osiris_winpe_echec\n"
+        "set osiris_err ${errno}\n"
+        "echo\n"
+        "echo [OSIRIS] ====================================================\n"
+        "echo [OSIRIS] ECHEC : WinPE n a pas pu demarrer sur ce PC (erreur ${osiris_err})\n"
+        "echo [OSIRIS] Rien n a ete modifie sur le disque.\n"
+        "echo [OSIRIS] Inutile de relancer : prenez une PHOTO de cet ecran\n"
+        "echo [OSIRIS] et prevenez l equipe OSIRIS. La fiche passe en echec.\n"
+        "echo [OSIRIS] ====================================================\n"
+        f"imgfetch {OSIRIS_BASE_URL}/boot?mac={clean_mac}&echec=${{osiris_err}} || "
+        "echo [OSIRIS] (rapport a OSIRIS impossible)\n"
+        "prompt Appuyez sur une touche pour redemarrer sur le disque du PC...\n"
+        "exit 1\n"
+    )
+
+
+def _noter_envoi_winpe(clean_mac: str) -> None:
+    """Arme la surveillance : WinPE vient d'être envoyé à ce PC."""
+    _bail_a_l_envoi[clean_mac] = _lire_bail(clean_mac) or (0, "")
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            return
+        machine.winpe_envoye_le = _utc_naif()
+        _append_log_line(session, clean_mac, machine.deploy_log_run, _stamp(
+            "WinPE envoyé au PC. Il doit rappeler OSIRIS d'ici 2 à 5 min — "
+            "sinon OSIRIS le signalera ici."))
+        session.add(machine)
+        session.commit()
+
+
+def _detacher_lisible(session: Session, machine: Machine) -> None:
+    """Recharge puis détache : la machine reste lisible hors session (webhook),
+    au lieu d'expirer au commit et de lever DetachedInstanceError plus tard."""
+    session.refresh(machine)
+    session.expunge(machine)
+
+
+def _webhook_org(session: Session, machine: Machine) -> str:
+    if not machine.organization_id:
+        return ""
+    org = session.get(Organization, machine.organization_id)
+    return org.webhook_url if org else ""
+
+
+def _declarer_echec_winpe(session: Session, machine: Machine, lignes: list[str]) -> list[str]:
+    """Passe la fiche en échec avec son explication (sans commit).
+
+    Rend les lignes horodatées, pour les diffuser en direct à l'interface."""
+    machine.status = "failed"
+    machine.winpe_envoye_le = None
+    _bail_a_l_envoi.pop(machine.mac, None)
+    _record_deploy_event(session, machine, "failed")
+    estampillees = [_stamp(l) for l in lignes]
+    for l in estampillees:
+        _append_log_line(session, machine.mac, machine.deploy_log_run, l)
+    session.add(machine)
+    return estampillees
+
+
+async def _diffuser_echec(mac: str, lignes: list[str], webhook_url: str,
+                          machine: Optional[Machine]) -> None:
+    for l in lignes:
+        await manager.broadcast({"mac": mac, "log_line": l})
+    await manager.broadcast({"mac": mac, "status": "failed", "deployed_at": None})
+    if webhook_url and machine is not None:
+        await _send_webhook(webhook_url, machine, "failed")
+
+
+_MOTIF_DESKTOP = (
+    "ECHEC : WinPE n'a pas démarré. Le PC est reparti sur le Windows de son disque "
+    "(il a redemandé une adresse réseau sous le nom « {nom} », alors que WinPE "
+    "s'annonce MININT-… ou MINWINPC).")
+_MOTIF_DELAI = (
+    "ECHEC : WinPE n'a pas rappelé OSIRIS {minutes} min après son envoi.")
+_A_FAIRE_DEMARRAGE = (
+    "À faire : inutile de relancer en boucle, le même PC échouera de la même façon. "
+    "Noter le modèle exact du PC (étiquette ou BIOS) et prévenir l'équipe OSIRIS. "
+    "Cas connu, non résolu : HP de 2025 (« G1i », ProBook 4 / EliteBook 6) — "
+    "rien n'a été modifié sur le disque.")
+_A_FAIRE_DELAI = (
+    "À faire : regarder l'écran du PC. "
+    "(a) Il est sur son ancien Windows → WinPE ne démarre pas sur ce modèle : noter "
+    "le modèle et prévenir l'équipe OSIRIS. "
+    "(b) Message « OSIRIS injoignable » puis une liste de cartes réseau → pas de réseau "
+    "dans WinPE : vérifier câble et prise ; si AUCUNE carte n'apparaît, son pilote manque. "
+    "(c) Écran noir ou figé → WinPE bloqué au démarrage : photo de l'écran. "
+    "Si le PC finit par rappeler, le déploiement reprend tout seul.")
+
+
+def _rapport_echec_ipxe(clean_mac: str, echec: str, background_tasks: BackgroundTasks) -> None:
+    code = echec.strip().lower()
+    if not re.fullmatch(r"(0x)?[0-9a-f]{1,16}", code):
+        code = ""
+    hexa = code[2:] if code.startswith("0x") else code
+    detail = (f"erreur iPXE 0x{hexa} — https://ipxe.org/err/{hexa}" if hexa
+              else "code d'erreur illisible")
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
+        if not machine:
+            return
+        if machine.status == "failed" and machine.winpe_envoye_le is None:
+            # Déjà signalé (par le DHCP ou un premier rapport) : on ajoute le code.
+            ligne = _stamp(f"iPXE confirme : WinPE a refusé de démarrer ({detail}).")
+            _append_log_line(session, clean_mac, machine.deploy_log_run, ligne)
+            session.commit()
+            background_tasks.add_task(manager.broadcast, {"mac": clean_mac, "log_line": ligne})
+            return
+        lignes = _declarer_echec_winpe(session, machine, [
+            f"ECHEC : iPXE n'a pas pu lancer WinPE ({detail}). Le PC affiche le "
+            f"message d'échec et attend une touche.",
+            _A_FAIRE_DEMARRAGE,
+        ])
+        webhook = _webhook_org(session, machine)
+        session.commit()
+        _detacher_lisible(session, machine)
+    background_tasks.add_task(_diffuser_echec, clean_mac, lignes, webhook, machine)
+
+
+def _tour_winpe(maintenant: Optional[datetime] = None) -> list[tuple]:
+    """Un passage de surveillance. Rend les échecs déclarés, à diffuser."""
+    maintenant = maintenant or _utc_naif()
+    declares = []
+    with Session(engine) as session:
+        attente = session.exec(select(Machine).where(
+            Machine.winpe_envoye_le.is_not(None), Machine.status == "deploying")).all()
+        for m in attente:
+            bail = _lire_bail(m.mac)
+            avant = _bail_a_l_envoi.get(m.mac)
+            if (bail and avant is not None and bail[0] != avant[0]
+                    and not _nom_winpe(bail[1])):
+                lignes = [_MOTIF_DESKTOP.format(nom=bail[1]), _A_FAIRE_DEMARRAGE]
+            elif maintenant - m.winpe_envoye_le >= WINPE_DELAI_RAPPEL:
+                minutes = int(WINPE_DELAI_RAPPEL.total_seconds() // 60)
+                lignes = [_MOTIF_DELAI.format(minutes=minutes), _A_FAIRE_DELAI]
+            else:
+                continue
+            estampillees = _declarer_echec_winpe(session, m, lignes)
+            declares.append((m.mac, estampillees, _webhook_org(session, m), m))
+        # Fiches sorties de l'attente autrement (supprimées, redéployées…) : on oublie.
+        en_attente = {m.mac for m in attente}
+        for mac in list(_bail_a_l_envoi):
+            if mac not in en_attente:
+                _bail_a_l_envoi.pop(mac, None)
+        session.commit()
+        for _, _, _, m in declares:
+            _detacher_lisible(session, m)
+    return declares
+
+
+async def _surveiller_winpe() -> None:
+    if os.environ.get("OSIRIS_WINPE_SURVEILLANCE", "1") == "0":
+        return
+    while True:
+        try:
+            for mac, lignes, webhook, machine in await run_in_threadpool(_tour_winpe):
+                await _diffuser_echec(mac, lignes, webhook, machine)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger("osiris.winpe").exception("Surveillance de WinPE en échec")
+        await asyncio.sleep(30)
+
+
 @app.get("/boot")
 @limiter.limit("30/minute")
-def get_boot_script(request: Request, mac: str | None = None):
+def get_boot_script(request: Request, background_tasks: BackgroundTasks,
+                    mac: str | None = None, echec: str | None = None):
     if not mac:
         script = "#!ipxe\n"
         script += f"chain {OSIRIS_BASE_URL}/boot?mac=${{mac}}\n"
         return Response(content=script, media_type="text/plain")
 
     clean_mac = validate_mac(mac)
+
+    # Rapport d'iPXE : la commande `boot` de WinPE a échoué et lui a rendu la main
+    # (cf. _ipxe_boot_winpe). On le consigne et on le dit — c'est tout.
+    if echec is not None:
+        _rapport_echec_ipxe(clean_mac, echec, background_tasks)
+        return Response(content="#!ipxe\n", media_type="text/plain")
 
     with Session(engine) as session:
         machine = session.exec(select(Machine).where(Machine.mac == clean_mac)).first()
@@ -2387,9 +2617,19 @@ def get_boot_script(request: Request, mac: str | None = None):
         if win_img:
             script += f"echo [OSIRIS] Chargement WinPE ({win_img.name})...\n"
             script += _winpe_chain_lines()
+            _noter_envoi_winpe(clean_mac)
+            # Retour anticipé : le `boot` générique de fin rendait la main au firmware
+            # en cas d'échec, et le PC repartait sur son disque sans rien dire.
+            script += _ipxe_boot_winpe(clean_mac)
+            return Response(content=script, media_type="text/plain")
         else:
             script += "echo [OSIRIS] Aucune image Windows disponible - boot local\n"
             script += "exit\n"
+            with Session(engine) as s:
+                _append_log_line(s, clean_mac, _current_run(s, clean_mac), _stamp(
+                    "ECHEC : aucune image Windows prête dans OSIRIS (onglet Images) — "
+                    "le PC est reparti sur son disque, rien n'a été touché."))
+                s.commit()
     elif os_type == "ubuntu":
         with Session(engine) as img_session:
             active_img = img_session.exec(
@@ -3143,13 +3383,16 @@ def get_all_machines(org_id: Optional[int] = None):
         # Sa dernière ligne de journal dit OÙ ça s'est arrêté ; on ne la cherche
         # que pour ces machines-là, rares.
         def derniere_ligne(m: Machine) -> Optional[str]:
-            if m.status != "deployed" or m.smoke_status:
+            # Une fiche en échec, elle, a sa cause en fin de journal : les DEUX
+            # dernières lignes, car OSIRIS y écrit la cause PUIS « À faire ».
+            if m.status != "failed" and (m.status != "deployed" or m.smoke_status):
                 return None
-            ligne = session.exec(
+            lignes = session.exec(
                 select(DeployLogLine.line)
                 .where(DeployLogLine.mac == m.mac, DeployLogLine.run == m.deploy_log_run)
-                .order_by(DeployLogLine.id.desc()).limit(1)).first()
-            return ligne
+                .order_by(DeployLogLine.id.desc())
+                .limit(2 if m.status == "failed" else 1)).all()
+            return "\n".join(reversed(lignes)) or None
 
         def tests_en_echec(m: Machine) -> list[str]:
             try:
@@ -4383,8 +4626,39 @@ def _mac_from_wire_mac(wire_mac: Optional[str]) -> Optional[str]:
     return machine.mac if machine else None
 
 
+def _winpe_a_rappele(mac: str, background_tasks: BackgroundTasks) -> None:
+    """WinPE vient de rappeler : on désarme la surveillance et on le dit.
+
+    Si la surveillance avait déjà conclu à l'échec (WinPE très lent), le PC prouve
+    le contraire : la fiche repasse en cours, le déploiement continue."""
+    _bail_a_l_envoi.pop(mac, None)
+    with Session(engine) as session:
+        machine = session.exec(select(Machine).where(Machine.mac == mac)).first()
+        if not machine:
+            return
+        lignes = []
+        if machine.status == "failed":
+            machine.status = "deploying"
+            _record_deploy_event(session, machine, "deploying")
+            lignes.append(_stamp("WinPE a finalement rappelé OSIRIS : le déploiement "
+                                 "reprend, l'échec signalé plus haut est levé."))
+            background_tasks.add_task(manager.broadcast, {
+                "mac": mac, "status": "deploying", "deployed_at": None})
+        elif machine.winpe_envoye_le is not None:
+            lignes.append(_stamp("WinPE a démarré et a rappelé OSIRIS."))
+        if not lignes and machine.winpe_envoye_le is None:
+            return
+        machine.winpe_envoye_le = None
+        for l in lignes:
+            _append_log_line(session, mac, machine.deploy_log_run, l)
+            background_tasks.add_task(manager.broadcast, {"mac": mac, "log_line": l})
+        session.add(machine)
+        session.commit()
+
+
 @app.get("/winpe-auto")
-def get_winpe_script_auto(request: Request, serial: str = "", sysid: str = ""):
+def get_winpe_script_auto(request: Request, background_tasks: BackgroundTasks,
+                          serial: str = "", sysid: str = ""):
     """Identifie la machine et retourne son script de déploiement.
 
     Trois voies, dans cet ordre :
@@ -4418,6 +4692,7 @@ def get_winpe_script_auto(request: Request, serial: str = "", sysid: str = ""):
     # reste en mode capture. Ne JAMAIS retomber sur le deploiement normal, qui
     # repartitionnerait le disque de la machine de reference. La seule sortie du
     # mode capture est la suppression explicite du job (bouton dans l'UI).
+    _winpe_a_rappele(mac, background_tasks)
     # Identifiant matériel : mémorisé dès WinPE, donc disponible pour choisir le
     # pack de pilotes de CE déploiement — pas seulement du suivant.
     if sysid.strip():
