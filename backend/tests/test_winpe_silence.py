@@ -250,3 +250,22 @@ def test_mode_diagnostic_fichier_absent_ou_illisible(client, bail, tmp_path, mon
     f.write_text("pas-une-mac\n")
     monkeypatch.setattr(main, "WINPE_DIAGNOSTIC", str(f))
     assert "wimboot pause" not in client.get("/boot", params={"mac": MAC_FIL}).text
+
+
+def test_mode_diagnostic_bootmgr_classique(client, bail, tmp_path, monkeypatch):
+    """`classique` après la MAC : bootx64.efi fourni, wimboot n'utilise plus _EX."""
+    liste = tmp_path / "winpe-diagnostic"
+    monkeypatch.setattr(main, "WINPE_DIAGNOSTIC", str(liste))
+    _pc()
+
+    liste.write_text(f"{MAC_FIL}   # sans option\n")
+    assert "bootx64.efi" not in client.get("/boot", params={"mac": MAC_FIL}).text
+
+    liste.write_text(f"{MAC_FIL} classique  # tour Plenitude\n")
+    r = client.get("/boot", params={"mac": MAC_FIL}).text
+    assert "/static/wimboot pause\n" in r
+    lignes = r.splitlines()
+    i_bootx64 = next(i for i, l in enumerate(lignes) if "bootx64.efi" in l)
+    assert lignes[i_bootx64].endswith("/static/winpe/bootmgfw.efi bootx64.efi")
+    assert i_bootx64 < lignes.index("boot || goto osiris_winpe_echec")
+    assert "CLASSIQUE" in _journal()

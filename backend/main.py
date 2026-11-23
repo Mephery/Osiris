@@ -2264,24 +2264,43 @@ def _winpe_driver_initrd_lines() -> str:
 WINPE_DIAGNOSTIC = os.environ.get("OSIRIS_WINPE_DIAGNOSTIC", "/etc/osiris/winpe-diagnostic")
 
 
-def _en_diagnostic_winpe(clean_mac: str) -> bool:
-    """Ce PC est-il listé (une MAC par ligne, `#` = commentaire) pour un démarrage
-    WinPE commenté ? Relu à chaque /boot : s'active sans redémarrer l'API."""
+def _options_diagnostic_winpe(clean_mac: str) -> Optional[set[str]]:
+    """Options de démarrage commenté pour ce PC, ou None s'il n'est pas listé.
+
+    Fichier : une MAC par ligne, suivie de mots-clés facultatifs, `#` = commentaire.
+    Relu à chaque /boot : s'active sans redémarrer l'API.
+      `classique` : imposer le bootmgfw.efi classique au lieu du bootmgfw_EX.efi
+                    que wimboot préfère quand boot.wim contient les deux."""
     try:
         with open(WINPE_DIAGNOSTIC) as f:
-            return any(l.split("#")[0].strip() and validate_mac(l.split("#")[0].strip()) == clean_mac
-                       for l in f)
-    except (OSError, HTTPException):
-        return False
+            for l in f:
+                mots = l.split("#")[0].split()
+                if not mots:
+                    continue
+                try:
+                    if validate_mac(mots[0]) == clean_mac:
+                        return {m.lower() for m in mots[1:]}
+                except HTTPException:
+                    continue
+    except OSError:
+        pass
+    return None
 
 
-def _winpe_chain_lines(diagnostic: bool = False) -> str:
+def _winpe_chain_lines(diagnostic: bool = False, bootmgr_classique: bool = False) -> str:
     """Lignes iPXE qui chargent WinPE via wimboot (identiques pour toute machine).
 
     `diagnostic` : wimboot s'arrête (`pause`) avant de passer la main à Windows,
     pour qu'on puisse LIRE ses messages — ils défilent sinon en une fraction de
     seconde, et le PC qui refuse WinPE repart sur son disque sans rien laisser voir
-    (incidents du 04/11 et du 17/11/2026)."""
+    (incidents du 04/11 et du 17/11/2026).
+
+    `bootmgr_classique` : un fichier nommé bootx64.efi passe avant tout chez wimboot,
+    qui n'extrait alors plus rien de boot.wim. Sans lui, il lance bootmgfw_EX.efi
+    (dossier Boot/EFI_EX) dès que boot.wim le contient."""
+    if bootmgr_classique:
+        return (_winpe_chain_lines(diagnostic)
+                + f"initrd --name bootx64.efi {OSIRIS_BASE_URL}/static/winpe/bootmgfw.efi bootx64.efi\n")
     if diagnostic:
         return (
             "echo [OSIRIS] MODE DIAGNOSTIC : wimboot va s arreter avant Windows.\n"
@@ -2406,7 +2425,8 @@ def _ipxe_boot_winpe(clean_mac: str) -> str:
     )
 
 
-def _noter_envoi_winpe(clean_mac: str, diagnostic: bool = False) -> None:
+def _noter_envoi_winpe(clean_mac: str, diagnostic: bool = False,
+                       bootmgr_classique: bool = False) -> None:
     """Arme la surveillance : WinPE vient d'être envoyé à ce PC."""
     _bail_a_l_envoi[clean_mac] = _lire_bail(clean_mac) or (0, "")
     with Session(engine) as session:
@@ -2417,7 +2437,9 @@ def _noter_envoi_winpe(clean_mac: str, diagnostic: bool = False) -> None:
         if diagnostic:
             _append_log_line(session, clean_mac, machine.deploy_log_run, _stamp(
                 "MODE DIAGNOSTIC (PC listé dans " + WINPE_DIAGNOSTIC + ") : wimboot "
-                "s'arrête à l'écran avant Windows. Le retirer de la liste une fois fini."))
+                "s'arrête à l'écran avant Windows. Le retirer de la liste une fois fini."
+                + (" Gestionnaire de démarrage CLASSIQUE imposé (bootmgfw.efi, pas _EX)."
+                   if bootmgr_classique else "")))
         _append_log_line(session, clean_mac, machine.deploy_log_run, _stamp(
             "WinPE envoyé au PC. Il doit rappeler OSIRIS d'ici 2 à 5 min — "
             "sinon OSIRIS le signalera ici."))
@@ -2647,9 +2669,11 @@ def get_boot_script(request: Request, background_tasks: BackgroundTasks,
             ).first()
         if win_img:
             script += f"echo [OSIRIS] Chargement WinPE ({win_img.name})...\n"
-            diagnostic = _en_diagnostic_winpe(clean_mac)
-            script += _winpe_chain_lines(diagnostic)
-            _noter_envoi_winpe(clean_mac, diagnostic)
+            options = _options_diagnostic_winpe(clean_mac)
+            diagnostic = options is not None
+            classique = diagnostic and "classique" in options
+            script += _winpe_chain_lines(diagnostic, classique)
+            _noter_envoi_winpe(clean_mac, diagnostic, classique)
             # Retour anticipé : le `boot` générique de fin rendait la main au firmware
             # en cas d'échec, et le PC repartait sur son disque sans rien dire.
             script += _ipxe_boot_winpe(clean_mac)
