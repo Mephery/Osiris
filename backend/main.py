@@ -2270,7 +2270,8 @@ def _options_diagnostic_winpe(clean_mac: str) -> Optional[set[str]]:
     Fichier : une MAC par ligne, suivie de mots-clés facultatifs, `#` = commentaire.
     Relu à chaque /boot : s'active sans redémarrer l'API.
       `classique` : imposer le bootmgfw.efi classique au lieu du bootmgfw_EX.efi
-                    que wimboot préfère quand boot.wim contient les deux."""
+                    que wimboot préfère quand boot.wim contient les deux.
+      `sanboot`   : démarrer l'ISO WinPE par iPXE, sans wimboot du tout."""
     try:
         with open(WINPE_DIAGNOSTIC) as f:
             for l in f:
@@ -2403,12 +2404,13 @@ def _nom_winpe(nom: str) -> bool:
     return n in ("", "*", "minwinpc") or n.startswith("minint")
 
 
-def _ipxe_boot_winpe(clean_mac: str) -> str:
+def _ipxe_boot_winpe(clean_mac: str, commande: str = "boot") -> str:
     """Fin du script iPXE de WinPE : démarrer, et en cas d'échec le DIRE.
 
+    `commande` : la ligne qui démarre (par défaut `boot`, le noyau wimboot chargé).
     Pas d'accents ni d'apostrophes : la console iPXE ne les affiche pas."""
     return (
-        "boot || goto osiris_winpe_echec\n"
+        f"{commande} || goto osiris_winpe_echec\n"
         ":osiris_winpe_echec\n"
         "set osiris_err ${errno}\n"
         "echo\n"
@@ -2426,7 +2428,7 @@ def _ipxe_boot_winpe(clean_mac: str) -> str:
 
 
 def _noter_envoi_winpe(clean_mac: str, diagnostic: bool = False,
-                       bootmgr_classique: bool = False) -> None:
+                       bootmgr_classique: bool = False, sanboot: bool = False) -> None:
     """Arme la surveillance : WinPE vient d'être envoyé à ce PC."""
     _bail_a_l_envoi[clean_mac] = _lire_bail(clean_mac) or (0, "")
     with Session(engine) as session:
@@ -2439,7 +2441,8 @@ def _noter_envoi_winpe(clean_mac: str, diagnostic: bool = False,
                 "MODE DIAGNOSTIC (PC listé dans " + WINPE_DIAGNOSTIC + ") : wimboot "
                 "s'arrête à l'écran avant Windows. Le retirer de la liste une fois fini."
                 + (" Gestionnaire de démarrage CLASSIQUE imposé (bootmgfw.efi, pas _EX)."
-                   if bootmgr_classique else "")))
+                   if bootmgr_classique else "")
+                + (" ISO WinPE démarrée SANS wimboot (sanboot iPXE)." if sanboot else "")))
         _append_log_line(session, clean_mac, machine.deploy_log_run, _stamp(
             "WinPE envoyé au PC. Il doit rappeler OSIRIS d'ici 2 à 5 min — "
             "sinon OSIRIS le signalera ici."))
@@ -2671,6 +2674,18 @@ def get_boot_script(request: Request, background_tasks: BackgroundTasks,
             script += f"echo [OSIRIS] Chargement WinPE ({win_img.name})...\n"
             options = _options_diagnostic_winpe(clean_mac)
             diagnostic = options is not None
+            if diagnostic and "sanboot" in options:
+                # Sans wimboot : l'ISO WinPE (la même que pour les VM) montée par
+                # iPXE comme un disque HTTP. Départage « wimboot face au firmware »
+                # de « ce WinPE ne démarre pas sur ce matériel ». Pas de pilotes
+                # réseau injectés : WinPE peut démarrer sans joindre OSIRIS.
+                script += (
+                    "echo [OSIRIS] MODE DIAGNOSTIC : ISO WinPE sans wimboot (sanboot).\n"
+                    "prompt --timeout 30000 [OSIRIS] Touche pour continuer... || echo [OSIRIS] (suite)\n")
+                _noter_envoi_winpe(clean_mac, True, sanboot=True)
+                script += _ipxe_boot_winpe(
+                    clean_mac, f"sanboot --no-describe {OSIRIS_BASE_URL}/static/{WINPE_ISO_NAME}")
+                return Response(content=script, media_type="text/plain")
             classique = diagnostic and "classique" in options
             script += _winpe_chain_lines(diagnostic, classique)
             _noter_envoi_winpe(clean_mac, diagnostic, classique)

@@ -269,3 +269,17 @@ def test_mode_diagnostic_bootmgr_classique(client, bail, tmp_path, monkeypatch):
     assert lignes[i_bootx64].endswith("/static/winpe/bootmgfw.efi bootx64.efi")
     assert i_bootx64 < lignes.index("boot || goto osiris_winpe_echec")
     assert "CLASSIQUE" in _journal()
+
+
+def test_mode_diagnostic_sanboot_sans_wimboot(client, bail, tmp_path, monkeypatch):
+    """`sanboot` : l'ISO WinPE démarrée par iPXE, sans wimboot, filet d'échec gardé."""
+    liste = tmp_path / "winpe-diagnostic"
+    liste.write_text(f"{MAC_FIL} sanboot\n")
+    monkeypatch.setattr(main, "WINPE_DIAGNOSTIC", str(liste))
+    _pc()
+    r = client.get("/boot", params={"mac": MAC_FIL}).text
+    assert "static/wimboot" not in r and "initrd" not in r
+    assert f"sanboot --no-describe {main.OSIRIS_BASE_URL}/static/{main.WINPE_ISO_NAME} || goto osiris_winpe_echec" in r
+    assert ":osiris_winpe_echec" in r
+    assert "sanboot iPXE" in _journal()
+    assert "WinPE envoyé" in _journal()   # surveillance armée
