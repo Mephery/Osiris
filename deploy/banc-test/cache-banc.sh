@@ -27,6 +27,15 @@ PONT=${PONT:-br-site}
 TAP=${TAP:-tap-site}
 MONTANT_HOTE=169.254.77.1
 MONTANT_CACHE=169.254.77.2
+# 1 = la VM du site sort sur Internet (miroir Ubuntu, paquets, snaps) et recoit
+# un DNS public. Le cache masque la VM derriere sa liaison montante, puis l'hote
+# masque le cache derriere eth0 : l'hote ne voit jamais le /24 du site, qui
+# reprend l'adresse d'OSIRIS. Trois regles iptables etiquetees, retirees au
+# demontage. 0 = comportement d'origine, aucune sortie.
+INTERNET=${INTERNET:-0}
+DNS_PUBLIC=${DNS_PUBLIC:-1.1.1.1}
+SORTIE=${SORTIE:-eth0}
+ETIQUETTE=banc-cache
 
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RACINE="$(cd "$ICI/../.." && pwd)"
@@ -56,6 +65,7 @@ log-dhcp
 dhcp-authoritative
 dhcp-range=$prefixe.150,$prefixe.199,255.255.255.0,1h
 dhcp-option=3,$ip
+$( [ "$INTERNET" = 1 ] && echo "dhcp-option=6,$DNS_PUBLIC" )
 dhcp-match=set:is_ipxe,175
 dhcp-boot=tag:!is_ipxe,${FICHIER_AMORCE:-ipxe.efi},$ip
 dhcp-boot=tag:is_ipxe,http://$ip/boot
@@ -148,6 +158,8 @@ monter() {
     sudo ip link set "$TAP" master "$PONT"
     sudo ip link set "$TAP" up
 
+    if [ "$INTERNET" = 1 ]; then ouvrir_internet; fi
+
     ecrire_confs "$ip"
     ns /usr/sbin/dnsmasq --conf-file="$TRAVAIL/dnsmasq.conf"
     ns /usr/sbin/smbd -D -s "$TRAVAIL/smb.conf"
@@ -157,6 +169,30 @@ monter() {
     echo "VM : PONT=$PONT TAP=$TAP PXE=1 ./banc-test.sh demarrer"
 }
 
+# Regles hote : uniquement ce qui vient du cache, et son retour.
+regles_hote() {
+    local action=$1 c=(-m comment --comment "$ETIQUETTE")
+    sudo iptables "$action" FORWARD -i veth-cache -o "$SORTIE" "${c[@]}" -j ACCEPT
+    sudo iptables "$action" FORWARD -i "$SORTIE" -o veth-cache -m conntrack --ctstate RELATED,ESTABLISHED "${c[@]}" -j ACCEPT
+    sudo iptables -t nat "$action" POSTROUTING -s "$MONTANT_CACHE/32" -o "$SORTIE" "${c[@]}" -j MASQUERADE
+}
+
+ouvrir_internet() {
+    ns sysctl -qw net.ipv4.ip_forward=1
+    ns ip route add default via "$MONTANT_HOTE"
+    ns iptables -t nat -A POSTROUTING -o veth-up -j MASQUERADE
+    regles_hote -I
+    echo "internet : ouvert (DNS $DNS_PUBLIC, sortie $SORTIE)"
+}
+
+fermer_internet() {
+    # Chaque regle est retiree tant qu'elle existe : un demontage relance ne
+    # doit pas echouer, ni laisser une regle en double.
+    while sudo iptables -S FORWARD | grep -q -- "--comment $ETIQUETTE"; do
+        regles_hote -D 2>/dev/null || break
+    done
+}
+
 etat() {
     ip netns list | grep -qw "$NS" || { echo "cache : non monte"; return 0; }
     echo "cache   : monte (espace $NS)"
@@ -164,6 +200,7 @@ etat() {
         local f="$TRAVAIL/$p.pid"; [ "$p" = smbd ] && f="$TRAVAIL/samba/pid/smbd.pid"
         if sudo test -f "$f" && sudo kill -0 "$(sudo cat "$f")" 2>/dev/null; then echo "  $p : actif"; else echo "  $p : ARRETE"; fi
     done
+    if sudo iptables -S FORWARD | grep -q -- "--comment $ETIQUETTE"; then echo "internet: ouvert"; else echo "internet: ferme"; fi
     echo "baux    : $(sudo cat "$TRAVAIL/dnsmasq.leases" 2>/dev/null | wc -l)"
     if sudo test -f "$TRAVAIL/acces.log"; then
         echo "servi sur place : $(sudo grep -c '/static/' "$TRAVAIL/acces.log" || true) requetes"
@@ -176,6 +213,7 @@ demonter() {
     for f in "$TRAVAIL/dnsmasq.pid" "$TRAVAIL/caddy.pid" "$TRAVAIL/samba/pid/smbd.pid"; do
         sudo test -f "$f" && sudo kill "$(sudo cat "$f")" 2>/dev/null || true
     done
+    fermer_internet
     sudo ip link del "$TAP" 2>/dev/null || true
     sudo ip link del veth-site-h 2>/dev/null || true
     sudo ip link del "$PONT" 2>/dev/null || true

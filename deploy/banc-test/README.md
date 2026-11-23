@@ -103,6 +103,20 @@ lien montant n'a porté que quelques dizaines de kilo-octets pour tout un
 déploiement. Il ne dit rien de la jonction au domaine à travers le cache, ni du
 firstboot.
 
+## Internet pour la VM du site
+
+Un déploiement Linux télécharge pendant l'installation (bureau, mises à jour,
+logiciels du premier démarrage). `INTERNET=1 cache-banc.sh monter` donne à la VM
+une sortie et un DNS public : le cache la masque derrière sa liaison montante,
+puis l'hôte masque le cache derrière sa carte de sortie (`SORTIE`, `eth0` par
+défaut). L'hôte ne voit donc jamais le réseau du site, qui reprend l'adresse
+d'OSIRIS. Trois règles iptables étiquetées `banc-cache`, retirées au démontage ;
+`etat` dit si la sortie est ouverte. Sans l'option, rien ne sort, comme avant.
+
+Poste Ubuntu de banc (23/11/2026) : `MAC=52:54:00:51:26:04 SERIE=VMTESTUBU2604
+TRAVAIL=$PWD/vm-ubuntu MEMOIRE=8192 PXE=1 DISQUE_JETABLE=1`, fiche sur un profil
+poste **sans jonction au domaine**. 8 Go : l'ISO est chargée en RAM.
+
 ## Secure Boot
 
 `SECURE_BOOT=1` démarre la VM avec Secure Boot actif et les clés de Microsoft,
