@@ -2336,7 +2336,7 @@ def _winpe_chain_lines(diagnostic: bool = False, bootmgr_classique: bool = False
     (dossier Boot/EFI_EX) dès que boot.wim le contient."""
     if pasapas:
         return (_winpe_chain_lines(diagnostic, bootmgr_classique)
-                + "".join(f"initrd --name {n} {OSIRIS_BASE_URL}/winpe-diagnostic/{n} {n}\n"
+                + "".join(f"initrd --name {n} {OSIRIS_BASE_URL}/boot-diagnostic/{n} {n}\n"
                           for n in _WINPE_PASAPAS))
     if bootmgr_classique:
         return (_winpe_chain_lines(diagnostic)
@@ -4770,7 +4770,7 @@ def _winpe_a_rappele(mac: str, background_tasks: BackgroundTasks) -> None:
         session.commit()
 
 
-@app.get("/winpe-diagnostic/{nom}")
+@app.get("/boot-diagnostic/{nom}")  # sous /boot* : servi en HTTP par le proxy, comme /boot
 def get_winpe_diagnostic(nom: str):
     """Fichiers du démarrage WinPE pas à pas, en fins de ligne Windows."""
     if nom not in _WINPE_PASAPAS:
