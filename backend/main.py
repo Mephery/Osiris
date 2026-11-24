@@ -2378,6 +2378,10 @@ def _winpe_chain_lines(diagnostic: bool = False, bootmgr_classique: bool = False
         f"initrd --name BCD {OSIRIS_BASE_URL}/static/winpe/boot/bcd BCD\n"
         f"initrd --name boot.sdi {OSIRIS_BASE_URL}/static/winpe/boot/boot.sdi boot.sdi\n"
         f"initrd --name boot.wim {OSIRIS_BASE_URL}/static/winpe/sources/boot.wim boot.wim\n"
+        # startnet.cmd du jour, injecté par-dessus celui figé dans boot.wim : le
+        # corriger ne demande plus de reconstruire boot.wim (voir get_winpe_startnet).
+        f"initrd --name startnet.cmd {OSIRIS_BASE_URL}/boot-winpe/startnet.cmd startnet.cmd"
+        " || goto osiris_winpe_echec\n"
         + _winpe_driver_initrd_lines()
     )
 
@@ -2550,21 +2554,24 @@ async def _diffuser_echec(mac: str, lignes: list[str], webhook_url: str,
 
 
 _MOTIF_DESKTOP = (
-    "ECHEC : WinPE n'a pas démarré. Le PC est reparti sur le Windows de son disque "
-    "(il a redemandé une adresse réseau sous le nom « {nom} », alors que WinPE "
-    "s'annonce MININT-… ou MINWINPC).")
+    "ECHEC : le PC est reparti sur le Windows de son disque (il a redemandé une "
+    "adresse réseau sous le nom « {nom} », alors que WinPE s'annonce MININT-… ou "
+    "MINWINPC). WinPE n'a pas démarré, ou s'est arrêté avant d'avoir du réseau.")
 _MOTIF_DELAI = (
     "ECHEC : WinPE n'a pas rappelé OSIRIS {minutes} min après son envoi.")
 _A_FAIRE_DEMARRAGE = (
-    "À faire : inutile de relancer en boucle, le même PC échouera de la même façon. "
-    "Noter le modèle exact du PC (étiquette ou BIOS) et prévenir l'équipe OSIRIS. "
+    "À faire : relancer UNE fois le PC en PXE et regarder son écran (WinPE affiche "
+    "désormais ses erreurs au lieu de redémarrer). « AUCUN RESEAU » sans carte listée "
+    "= la carte réseau de ce modèle n'a pas de pilote dans WinPE. Sinon, noter le "
+    "modèle exact du PC (étiquette ou BIOS) et prévenir l'équipe OSIRIS. "
     "Rien n'a été modifié sur le disque.")
 _A_FAIRE_DELAI = (
     "À faire : regarder l'écran du PC. "
     "(a) Il est sur son ancien Windows → WinPE ne démarre pas sur ce modèle : noter "
     "le modèle et prévenir l'équipe OSIRIS. "
-    "(b) Message « OSIRIS injoignable » puis une liste de cartes réseau → pas de réseau "
-    "dans WinPE : vérifier câble et prise ; si AUCUNE carte n'apparaît, son pilote manque. "
+    "(b) Écran « ECHEC : AUCUN RESEAU » → si AUCUNE carte n'est listée, la carte "
+    "réseau de ce modèle n'a pas de pilote dans WinPE (noter le modèle, prévenir "
+    "l'équipe OSIRIS) ; sinon vérifier câble, prise et VLAN. "
     "(c) Écran noir ou figé → WinPE bloqué au démarrage : photo de l'écran. "
     "Si le PC finit par rappeler, le déploiement reprend tout seul.")
 
@@ -4787,6 +4794,16 @@ def _winpe_a_rappele(mac: str, background_tasks: BackgroundTasks) -> None:
             background_tasks.add_task(manager.broadcast, {"mac": mac, "log_line": l})
         session.add(machine)
         session.commit()
+
+
+@app.get("/boot-winpe/startnet.cmd")  # sous /boot* : servi en HTTP par le proxy
+def get_winpe_startnet():
+    """startnet.cmd que wimboot dépose dans X:\\Windows\\System32, à la place de
+    celui gravé dans boot.wim lors de l'import de l'ISO (juillet 2026 pour l'image
+    en service). Même générateur que l'import (worker._make_startnet_cmd) : une
+    correction du script vaut dès le démarrage PXE suivant."""
+    from worker import _make_startnet_cmd
+    return Response(content=_make_startnet_cmd(), media_type="text/plain")
 
 
 @app.get("/boot-diagnostic/{nom}")  # sous /boot* : servi en HTTP par le proxy, comme /boot

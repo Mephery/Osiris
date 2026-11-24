@@ -137,7 +137,7 @@ def test_sans_rappel_au_dela_du_delai_echec_avec_consignes(client, bail):
     assert _machine().status == "failed"
     j = _journal()
     assert "n'a pas rappelé OSIRIS 10 min" in j
-    assert "OSIRIS injoignable" in j      # la consigne couvre aussi le pilote réseau manquant
+    assert "AUCUN RESEAU" in j and "pas de pilote dans WinPE" in j   # pilote réseau manquant couvert
 
 
 def test_rappel_de_winpe_desarme_la_surveillance(client, bail):
@@ -301,3 +301,27 @@ def test_mode_diagnostic_pas_a_pas(client, bail, tmp_path, monkeypatch):
     assert "AutoReboot /t REG_DWORD /d 0" in client.get("/boot-diagnostic/osiris-diag.cmd").text
     assert client.get("/boot-diagnostic/startnet.cmd").status_code == 404
     assert "PAS À PAS" in _journal()
+
+
+# ── startnet.cmd servi à chaque démarrage, et qui ne redémarre plus en silence ─
+
+def test_startnet_injecte_par_wimboot_a_chaque_demarrage(client, bail):
+    _pc()
+    lignes = client.get("/boot", params={"mac": MAC_FIL}).text.splitlines()
+    i = next(i for i, l in enumerate(lignes) if "/boot-winpe/startnet.cmd startnet.cmd" in l)
+    assert lignes[i].endswith("|| goto osiris_winpe_echec")   # échec de téléchargement dit
+    assert i < lignes.index("boot || goto osiris_winpe_echec")
+    corps = client.get("/boot-winpe/startnet.cmd")
+    assert corps.status_code == 200 and "\r\n" in corps.text
+    assert "/winpe-auto" in corps.text
+
+
+def test_startnet_sans_reseau_ne_sort_jamais():
+    """Sortir de startnet.cmd (lancé en `cmd /c`) redémarre le PC sur son disque :
+    aucune erreur ne doit plus mener à `exit`."""
+    from worker import _make_startnet_cmd
+    s = _make_startnet_cmd().decode()
+    assert "exit /b" not in s and "\r\nexit" not in s
+    for bloc in ("bloque_reseau", "bloque_smb", "bloque_generique"):
+        assert f":{bloc}\r\n" in s and f"goto {bloc}\r\n" in s
+    assert "AUCUN RESEAU" in s and "pilote dans WinPE" in s
