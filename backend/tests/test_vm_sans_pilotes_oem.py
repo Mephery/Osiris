@@ -67,6 +67,6 @@ def test_le_script_dune_machine_physique_sans_pack_le_dit(client, test_machine):
 
     script = client.get(f"/winpe-script/{MAC}").text
 
-    assert "/Add-Driver" not in script
+    assert "Add-Driver /Driver:Z:" not in script and "/Driver:\"Z:" not in script  # rien du partage
     assert "Aucun+pack+de+pilotes+pret" in script
     assert "pilotes+constructeurs+inutiles" not in script

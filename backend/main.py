@@ -2261,6 +2261,25 @@ def _winpe_driver_initrd_lines() -> str:
     return "".join(lines)
 
 
+def _winpe_net_infs() -> list[str]:
+    """Noms des .inf réseau livrés à WinPE (ceux que wimboot dépose à plat dans
+    X:\\Windows\\System32), pour les recopier dans le Windows installé.
+
+    Sans eux, un PC dont la carte n'est connue que de ces pilotes démarre son
+    Windows SANS réseau : ni domaine, ni premier démarrage, ni rapport à OSIRIS
+    (HP G1i, carte Intel I226, 23/11/2026). Même règle de collision de noms que
+    `_winpe_driver_initrd_lines` : le premier gagne. Noms limités à un jeu de
+    caractères sans effet pour cmd (ils sont écrits dans le script WinPE)."""
+    if not os.path.isdir(WINPE_DRIVERS_PATH):
+        return []
+    vus: dict[str, str] = {}
+    for root, _, files in os.walk(WINPE_DRIVERS_PATH):
+        for name in sorted(files):
+            vus.setdefault(name.lower(), name)
+    return sorted(n for n in vus.values()
+                  if n.lower().endswith(".inf") and re.fullmatch(r"[A-Za-z0-9._-]+", n))
+
+
 WINPE_DIAGNOSTIC = os.environ.get("OSIRIS_WINPE_DIAGNOSTIC", "/etc/osiris/winpe-diagnostic")
 
 
@@ -4927,6 +4946,7 @@ def _build_winpe_script(mac: str) -> Response:
         driver_dir=driver_dir,
         net_driver_infs=net_driver_infs,
         est_vm=bool(machine.proxmox_vm_id),
+        winpe_net_infs=[] if machine.proxmox_vm_id else _winpe_net_infs(),
         # Ecrit tel quel dans un .cmd (echo + URL curl) : un nom de modele peut porter
         # « & » (qui enchaine une AUTRE commande), « % » ou des parentheses. On ne
         # laisse passer qu'un jeu de caracteres sans effet pour cmd.

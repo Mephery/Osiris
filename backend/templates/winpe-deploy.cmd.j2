@@ -165,6 +165,23 @@ if exist Z:\{{ driver_dir }}\ (
 )
 {% endif %}
 
+{% if winpe_net_infs %}
+REM ── Pilotes reseau de WinPE recopies dans le Windows installe ─────────────
+REM WinPE a eu du reseau grace a ces pilotes (deposes par wimboot dans
+REM X:\Windows\System32). Sans eux, un PC dont la carte n'est pas connue de
+REM Windows demarre SANS reseau : ni domaine, ni premier demarrage, ni rapport
+REM (HP G1i, carte Intel I226, 23/11/2026). Pilotes reseau seuls : sans effet
+REM sur sysprep, et ignores par Windows si la carte n'est pas presente.
+echo [OSIRIS] Pilotes reseau de WinPE copies dans Windows...
+X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Pilotes+reseau+de+WinPE+copies+dans+Windows+({{ winpe_net_infs | join(',') }})" >nul 2>&1
+{% for inf in winpe_net_infs %}
+if exist "X:\Windows\System32\{{ inf }}" (
+    dism /Image:W:\ /Add-Driver /Driver:"X:\Windows\System32\{{ inf }}" /ForceUnsigned >nul 2>&1
+    if errorlevel 1 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=Avertissement+:+pilote+reseau+{{ inf }}+non+copie+dans+Windows" >nul 2>&1
+)
+{% endfor %}
+{% endif %}
+
 REM ── Configuration du demarrage UEFI ──────────────────────────────────────
 echo [OSIRIS] Configuration du boot UEFI...
 X:\curl.exe -sf -X POST "http://%OSIRIS_IP%/machines/%MAC%/log?msg=bcdboot+UEFI+en+cours..." >nul 2>&1

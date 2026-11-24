@@ -64,7 +64,7 @@ def _script(client) -> str:
 def test_sans_pack_le_script_n_injecte_rien_et_dit_pourquoi(client, pret):
     _sysid("Modele Jamais Vu 9000")
     script = _script(client)
-    assert "/Add-Driver" not in script
+    assert "Add-Driver /Driver:Z:" not in script and "/Driver:\"Z:" not in script  # rien du partage
     assert "aucun+pack+au+catalogue+pour+Modele+Jamais+Vu+9000" in script
 
 
@@ -76,7 +76,7 @@ def test_un_pack_au_catalogue_est_telecharge_pour_la_suite(client, pret, monkeyp
                         lambda p: lances.append(p.id) or True)
     script = _script(client)
     assert lances == [pack_id]
-    assert "/Add-Driver" not in script, "ce poste-ci part sans : le pack n'est pas là"
+    assert "Add-Driver /Driver:Z:" not in script and "/Driver:\"Z:" not in script, "ce poste-ci part sans : le pack n'est pas là"
     assert "en+cours+de+telechargement+pour+le+prochain+deploiement" in script
 
 

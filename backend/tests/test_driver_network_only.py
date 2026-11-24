@@ -119,3 +119,40 @@ def test_rendu_vm_n_injecte_rien(pack):
     out = _render("", None, est_vm=True)
     assert "injection de drivers ignoree" in out
     assert "/Add-Driver" not in out
+
+
+# ── Pilotes réseau de WinPE recopiés dans Windows (HP G1i, 23/11/2026) ─────────
+
+def test_winpe_net_infs_liste_les_inf_livres_a_winpe(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "WINPE_DRIVERS_PATH", str(tmp_path))
+    for rel in ("net/A/e1d.inf", "net/A/e1d.sys", "net/B/e2f.inf", "net/B/e2f.cat",
+                "net/C/e1d.inf",            # homonyme : le premier gagne, pas de doublon
+                "net/D/mal&nom.inf"):       # caractère actif pour cmd : écarté
+        _inf(tmp_path, rel, "x")
+    assert main._winpe_net_infs() == ["e1d.inf", "e2f.inf"]
+
+
+def test_winpe_net_infs_sans_dossier(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "WINPE_DRIVERS_PATH", str(tmp_path / "absent"))
+    assert main._winpe_net_infs() == []
+
+
+def test_rendu_recopie_les_pilotes_reseau_de_winpe_meme_sans_pack(pack):
+    """Sans pack (cas de la tour ProDesk G1i), Windows reçoit quand même les
+    pilotes réseau grâce auxquels WinPE a eu du réseau, AVANT bcdboot."""
+    out = main.jinja_env.get_template("winpe-deploy.cmd.j2").render(
+        machine=SimpleNamespace(hostname="TESTPC", client="Acme"),
+        profile={"tv_suffix": "", "win_image": ""}, mac="aabbccddeeff",
+        osiris_url="http://osiris", osiris_ip="10.0.0.1", win_index=6, locale="fr-FR",
+        driver_dir="", net_driver_infs=None, est_vm=False, sans_pack="aucun pack",
+        winpe_net_infs=["e1d.inf", "e2f.inf"])
+    ligne = '/Add-Driver /Driver:"X:\\Windows\\System32\\e2f.inf" /ForceUnsigned'
+    assert ligne in out
+    assert '/Driver:"X:\\Windows\\System32\\e1d.inf"' in out
+    assert out.index(ligne) < out.index("bcdboot W:\\Windows")
+    assert "pilote+reseau+e2f.inf+non+copie" in out      # échec signalé au journal
+
+
+def test_rendu_sans_pilotes_winpe_ne_change_rien(pack):
+    """VM (ou aucun pilote WinPE) : la liste est vide, l'étape n'existe pas."""
+    assert "Pilotes reseau de WinPE" not in _render("", None, est_vm=True)
