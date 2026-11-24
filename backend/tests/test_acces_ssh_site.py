@@ -126,7 +126,10 @@ def test_sshd_applique_root_par_cle_et_mot_de_passe_pour_humans_seul(tmp_path):
                                 capture_output=True, text=True, check=True).stdout
         return {l.split()[0]: l.split()[1] for l in sortie.splitlines() if " " in l}
 
-    assert effectif("root")["permitrootlogin"] == "without-password"
+    # Deux noms pour le même réglage, selon la version d'OpenSSH qui le relit :
+    # Debian 12 (9.2) affiche l'ancien alias `without-password`, les versions
+    # plus récentes gardent `prohibit-password`. Seul compte : pas `yes`.
+    assert effectif("root")["permitrootlogin"] in ("prohibit-password", "without-password")
     assert effectif("root")["passwordauthentication"] == "no"
     assert effectif("humans")["passwordauthentication"] == "yes"
     assert effectif("jdupont")["passwordauthentication"] == "no"
